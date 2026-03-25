@@ -53,8 +53,20 @@ endif()
 
 if(EMSCRIPTEN)
   option(MUJOCO_BUILD_TESTS_WASM "Build tests for WASM bindings" ON)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -O3 -pthread -fexceptions")
+  option(MUJOCO_BUILD_PHYSICS_WASM "Build the minimal physics-only WASM module" ON)
+  option(MUJOCO_WASM_THREADS "Build the full WASM bindings with multithreading support" OFF)
+  option(MUJOCO_PHYSICS_ENABLE_THREADS "Enable C++ thread support in the physics-only WASM core" OFF)
+  option(MUJOCO_PHYSICS_ENABLE_EXCEPTIONS "Enable C++ exceptions in the physics-only WASM core" OFF)
+  option(MUJOCO_PHYSICS_ENABLE_PLUGINS "Enable plugin support in the physics-only WASM core" OFF)
+  set(MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS "")
+  if(MUJOCO_WASM_THREADS OR MUJOCO_PHYSICS_ENABLE_THREADS)
+    set(MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS -pthread)
+  endif()
+  set(MUJOCO_EMSCRIPTEN_LTO_OPTIONS "")
+  if(MUJOCO_BUILD_PHYSICS_WASM)
+    set(MUJOCO_EMSCRIPTEN_LTO_OPTIONS -flto)
+  endif()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -O3")
 endif()
 
 if(APPLE AND (MUJOCO_BUILD_EXAMPLES OR MUJOCO_BUILD_SIMULATE))
@@ -97,12 +109,86 @@ else()
   add_library(mujoco STATIC ${MUJOCO_RESOURCE_FILES})
 endif()
 
-target_include_directories(
-  mujoco
-  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/>
-  PRIVATE src
-)
+if(EMSCRIPTEN AND MUJOCO_BUILD_PHYSICS_WASM)
+  add_library(mujoco_physics_core STATIC)
+endif()
+
+set(MUJOCO_CORE_TARGETS mujoco)
+if(TARGET mujoco_physics_core)
+  list(APPEND MUJOCO_CORE_TARGETS mujoco_physics_core)
+endif()
+
+function(mujoco_configure_core_target target_name)
+  target_include_directories(
+    ${target_name}
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/>
+    PRIVATE src
+  )
+
+  target_compile_definitions(
+    ${target_name}
+    PRIVATE _GNU_SOURCE CCD_STATIC_DEFINE -DMC_IMPLEM_ENABLE
+  )
+
+  if("${target_name}" STREQUAL "mujoco")
+    target_compile_definitions(${target_name} PRIVATE MUJOCO_DLL_EXPORTS)
+    if(EMSCRIPTEN)
+      target_compile_options(${target_name} PRIVATE -fexceptions)
+      target_link_options(${target_name} PRIVATE -fexceptions)
+      if(MUJOCO_WASM_THREADS)
+        target_compile_options(${target_name} PRIVATE -pthread)
+        target_link_options(${target_name} PRIVATE -pthread)
+      endif()
+    endif()
+  elseif("${target_name}" STREQUAL "mujoco_physics_core")
+    target_compile_definitions(${target_name} PRIVATE MUJOCO_DISABLE_FWDINV_COMPARE)
+    if(NOT MUJOCO_PHYSICS_ENABLE_THREADS)
+      target_compile_definitions(${target_name} PRIVATE MUJOCO_DISABLE_THREADING)
+    else()
+      target_compile_options(${target_name} PRIVATE -pthread)
+      target_link_options(${target_name} PRIVATE -pthread)
+    endif()
+    if(NOT MUJOCO_PHYSICS_ENABLE_PLUGINS)
+      target_compile_definitions(${target_name} PRIVATE MUJOCO_DISABLE_PLUGINS)
+    endif()
+    if(MUJOCO_PHYSICS_ENABLE_EXCEPTIONS)
+      target_compile_options(${target_name} PRIVATE -fexceptions)
+      target_link_options(${target_name} PRIVATE -fexceptions)
+    else()
+      target_compile_options(${target_name} PRIVATE -fno-exceptions)
+      target_link_options(${target_name} PRIVATE -fno-exceptions)
+    endif()
+  endif()
+
+  if(MUJOCO_ENABLE_AVX_INTRINSICS)
+    target_compile_definitions(${target_name} PUBLIC mjUSEPLATFORMSIMD)
+  endif()
+
+  target_compile_options(
+    ${target_name}
+    PRIVATE ${AVX_COMPILE_OPTIONS}
+            ${MUJOCO_MACOS_COMPILE_OPTIONS}
+            ${EXTRA_COMPILE_OPTIONS}
+            ${MUJOCO_CXX_FLAGS}
+  )
+
+  if("${target_name}" STREQUAL "mujoco_physics_core")
+    target_compile_options(${target_name} PRIVATE -Oz -flto)
+    target_link_options(${target_name} PRIVATE -Oz -flto)
+  endif()
+
+  target_link_options(
+    ${target_name}
+    PRIVATE
+    ${MUJOCO_MACOS_LINK_OPTIONS}
+    ${EXTRA_LINK_OPTIONS}
+  )
+endfunction()
+
+foreach(_target IN LISTS MUJOCO_CORE_TARGETS)
+  mujoco_configure_core_target(${_target})
+endforeach()
 
 if(NOT EMSCRIPTEN)
   add_subdirectory(plugin/elasticity)
@@ -133,25 +219,6 @@ if(EMSCRIPTEN)
 endif()
 
 
-target_compile_definitions(mujoco PRIVATE _GNU_SOURCE CCD_STATIC_DEFINE MUJOCO_DLL_EXPORTS -DMC_IMPLEM_ENABLE)
-if(MUJOCO_ENABLE_AVX_INTRINSICS)
-  target_compile_definitions(mujoco PUBLIC mjUSEPLATFORMSIMD)
-endif()
-
-target_compile_options(
-  mujoco
-  PRIVATE ${AVX_COMPILE_OPTIONS}
-          ${MUJOCO_MACOS_COMPILE_OPTIONS}
-          ${EXTRA_COMPILE_OPTIONS}
-          ${MUJOCO_CXX_FLAGS}
-)
-target_link_options(
-  mujoco
-  PRIVATE
-  ${MUJOCO_MACOS_LINK_OPTIONS}
-  ${EXTRA_LINK_OPTIONS}
-)
-
 target_link_libraries(
   mujoco
   PRIVATE ccd
@@ -160,6 +227,14 @@ target_link_libraries(
           tinyobjloader
           tinyxml2
 )
+
+if(TARGET mujoco_physics_core)
+  target_link_libraries(
+    mujoco_physics_core
+    PRIVATE ccd
+            qhullstatic_r
+  )
+endif()
 
 set_target_properties(
   mujoco PROPERTIES VERSION "${mujoco_VERSION}" PUBLIC_HEADER "${MUJOCO_HEADERS}"

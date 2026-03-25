@@ -96,4 +96,24 @@ set(MUJOCO_ENGINE_SRCS
     engine_vis_visualize.h
 )
 
+set(MUJOCO_PHYSICS_ENGINE_SRCS ${MUJOCO_ENGINE_SRCS})
+list(REMOVE_ITEM MUJOCO_PHYSICS_ENGINE_SRCS
+    engine_derivative_fd.c
+    engine_derivative_fd.h
+    engine_inverse.c
+    engine_inverse.h
+    engine_print.c
+    engine_print.h
+    engine_vis_init.c
+    engine_vis_init.h
+    engine_vis_interact.c
+    engine_vis_interact.h
+    engine_vis_visualize.c
+    engine_vis_visualize.h
+)
+
 target_sources(mujoco PRIVATE ${MUJOCO_ENGINE_SRCS})
+
+if(TARGET mujoco_physics_core)
+  target_sources(mujoco_physics_core PRIVATE ${MUJOCO_PHYSICS_ENGINE_SRCS})
+endif()

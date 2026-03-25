@@ -995,6 +995,14 @@ static void mj_setPtrData(const mjModel* m, mjData* d) {
 
 // initialize plugins, copy into d (required for deletion)
 void mj_initPlugin(const mjModel* m, mjData* d) {
+#ifdef MUJOCO_DISABLE_PLUGINS
+  if (m->nplugin) {
+    mjERROR("Plugin support disabled in this build");
+  }
+  d->nplugin = 0;
+  return;
+#endif
+
   d->nplugin = m->nplugin;
   for (int i = 0; i < m->nplugin; ++i) {
     d->plugin[i] = m->plugin[i];
@@ -1721,6 +1729,12 @@ static int numObjects(const mjModel* m, mjtObj objtype) {
 
 // validate reference fields in a model; return null if valid, error message otherwise
 const char* mj_validateReferences(const mjModel* m) {
+#ifdef MUJOCO_DISABLE_PLUGINS
+  if (m->nplugin) {
+    return "Invalid model: plugin support disabled in this build.";
+  }
+#endif
+
   // for each field in mjModel that refers to another field, call X with:
   //   adrarray: array containing the references
   //   nadrs:    number of elements in refarray

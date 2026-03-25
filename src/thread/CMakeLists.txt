@@ -20,4 +20,6 @@ set(MUJOCO_THREAD_SRCS
     thread_task.h
 )
 
-target_sources(mujoco PRIVATE ${MUJOCO_THREAD_SRCS})
+foreach(_target IN LISTS MUJOCO_CORE_TARGETS)
+  target_sources(${_target} PRIVATE ${MUJOCO_THREAD_SRCS})
+endforeach()

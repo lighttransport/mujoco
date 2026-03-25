@@ -16,6 +16,9 @@
 
 #include <stdint.h>
 
+#include "engine/engine_util_errmem.h"
+
+#ifndef MUJOCO_DISABLE_THREADING
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -29,11 +32,13 @@
 #include <mujoco/mjthread.h>
 #include <mujoco/mujoco.h>
 #include "engine/engine_crossplatform.h"
-#include "engine/engine_util_errmem.h"
 #include "thread/thread_queue.h"
 #include "thread/thread_task.h"
+#endif
 
 namespace mujoco {
+
+#ifndef MUJOCO_DISABLE_THREADING
 namespace {
 constexpr size_t kThreadPoolQueueSize = 640;
 
@@ -309,4 +314,43 @@ size_t mju_getDestructiveInterferenceSize(void) {
   return 128;
 }
 
+#else
+
+mjThreadPool* mju_threadPoolCreate(size_t number_of_threads) {
+  mju_error("Thread support disabled in this build; requested %zu threads", number_of_threads);
+  return nullptr;
+}
+
+mjStackInfo* mju_getStackInfoForThread(mjData* d, size_t thread_id) {
+  mju_error("Thread support disabled in this build; thread_id=%zu", thread_id);
+  return nullptr;
+}
+
+void mju_bindThreadPool(mjData* d, void* thread_pool) {
+  mju_error("Thread support disabled in this build");
+}
+
+size_t mju_threadPoolNumberOfThreads(mjThreadPool* thread_pool) {
+  return 0;
+}
+
+size_t mju_threadPoolCurrentWorkerId(mjThreadPool* thread_pool) {
+  return 0;
+}
+
+void mju_threadPoolEnqueue(mjThreadPool* thread_pool, mjTask* task) {
+  mju_error("Thread support disabled in this build");
+}
+
+void mju_threadPoolDestroy(mjThreadPool* thread_pool) {}
+
+void mju_threadPoolLockAllocMutex(mjThreadPool* thread_pool) {}
+
+void mju_threadPoolUnlockAllocMutex(mjThreadPool* thread_pool) {}
+
+size_t mju_getDestructiveInterferenceSize(void) {
+  return 128;
+}
+
+#endif
 }  // namespace mujoco

@@ -194,9 +194,8 @@ class UnpackedParam {
       std::size_t count = p["length"].as<std::size_t>();
       return UnpackedParam<T>(data, count, repr, func);
     } else if (!p["GetPointer"].isUndefined()) {  // C++ WasmBuffer
-      WasmBuffer<T>& buffer = p.as<WasmBuffer<T>&>();
-      T* data = reinterpret_cast<T*>(buffer.GetPointer());
-      std::size_t count = buffer.GetElementCount();
+      T* data = reinterpret_cast<T*>(p.call<uintptr_t>("GetPointer"));
+      std::size_t count = p.call<int>("GetElementCount");
       return UnpackedParam<T>(data, count, repr, func);
     }
 

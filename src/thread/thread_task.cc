@@ -14,7 +14,9 @@
 
 #include "thread/thread_task.h"
 
+#ifndef MUJOCO_DISABLE_THREADING
 #include <thread>
+#endif
 
 #include <mujoco/mjthread.h>
 
@@ -27,7 +29,9 @@ void mju_defaultTask(mjTask* task) {
 
 void mju_taskJoin(mjTask* task) {
   while (GetAtomicTaskStatus(task) != mjTASK_COMPLETED) {
+#ifndef MUJOCO_DISABLE_THREADING
     std::this_thread::yield();
+#endif
   }
 }
 }  // namespace mujoco

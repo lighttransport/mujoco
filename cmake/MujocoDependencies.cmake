@@ -98,7 +98,8 @@ if(NOT TARGET lodepng)
     set(LODEPNG_SRCS ${lodepng_SOURCE_DIR}/lodepng.cpp)
     set(LODEPNG_HEADERS ${lodepng_SOURCE_DIR}/lodepng.h)
     add_library(lodepng STATIC ${LODEPNG_HEADERS} ${LODEPNG_SRCS})
-    target_compile_options(lodepng PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS})
+    target_compile_options(lodepng PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS}
+                                           ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS})
     target_link_options(lodepng PRIVATE ${MUJOCO_MACOS_LINK_OPTIONS})
     if(NOT EMSCRIPTEN)
       target_include_directories(lodepng PUBLIC ${lodepng_SOURCE_DIR})
@@ -149,7 +150,9 @@ findorfetch(
 target_include_directories(
   qhullstatic_r INTERFACE $<BUILD_INTERFACE:${qhull_SOURCE_DIR}/src/libqhull_r>
 )
-target_compile_options(qhullstatic_r PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS})
+target_compile_options(qhullstatic_r PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS}
+                                             ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS}
+                                             ${MUJOCO_EMSCRIPTEN_LTO_OPTIONS})
 target_link_options(qhullstatic_r PRIVATE ${MUJOCO_MACOS_LINK_OPTIONS})
 
 set(tinyxml2_BUILD_TESTING OFF)
@@ -168,7 +171,8 @@ findorfetch(
   tinyxml2
   EXCLUDE_FROM_ALL
 )
-target_compile_options(tinyxml2 PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS})
+target_compile_options(tinyxml2 PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS}
+                                        ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS})
 target_link_options(tinyxml2 PRIVATE ${MUJOCO_MACOS_LINK_OPTIONS})
 
 # update cmake_minimum_required version for compatibility with newer version of cmake
@@ -195,6 +199,7 @@ if(CMAKE_POLICY_VERSION_MINIMUM_LOCALLY_DEFINED)
   unset(CMAKE_POLICY_VERSION_MINIMUM)
   unset(CMAKE_POLICY_VERSION_MINIMUM_LOCALLY_DEFINED)
 endif()
+target_compile_options(tinyobjloader PRIVATE ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS})
 
 set(ENABLE_DOUBLE_PRECISION ON)
 set(CCD_HIDE_ALL_SYMBOLS ON)
@@ -229,7 +234,9 @@ if(CMAKE_POLICY_VERSION_MINIMUM_LOCALLY_DEFINED)
   unset(CMAKE_POLICY_VERSION_MINIMUM)
   unset(CMAKE_POLICY_VERSION_MINIMUM_LOCALLY_DEFINED)
 endif()
-target_compile_options(ccd PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS})
+target_compile_options(ccd PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS}
+                                   ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS}
+                                   ${MUJOCO_EMSCRIPTEN_LTO_OPTIONS})
 target_link_options(ccd PRIVATE ${MUJOCO_MACOS_LINK_OPTIONS})
 
 # libCCD has an unconditional `#define _CRT_SECURE_NO_WARNINGS` on Windows.

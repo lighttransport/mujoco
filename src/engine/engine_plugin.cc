@@ -20,6 +20,99 @@
 
 #include "engine/engine_plugin.h"
 
+#ifdef MUJOCO_DISABLE_PLUGINS
+
+#include <cstring>
+
+#include "engine/engine_util_errmem.h"
+
+void mjp_defaultPlugin(mjpPlugin* plugin) {
+  std::memset(plugin, 0, sizeof(*plugin));
+}
+
+void mjp_defaultResourceProvider(mjpResourceProvider* provider) {
+  std::memset(provider, 0, sizeof(*provider));
+}
+
+void mjp_defaultDecoder(mjpDecoder* decoder) {
+  std::memset(decoder, 0, sizeof(*decoder));
+}
+
+int mjp_registerPlugin(const mjpPlugin* plugin) {
+  mju_error("Plugin support disabled in this build");
+  return -1;
+}
+
+int mjp_registerResourceProvider(const mjpResourceProvider* provider) {
+  mju_error("Plugin support disabled in this build");
+  return -1;
+}
+
+int mjp_registerResourceProviderInternal(const mjpResourceProvider* provider) {
+  mju_error("Plugin support disabled in this build");
+  return -1;
+}
+
+int mjp_pluginCount(void) {
+  return 0;
+}
+
+int mjp_resourceProviderCount(void) {
+  return 0;
+}
+
+const mjpPlugin* mjp_getPlugin(const char* name, int* slot) {
+  if (slot) {
+    *slot = -1;
+  }
+  return nullptr;
+}
+
+const mjpPlugin* mjp_getPluginUnsafe(const char* name, int* slot, int nslot) {
+  if (slot) {
+    *slot = -1;
+  }
+  return nullptr;
+}
+
+const mjpPlugin* mjp_getPluginAtSlot(int slot) {
+  return nullptr;
+}
+
+const mjpPlugin* mjp_getPluginAtSlotUnsafe(int slot, int nslot) {
+  return nullptr;
+}
+
+const mjpResourceProvider* mjp_getResourceProvider(const char* resource_name) {
+  return nullptr;
+}
+
+const mjpResourceProvider* mjp_getResourceProviderAtSlot(int slot) {
+  return nullptr;
+}
+
+const char* mj_getPluginConfig(const mjModel* m, int plugin_id, const char* attrib) {
+  return nullptr;
+}
+
+void mj_loadPluginLibrary(const char* path) {
+  mju_error("Plugin support disabled in this build");
+}
+
+void mj_loadAllPluginLibraries(const char* directory, mjfPluginLibraryLoadCallback callback) {
+  mju_error("Plugin support disabled in this build");
+}
+
+void mjp_registerDecoder(const mjpDecoder* decoder) {
+  mju_error("Plugin support disabled in this build");
+}
+
+const mjpDecoder* mjp_findDecoder(const mjResource* resource, const char* content_type) {
+  return nullptr;
+}
+
+#else
+
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -629,3 +722,5 @@ void mj_loadAllPluginLibraries(const char* directory,
   closedir(dirp);
 #endif
 }
+
+#endif

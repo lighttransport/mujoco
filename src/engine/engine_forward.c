@@ -28,7 +28,9 @@
 #include "engine/engine_core_smooth.h"
 #include "engine/engine_core_util.h"
 #include "engine/engine_derivative.h"
-#include "engine/engine_inverse.h"
+#ifndef MUJOCO_DISABLE_FWDINV_COMPARE
+  #include "engine/engine_inverse.h"
+#endif
 #include "engine/engine_island.h"
 #include "engine/engine_macro.h"
 #include "engine/engine_memory.h"
@@ -1509,7 +1511,11 @@ void mj_step(const mjModel* m, mjData* d) {
 
   // compare forward and inverse solutions if enabled
   if (mjENABLED(mjENBL_FWDINV)) {
+#ifdef MUJOCO_DISABLE_FWDINV_COMPARE
+    mjERROR("mjENBL_FWDINV is not available in the minimal physics core");
+#else
     mj_compareFwdInv(m, d);
+#endif
   }
 
   // use selected integrator
@@ -1579,7 +1585,11 @@ void mj_step2(const mjModel* m, mjData* d) {
 
   // compare forward and inverse solutions if enabled
   if (mjENABLED(mjENBL_FWDINV)) {
+#ifdef MUJOCO_DISABLE_FWDINV_COMPARE
+    mjERROR("mjENBL_FWDINV is not available in the minimal physics core");
+#else
     mj_compareFwdInv(m, d);
+#endif
   }
 
   // integrate with Euler or implicit; RK4 defaults to Euler
