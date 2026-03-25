@@ -18,11 +18,71 @@ For a minimal physics-only WASM module, the correct runtime input is a precompil
   - `mj_step`, `mj_forward`, `mj_resetData`
   - direct typed-array views for `qpos`, `qvel`, `act`, `ctrl`, `sensordata`
 
-## Build
+## Prerequisites
+
+- [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html) (tested with 4.0.x)
+- CMake 3.16+
+- A working C/C++ toolchain (for CMake host tools)
+
+Ensure `emcmake` / `emcc` are on your `PATH`:
 
 ```bash
-emcmake cmake -B build
-cmake --build build --target mujoco_physics_wasm
+source /path/to/emsdk/emsdk_env.sh
+```
+
+## Build
+
+### Physics-only module (minimal)
+
+```bash
+emcmake cmake -B build-wasm \
+  -DMUJOCO_BUILD_TESTS_WASM=OFF \
+  -DMUJOCO_WASM_THREADS=OFF
+cmake --build build-wasm --target mujoco_physics_wasm -j$(nproc)
+```
+
+Output artifacts in `wasm/dist/`:
+
+| File | Description |
+|---|---|
+| `mujoco_physics.wasm` | WASM binary (~483 KB, ~174 KB gzipped) |
+| `mujoco_physics.js` | ES module loader (~21 KB, ~9 KB gzipped) |
+| `mujoco_physics.d.ts` | TypeScript declarations |
+
+### Full WASM module (all bindings, filesystem, exceptions)
+
+```bash
+emcmake cmake -B build-wasm \
+  -DMUJOCO_WASM_THREADS=ON
+cmake --build build-wasm --target mujoco_wasm -j$(nproc)
+```
+
+### CMake options reference
+
+| Option | Default | Description |
+|---|---|---|
+| `MUJOCO_BUILD_PHYSICS_WASM` | `ON` | Build the minimal physics-only WASM module |
+| `MUJOCO_BUILD_TESTS_WASM` | `ON` | Build tests for WASM bindings |
+| `MUJOCO_WASM_THREADS` | `OFF` | Enable multithreading for the full WASM module |
+| `MUJOCO_PHYSICS_ENABLE_THREADS` | `OFF` | Enable threading in the physics-only core |
+| `MUJOCO_PHYSICS_ENABLE_EXCEPTIONS` | `OFF` | Enable C++ exceptions in the physics-only core |
+| `MUJOCO_PHYSICS_ENABLE_PLUGINS` | `OFF` | Enable plugin support in the physics-only core |
+
+### Preparing an mjb model file
+
+The physics-only module loads precompiled binary models (`.mjb`), not XML.
+Use the native MuJoCo CLI or Python bindings to convert:
+
+```bash
+# Using the native mujoco binary
+mujoco compile model.xml model.mjb
+```
+
+```python
+# Using Python
+import mujoco
+model = mujoco.MjModel.from_xml_path("model.xml")
+mujoco.mj_saveModel(model, "model.mjb", None, 0)
 ```
 
 ## JS usage
