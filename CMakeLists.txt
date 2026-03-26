@@ -58,6 +58,11 @@ if(EMSCRIPTEN)
   option(MUJOCO_PHYSICS_ENABLE_THREADS "Enable C++ thread support in the physics-only WASM core" OFF)
   option(MUJOCO_PHYSICS_ENABLE_EXCEPTIONS "Enable C++ exceptions in the physics-only WASM core" OFF)
   option(MUJOCO_PHYSICS_ENABLE_PLUGINS "Enable plugin support in the physics-only WASM core" OFF)
+  option(MUJOCO_PHYSICS_ENABLE_SPEC "Enable mjSpec procedural model building API in the physics-only WASM core" ON)
+  # The spec API uses C++ exceptions and setjmp/longjmp internally.
+  if(MUJOCO_PHYSICS_ENABLE_SPEC)
+    set(MUJOCO_PHYSICS_ENABLE_EXCEPTIONS ON)
+  endif()
   set(MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS "")
   if(MUJOCO_WASM_THREADS OR MUJOCO_PHYSICS_ENABLE_THREADS)
     set(MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS -pthread)
@@ -234,6 +239,12 @@ if(TARGET mujoco_physics_core)
     PRIVATE ccd
             qhullstatic_r
   )
+  if(MUJOCO_PHYSICS_ENABLE_SPEC)
+    target_link_libraries(
+      mujoco_physics_core
+      PRIVATE lodepng
+    )
+  endif()
 endif()
 
 set_target_properties(

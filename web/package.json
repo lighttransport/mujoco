@@ -1,0 +1,15 @@
+{
+  "name": "mujoco-physics-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "^7.0.6"
+  },
+  "dependencies": {
+    "three": "^0.178.0"
+  }
+}

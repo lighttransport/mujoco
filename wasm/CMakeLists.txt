@@ -78,6 +78,7 @@ set(EMCC_PHYSICS_LINKER_FLAGS
 )
 if(MUJOCO_PHYSICS_ENABLE_EXCEPTIONS)
     list(REMOVE_ITEM EMCC_PHYSICS_LINKER_FLAGS "-s DISABLE_EXCEPTION_CATCHING=1")
+    list(REMOVE_ITEM EMCC_PHYSICS_LINKER_FLAGS "-s SUPPORT_LONGJMP=0")
     list(APPEND EMCC_PHYSICS_LINKER_FLAGS "-s DISABLE_EXCEPTION_CATCHING=0")
 endif()
 if(MUJOCO_PHYSICS_ENABLE_THREADS)
@@ -124,6 +125,16 @@ if(MUJOCO_BUILD_PHYSICS_WASM)
         ccd
         mujoco_physics_core
         qhullstatic_r
+    )
+    # Copy WASM artifacts to the web demo's public/ folder after build.
+    set(MUJOCO_WEB_DEMO_DIR "${CMAKE_SOURCE_DIR}/web/public")
+    add_custom_command(TARGET mujoco_physics_wasm POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${MUJOCO_WEB_DEMO_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/wasm/dist/mujoco_physics.js"
+            "${CMAKE_SOURCE_DIR}/wasm/dist/mujoco_physics.wasm"
+            "${MUJOCO_WEB_DEMO_DIR}"
+        COMMENT "Copying mujoco_physics.{js,wasm} to web/public/"
     )
 endif()
 

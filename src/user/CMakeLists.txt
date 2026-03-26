@@ -38,3 +38,7 @@ set(MUJOCO_USER_SRCS
 )
 
 target_sources(mujoco PRIVATE ${MUJOCO_USER_SRCS})
+
+if(TARGET mujoco_physics_core AND MUJOCO_PHYSICS_ENABLE_SPEC)
+  target_sources(mujoco_physics_core PRIVATE ${MUJOCO_USER_SRCS})
+endif()

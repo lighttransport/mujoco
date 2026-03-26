@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>MuJoCo Physics WASM Demo</title>
+    <style>
+      * { margin: 0; padding: 0; }
+      body { overflow: hidden; background: #1a1a2e; }
+      canvas { display: block; }
+      #info {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        color: #ccc;
+        font: 14px/1.4 monospace;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="info">Loading MuJoCo physics...</div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
