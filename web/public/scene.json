@@ -1,0 +1,65 @@
+{
+  "name": "three_demo",
+  "timestep": 0.002,
+  "gravity": [0, 0, -9.81],
+  "lights": [
+    {
+      "name": "top",
+      "pos": [0, 0, 4],
+      "dir": [0, 0, -1],
+      "diffuse": [0.8, 0.8, 0.8]
+    }
+  ],
+  "bodies": [
+    {
+      "name": "ground",
+      "geoms": [
+        {
+          "name": "ground",
+          "type": "plane",
+          "size": [5, 5, 0.1],
+          "rgba": [0.3, 0.3, 0.4, 1]
+        }
+      ]
+    },
+    {
+      "name": "box",
+      "pos": [0, 0, 2],
+      "joint": "free",
+      "geoms": [
+        {
+          "name": "box_geom",
+          "type": "box",
+          "size": [0.2, 0.2, 0.2],
+          "rgba": [0.2, 0.6, 1.0, 1]
+        }
+      ]
+    },
+    {
+      "name": "sphere",
+      "pos": [1.2, 0, 1.5],
+      "joint": "free",
+      "geoms": [
+        {
+          "name": "sphere_geom",
+          "type": "sphere",
+          "size": [0.15],
+          "rgba": [1.0, 0.4, 0.2, 1]
+        }
+      ]
+    },
+    {
+      "name": "capsule",
+      "pos": [-1.0, 0.5, 1.8],
+      "joint": "free",
+      "geoms": [
+        {
+          "name": "cap_geom",
+          "type": "capsule",
+          "size": [0.1, 0.3],
+          "rgba": [0.3, 1.0, 0.4, 1]
+        }
+      ]
+    }
+  ]
+}

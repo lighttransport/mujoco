@@ -1,67 +1,49 @@
 import * as THREE from "three";
+import { buildModelFromJSON } from "./scene_loader.js";
 
 const info = document.getElementById("info");
 
+// Map MuJoCo geom type names to Three.js geometries.
+function makeThreeGeom(type, size) {
+  switch (type) {
+    case "box":
+      return new THREE.BoxGeometry(size[0] * 2, size[1] * 2, size[2] * 2);
+    case "sphere":
+      return new THREE.SphereGeometry(size[0], 24, 16);
+    case "capsule":
+      return new THREE.CapsuleGeometry(size[0], size[1] * 2, 12, 16);
+    case "cylinder":
+      return new THREE.CylinderGeometry(size[0], size[0], size[1] * 2, 24);
+    case "ellipsoid":
+      return new THREE.SphereGeometry(1, 24, 16).scale(size[0], size[1], size[2]);
+    default:
+      return new THREE.SphereGeometry(0.05, 12, 8);
+  }
+}
+
+function rgbaToColor(rgba) {
+  return new THREE.Color(rgba[0], rgba[1], rgba[2]);
+}
+
 async function main() {
   // --- Load MuJoCo physics WASM ---
-  // Loaded from public/ — skip vite's module graph.
   const { default: loadMujocoPhysics } = await import(
     /* @vite-ignore */ "./mujoco_physics.js"
   );
   const mj = await loadMujocoPhysics();
-  info.textContent = "Building scene...";
+  info.textContent = "Loading scene...";
 
-  // --- Build scene procedurally via mjSpec ---
-  const spec = new mj.MjSpec();
-  spec.setModelName("three_demo");
-  spec.setTimestep(0.002);
-  spec.setGravity(0, 0, -9.81);
+  // --- Load scene JSON ---
+  const sceneUrl = new URLSearchParams(location.search).get("scene") || "./scene.json";
+  const resp = await fetch(sceneUrl);
+  if (!resp.ok) {
+    info.textContent = `Failed to load ${sceneUrl}`;
+    return;
+  }
+  const config = await resp.json();
 
-  const world = spec.worldBody();
-
-  // Ground plane
-  const groundGeom = mj.MjsGeom.add(world, "ground");
-  mj.MjsGeom.setType(groundGeom, mj.GEOM_PLANE);
-  mj.MjsGeom.setSize(groundGeom, 5, 5, 0.1);
-  mj.MjsGeom.setRGBA(groundGeom, 0.3, 0.3, 0.4, 1);
-
-  // Light
-  const light = mj.MjsLight.add(world, "top");
-  mj.MjsLight.setPos(light, 0, 0, 4);
-  mj.MjsLight.setDir(light, 0, 0, -1);
-  mj.MjsLight.setDiffuse(light, 0.8, 0.8, 0.8);
-
-  // Falling box
-  const boxBody = mj.MjsBody.add(world, "box");
-  mj.MjsBody.setPos(boxBody, 0, 0, 2);
-  mj.MjsJoint.addFree(boxBody);
-  const boxGeom = mj.MjsGeom.add(boxBody, "box_geom");
-  mj.MjsGeom.setType(boxGeom, mj.GEOM_BOX);
-  mj.MjsGeom.setSize(boxGeom, 0.2, 0.2, 0.2);
-  mj.MjsGeom.setRGBA(boxGeom, 0.2, 0.6, 1.0, 1);
-
-  // Sphere on a pedestal
-  const sphereBody = mj.MjsBody.add(world, "sphere");
-  mj.MjsBody.setPos(sphereBody, 1.2, 0, 1.5);
-  mj.MjsJoint.addFree(sphereBody);
-  const sphereGeom = mj.MjsGeom.add(sphereBody, "sphere_geom");
-  mj.MjsGeom.setType(sphereGeom, mj.GEOM_SPHERE);
-  mj.MjsGeom.setSize(sphereGeom, 0.15, 0, 0);
-  mj.MjsGeom.setRGBA(sphereGeom, 1.0, 0.4, 0.2, 1);
-
-  // Capsule
-  const capBody = mj.MjsBody.add(world, "capsule");
-  mj.MjsBody.setPos(capBody, -1.0, 0.5, 1.8);
-  mj.MjsJoint.addFree(capBody);
-  const capGeom = mj.MjsGeom.add(capBody, "cap_geom");
-  mj.MjsGeom.setType(capGeom, mj.GEOM_CAPSULE);
-  mj.MjsGeom.setSize(capGeom, 0.1, 0.3, 0);
-  mj.MjsGeom.setRGBA(capGeom, 0.3, 1.0, 0.4, 1);
-
-  // Compile
-  const model = spec.compile();
-  spec.delete();
-  const data = new mj.PhysicsData(model);
+  // --- Build MuJoCo model from JSON ---
+  const { model, data, geomInfos } = buildModelFromJSON(mj, config);
 
   const dt = model.timestep();
   const ngeom = model.ngeom();
@@ -93,7 +75,7 @@ async function main() {
   dirLight.shadow.mapSize.set(1024, 1024);
   scene.add(dirLight);
 
-  // Ground
+  // Ground visual (always present, rendered as a grid)
   const groundMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(20, 20),
     new THREE.MeshStandardMaterial({ color: 0x334455, roughness: 0.8 })
@@ -103,31 +85,28 @@ async function main() {
   scene.add(groundMesh);
   scene.add(new THREE.GridHelper(20, 40, 0x556677, 0x2a2a3e));
 
-  // Create Three.js meshes for each dynamic geom.
-  // geom 0 is the ground plane (static), geoms 1..ngeom-1 are dynamic.
-  const geomMeshes = [];
-  const geomColors = [
-    null,                     // 0: ground (handled separately)
-    new THREE.Color(0x3399ff), // 1: box
-    new THREE.Color(0xff6633), // 2: sphere
-    new THREE.Color(0x44ff66), // 3: capsule
-  ];
-  const geomGeometries = [
-    null,
-    new THREE.BoxGeometry(0.4, 0.4, 0.4),
-    new THREE.SphereGeometry(0.15, 24, 16),
-    new THREE.CapsuleGeometry(0.1, 0.6, 12, 16),
-  ];
+  // Create Three.js meshes from geomInfos.
+  // Dynamic geoms get updated each frame; static geoms (planes, etc.) are skipped.
+  const dynamicGeomIndices = [];
+  const dynamicMeshes = [];
 
-  for (let i = 1; i < ngeom; i++) {
-    const geo = geomGeometries[i] || new THREE.SphereGeometry(0.1, 16, 12);
+  for (let i = 0; i < geomInfos.length; i++) {
+    const gi = geomInfos[i];
+    if (gi.isStatic || gi.type === "plane") continue;
+
+    const geo = makeThreeGeom(gi.type, gi.size);
     const mat = new THREE.MeshStandardMaterial({
-      color: geomColors[i] || 0xcccccc, roughness: 0.3, metalness: 0.1
+      color: rgbaToColor(gi.rgba),
+      roughness: 0.3,
+      metalness: 0.1,
+      transparent: gi.rgba[3] < 1,
+      opacity: gi.rgba[3],
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.castShadow = true;
     scene.add(mesh);
-    geomMeshes.push(mesh);
+    dynamicGeomIndices.push(i);
+    dynamicMeshes.push(mesh);
   }
 
   window.addEventListener("resize", () => {
@@ -137,8 +116,6 @@ async function main() {
   });
 
   // --- Simulation loop ---
-  // MuJoCo uses Z-up, Three.js uses Y-up.
-  // MuJoCo geom_xmat is a 3x3 rotation matrix (row-major).
   const m4 = new THREE.Matrix4();
   const stepsPerFrame = Math.round((1 / 60) / dt);
 
@@ -148,30 +125,26 @@ async function main() {
     const gxpos = data.geom_xpos();
     const gxmat = data.geom_xmat();
 
-    for (let i = 0; i < geomMeshes.length; i++) {
-      const gi = i + 1; // skip geom 0 (ground)
+    for (let k = 0; k < dynamicMeshes.length; k++) {
+      const gi = dynamicGeomIndices[k];
       const px = gxpos[gi * 3 + 0];
       const py = gxpos[gi * 3 + 1];
       const pz = gxpos[gi * 3 + 2];
-      // MuJoCo Z-up → Three.js Y-up: (x, z, -y)
-      geomMeshes[i].position.set(px, pz, -py);
+      // MuJoCo Z-up -> Three.js Y-up: (x, z, -y)
+      dynamicMeshes[k].position.set(px, pz, -py);
 
-      // Convert MuJoCo row-major 3x3 rotation to Three.js 4x4 (with axis swap)
       const o = gi * 9;
-      // MuJoCo mat columns → Three.js columns with Z-up→Y-up
       m4.set(
         gxmat[o + 0], gxmat[o + 6], -gxmat[o + 3], 0,
         gxmat[o + 2], gxmat[o + 8], -gxmat[o + 5], 0,
         -gxmat[o + 1], -gxmat[o + 7], gxmat[o + 4], 0,
         0, 0, 0, 1
       );
-      geomMeshes[i].setRotationFromMatrix(m4);
+      dynamicMeshes[k].setRotationFromMatrix(m4);
     }
 
     const t = data.time();
-    const qpos = data.qpos();
-    info.textContent =
-      `t=${t.toFixed(2)}s | box z=${qpos[2].toFixed(3)}`;
+    info.textContent = `t=${t.toFixed(2)}s | bodies=${model.nbody()} geoms=${ngeom}`;
 
     renderer.render(scene, camera);
     requestAnimationFrame(animate);
