@@ -33,24 +33,13 @@ async function main() {
   const mj = await loadMujocoPhysics();
   info.textContent = "Loading scene...";
 
-  // --- Load scene JSON ---
+  // --- Detect scene type ---
   const sceneUrl = new URLSearchParams(location.search).get("scene") || "./scene.json";
-  const resp = await fetch(sceneUrl);
-  if (!resp.ok) {
-    info.textContent = `Failed to load ${sceneUrl}`;
-    return;
-  }
-  const config = await resp.json();
+  const isUSD = /\.(usd[acz]?|usdz)$/i.test(sceneUrl);
 
-  // --- Build MuJoCo model from JSON ---
-  const { model, data, geomInfos } = buildModelFromJSON(mj, config);
+  let model, data, dynamicGeomIndices, dynamicMeshes, ngeom;
 
-  const dt = model.timestep();
-  const ngeom = model.ngeom();
-  info.textContent =
-    `MuJoCo | nq=${model.nq()} nv=${model.nv()} ngeom=${ngeom} dt=${dt}`;
-
-  // --- Three.js setup ---
+  // --- Three.js setup (shared by both paths) ---
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -75,7 +64,7 @@ async function main() {
   dirLight.shadow.mapSize.set(1024, 1024);
   scene.add(dirLight);
 
-  // Ground visual (always present, rendered as a grid)
+  // Ground visual
   const groundMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(20, 20),
     new THREE.MeshStandardMaterial({ color: 0x334455, roughness: 0.8 })
@@ -85,29 +74,89 @@ async function main() {
   scene.add(groundMesh);
   scene.add(new THREE.GridHelper(20, 40, 0x556677, 0x2a2a3e));
 
-  // Create Three.js meshes from geomInfos.
-  // Dynamic geoms get updated each frame; static geoms (planes, etc.) are skipped.
-  const dynamicGeomIndices = [];
-  const dynamicMeshes = [];
+  // --- Load scene (JSON or USD) ---
+  dynamicGeomIndices = [];
+  dynamicMeshes = [];
 
-  for (let i = 0; i < geomInfos.length; i++) {
-    const gi = geomInfos[i];
-    if (gi.isStatic || gi.type === "plane") continue;
+  if (isUSD) {
+    // USD loading path — dynamic import keeps tinyusdz out of the JSON bundle
+    info.textContent = "Loading USD scene...";
+    const { loadUSDScene } = await import("./usd_loader.js");
+    const result = await loadUSDScene(mj, sceneUrl);
+    model = result.model;
+    data = result.data;
 
-    const geo = makeThreeGeom(gi.type, gi.size);
-    const mat = new THREE.MeshStandardMaterial({
-      color: rgbaToColor(gi.rgba),
-      roughness: 0.3,
-      metalness: 0.1,
-      transparent: gi.rgba[3] < 1,
-      opacity: gi.rgba[3],
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
-    scene.add(mesh);
-    dynamicGeomIndices.push(i);
-    dynamicMeshes.push(mesh);
+    // Build dynamic arrays from the geom→mesh mapping
+    for (let gi = 0; gi < result.geomInfos.length; gi++) {
+      const mi = result.geomToMeshMap[gi];
+      if (mi >= 0 && !result.geomInfos[gi].isStatic) {
+        dynamicGeomIndices.push(gi);
+        dynamicMeshes.push(result.visualMeshes[mi]);
+      }
+    }
+    // Add all visual meshes (including static ones) to the Three.js scene
+    for (const vm of result.visualMeshes) {
+      scene.add(vm);
+    }
+    // Position static visual meshes at their initial physics position
+    const gxpos = data.geom_xpos();
+    const gxmat = data.geom_xmat();
+    for (let gi = 0; gi < result.geomInfos.length; gi++) {
+      const mi = result.geomToMeshMap[gi];
+      if (mi >= 0 && result.geomInfos[gi].isStatic) {
+        const vm = result.visualMeshes[mi];
+        const px = gxpos[gi * 3 + 0];
+        const py = gxpos[gi * 3 + 1];
+        const pz = gxpos[gi * 3 + 2];
+        vm.position.set(px, pz, -py);
+        const o = gi * 9;
+        const m4 = new THREE.Matrix4();
+        m4.set(
+          gxmat[o + 0], gxmat[o + 6], -gxmat[o + 3], 0,
+          gxmat[o + 2], gxmat[o + 8], -gxmat[o + 5], 0,
+          -gxmat[o + 1], -gxmat[o + 7], gxmat[o + 4], 0,
+          0, 0, 0, 1
+        );
+        vm.setRotationFromMatrix(m4);
+      }
+    }
+  } else {
+    // JSON loading path (original)
+    const resp = await fetch(sceneUrl);
+    if (!resp.ok) {
+      info.textContent = `Failed to load ${sceneUrl}`;
+      return;
+    }
+    const config = await resp.json();
+    const result = buildModelFromJSON(mj, config);
+    model = result.model;
+    data = result.data;
+
+    const geomInfos = result.geomInfos;
+    for (let i = 0; i < geomInfos.length; i++) {
+      const gi = geomInfos[i];
+      if (gi.isStatic || gi.type === "plane") continue;
+
+      const geo = makeThreeGeom(gi.type, gi.size);
+      const mat = new THREE.MeshStandardMaterial({
+        color: rgbaToColor(gi.rgba),
+        roughness: 0.3,
+        metalness: 0.1,
+        transparent: gi.rgba[3] < 1,
+        opacity: gi.rgba[3],
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = true;
+      scene.add(mesh);
+      dynamicGeomIndices.push(i);
+      dynamicMeshes.push(mesh);
+    }
   }
+
+  ngeom = model.ngeom();
+  const dt = model.timestep();
+  info.textContent =
+    `MuJoCo | nq=${model.nq()} nv=${model.nv()} ngeom=${ngeom} dt=${dt}`;
 
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;

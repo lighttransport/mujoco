@@ -10,6 +10,7 @@
     "vite": "^7.0.6"
   },
   "dependencies": {
-    "three": "^0.178.0"
+    "three": "^0.178.0",
+    "tinyusdz": "0.9.9"
   }
 }

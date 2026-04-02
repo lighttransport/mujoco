@@ -3,6 +3,9 @@ import { defineConfig } from "vite";
 export default defineConfig({
   root: ".",
   base: "./",
+  optimizeDeps: {
+    exclude: ["tinyusdz"],
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,
