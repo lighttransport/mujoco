@@ -26,13 +26,20 @@ constinit thread_local int ThreadPool::worker_id_ = -1;
 
 // ThreadPool constructor
 ThreadPool::ThreadPool(int num_threads) : ctr_(0) {
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // No-op: on single-threaded emscripten we can't spawn workers.
+  // All Schedule()d tasks run synchronously via WaitAll() / Execute().
+  (void)num_threads;
+#else
   for (int i = 0; i < num_threads; i++) {
     threads_.push_back(std::thread(&ThreadPool::WorkerThread, this, i));
   }
+#endif
 }
 
 // ThreadPool destructor
 ThreadPool::~ThreadPool() {
+  if (threads_.empty()) return;  // single-threaded emscripten build
   {
     std::unique_lock<std::mutex> lock(m_);
     for (int i = 0; i < threads_.size(); i++) {
@@ -47,6 +54,17 @@ ThreadPool::~ThreadPool() {
 
 // ThreadPool scheduler
 void ThreadPool::Schedule(std::function<void()> task) {
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // Single-threaded emscripten build: run the task inline and bump the
+  // counter so WaitCount() returns immediately.
+  if (threads_.empty()) {
+    task();
+    std::unique_lock<std::mutex> lock(m_);
+    ++ctr_;
+    cv_ext_.notify_one();
+    return;
+  }
+#endif
   std::unique_lock<std::mutex> lock(m_);
   queue_.push(std::move(task));
   cv_in_.notify_one();

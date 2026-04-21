@@ -81,11 +81,18 @@ unsigned int NumCompilerThreads(int upper_bound = -1) {
   // overloading hyperthreaded CPUs.
   // Compilation is largely compute-bound so we want to give each
   // physical core a chance without too much L1/L2 cache thrashing.
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // Emscripten build without -pthread: std::thread ctor throws
+  // "thread constructor failed". Force single-threaded compilation.
+  (void)upper_bound;
+  return 1;
+#else
   unsigned int nthreads = std::thread::hardware_concurrency() / 2;
   if (upper_bound > 0) {
     nthreads = std::min(nthreads, static_cast<unsigned int>(upper_bound));
   }
   return std::max(static_cast<unsigned int>(1), nthreads);
+#endif
 }
 
 // return true if two quaternions are element-wise less than kFrameEps apart, including double-cover
