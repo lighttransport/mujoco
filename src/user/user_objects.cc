@@ -38,7 +38,15 @@
 #include <utility>
 #include <vector>
 
+#if defined(MUJOCO_ENABLE_PNG)
 #include "lodepng.h"
+#else
+enum LodePNGColorType {
+  LCT_GREY,
+  LCT_RGB,
+  LCT_RGBA,
+};
+#endif
 #include "cc/array_safety.h"
 #include "engine/engine_passive.h"
 #include "engine/engine_support.h"
@@ -80,6 +88,7 @@ class PNGImage {
 
 PNGImage PNGImage::Load(const mjCBase* obj, mjResource* resource,
                         LodePNGColorType color_type) {
+#if defined(MUJOCO_ENABLE_PNG)
   PNGImage image;
   image.color_type_ = color_type;
 
@@ -133,6 +142,11 @@ PNGImage PNGImage::Load(const mjCBase* obj, mjResource* resource,
   }
 
   return image;
+#else
+  (void)color_type;
+  throw mjCError(obj, "PNG asset loading is disabled in this MuJoCo build: '%s'",
+                 resource->name);
+#endif
 }
 
 // associate all child list elements with a frame and copy them to parent list, clear child list

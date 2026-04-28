@@ -46,6 +46,8 @@ if(NOT EMSCRIPTEN)
   option(MUJOCO_BUILD_TESTS "Build tests for MuJoCo" ON)
   option(MUJOCO_TEST_PYTHON_UTIL "Build and test utility libraries for Python bindings" ON)
   option(MUJOCO_WITH_USD "Build with OpenUSD" OFF)
+  option(MUJOCO_ENABLE_PNG "Enable PNG asset loading via lodepng" ON)
+  option(MUJOCO_ENABLE_FETCHCONTENT "Allow FetchContent for missing MuJoCo dependencies" OFF)
   option(MUJOCO_USE_FILAMENT "Use filament rendering" OFF)
   # Allows filament renderer to be used with mjr API; disables src/render to prevent conflicts.
   option(MUJOCO_USE_FILAMENT_MJR_COMPAT "Use filament mjr compatibility layer" OFF)
@@ -59,6 +61,8 @@ if(EMSCRIPTEN)
   option(MUJOCO_PHYSICS_ENABLE_EXCEPTIONS "Enable C++ exceptions in the physics-only WASM core" OFF)
   option(MUJOCO_PHYSICS_ENABLE_PLUGINS "Enable plugin support in the physics-only WASM core" OFF)
   option(MUJOCO_PHYSICS_ENABLE_SPEC "Enable mjSpec procedural model building API in the physics-only WASM core" ON)
+  option(MUJOCO_ENABLE_PNG "Enable PNG asset loading via lodepng" ON)
+  option(MUJOCO_ENABLE_FETCHCONTENT "Allow FetchContent for missing MuJoCo dependencies" OFF)
   # The spec API uses C++ exceptions and setjmp/longjmp internally.
   if(MUJOCO_PHYSICS_ENABLE_SPEC)
     set(MUJOCO_PHYSICS_ENABLE_EXCEPTIONS ON)
@@ -227,11 +231,14 @@ endif()
 target_link_libraries(
   mujoco
   PRIVATE ccd
-          lodepng
           qhullstatic_r
           tinyobjloader
           tinyxml2
 )
+if(MUJOCO_ENABLE_PNG)
+  target_link_libraries(mujoco PRIVATE lodepng)
+  target_compile_definitions(mujoco PRIVATE MUJOCO_ENABLE_PNG=1)
+endif()
 
 if(TARGET mujoco_physics_core)
   target_link_libraries(
@@ -239,11 +246,12 @@ if(TARGET mujoco_physics_core)
     PRIVATE ccd
             qhullstatic_r
   )
-  if(MUJOCO_PHYSICS_ENABLE_SPEC)
+  if(MUJOCO_PHYSICS_ENABLE_SPEC AND MUJOCO_ENABLE_PNG)
     target_link_libraries(
       mujoco_physics_core
       PRIVATE lodepng
     )
+    target_compile_definitions(mujoco_physics_core PRIVATE MUJOCO_ENABLE_PNG=1)
   endif()
 endif()
 
@@ -344,7 +352,7 @@ endif()
 
 if(NOT (APPLE AND MUJOCO_BUILD_MACOS_FRAMEWORKS))
   set(MUJOCO_TARGETS mujoco)
-  if (EMSCRIPTEN)
+  if (EMSCRIPTEN AND MUJOCO_ENABLE_PNG)
     list(APPEND MUJOCO_TARGETS lodepng)
   endif()
 

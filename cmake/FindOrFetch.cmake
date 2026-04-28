@@ -62,7 +62,10 @@
 
 if(NOT COMMAND FindOrFetch)
   macro(FindOrFetch)
-    if(NOT FetchContent)
+    if(NOT DEFINED MUJOCO_ENABLE_FETCHCONTENT)
+      set(MUJOCO_ENABLE_FETCHCONTENT OFF)
+    endif()
+    if(MUJOCO_ENABLE_FETCHCONTENT AND NOT COMMAND FetchContent_Declare)
       include(FetchContent)
     endif()
 
@@ -110,6 +113,45 @@ if(NOT COMMAND FindOrFetch)
         )
         find_package(${_ARGS_PACKAGE_NAME} REQUIRED)
         message(CHECK_PASS "found")
+      elseif(NOT MUJOCO_ENABLE_FETCHCONTENT)
+        string(TOUPPER "${_ARGS_LIBRARY_NAME}" _ARGS_LIBRARY_NAME_UPPER)
+        set(_ARGS_SOURCE_DIR "")
+        if(DEFINED FETCHCONTENT_SOURCE_DIR_${_ARGS_LIBRARY_NAME})
+          set(_ARGS_SOURCE_DIR "${FETCHCONTENT_SOURCE_DIR_${_ARGS_LIBRARY_NAME}}")
+        elseif(DEFINED FETCHCONTENT_SOURCE_DIR_${_ARGS_LIBRARY_NAME_UPPER})
+          set(_ARGS_SOURCE_DIR "${FETCHCONTENT_SOURCE_DIR_${_ARGS_LIBRARY_NAME_UPPER}}")
+        endif()
+
+        if(NOT "${_ARGS_SOURCE_DIR}" STREQUAL "")
+          message(CHECK_START
+                  "mujoco::FindOrFetch: using local source for `${_ARGS_LIBRARY_NAME}`"
+          )
+          set(${_ARGS_LIBRARY_NAME}_SOURCE_DIR "${_ARGS_SOURCE_DIR}")
+          set(${_ARGS_LIBRARY_NAME}_BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/${_ARGS_LIBRARY_NAME}-build")
+          if(NOT "${_ARGS_CUSTOM_CMAKE}" STREQUAL "")
+            file(COPY
+              "${_ARGS_CUSTOM_CMAKE}"
+              DESTINATION "${${_ARGS_LIBRARY_NAME}_SOURCE_DIR}"
+            )
+          endif()
+          if(${_ARGS_EXCLUDE_FROM_ALL})
+            add_subdirectory(
+              "${${_ARGS_LIBRARY_NAME}_SOURCE_DIR}" "${${_ARGS_LIBRARY_NAME}_BINARY_DIR}"
+              EXCLUDE_FROM_ALL
+            )
+          else()
+            add_subdirectory(
+              "${${_ARGS_LIBRARY_NAME}_SOURCE_DIR}" "${${_ARGS_LIBRARY_NAME}_BINARY_DIR}"
+            )
+          endif()
+          message(CHECK_PASS "found")
+        else()
+          message(CHECK_START
+                  "mujoco::FindOrFetch: finding `${_ARGS_PACKAGE_NAME}` in system packages..."
+          )
+          find_package(${_ARGS_PACKAGE_NAME} REQUIRED)
+          message(CHECK_PASS "found")
+        endif()
       else()
         message(CHECK_START
                 "mujoco::FindOrFetch: Using FetchContent to retrieve `${_ARGS_LIBRARY_NAME}`"
