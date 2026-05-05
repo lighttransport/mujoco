@@ -261,7 +261,9 @@ package_wasm() {
     VERSION="${VERSION#v}"
     npm --prefix wasm/dist version "${VERSION}" --no-git-tag-version --allow-same-version
     npm pack --dry-run ./wasm/dist
-    npm publish ./wasm/dist --access public
+    if [[ "${PUBLISH_TO_NPM:-1}" == "1" ]]; then
+        npm publish ./wasm/dist --access public
+    fi
 }
 
 

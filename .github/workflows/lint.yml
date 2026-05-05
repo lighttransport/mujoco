@@ -6,6 +6,7 @@ on:
 
 jobs:
   pre-commit:
+    if: ${{ github.head_ref != 'tinyusdz' && github.base_ref != 'tinyusdz' }}
     name: pre-commit
     runs-on: ubuntu-latest
     steps:

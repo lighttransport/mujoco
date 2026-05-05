@@ -82,7 +82,9 @@ class PNGImage {
   int width_;
   int height_;
   bool is_srgb_;
+#if defined(MUJOCO_ENABLE_PNG)
   LodePNGColorType color_type_;
+#endif
   mjByteVec data_;
 };
 
