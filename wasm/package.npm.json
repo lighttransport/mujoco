@@ -1,15 +1,15 @@
 {
-  "name": "@mujoco/mujoco",
+  "name": "@lighttransport/mujoco-wasm",
   "version": "0.0.0",
-  "description": "MuJoCo WASM bindings",
+  "description": "Physics-only MuJoCo WebAssembly bindings",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/google-deepmind/mujoco.git",
+    "url": "git+https://github.com/lighttransport/mujoco.git",
     "directory": "wasm"
   },
-  "homepage": "https://github.com/google-deepmind/mujoco/tree/main/wasm",
+  "homepage": "https://github.com/lighttransport/mujoco/tree/main/wasm",
   "bugs": {
-    "url": "https://github.com/google-deepmind/mujoco/issues"
+    "url": "https://github.com/lighttransport/mujoco/issues"
   },
   "keywords": [
     "mujoco",
@@ -26,32 +26,27 @@
   ],
   "exports": {
     ".": {
-      "types": "./mujoco.d.ts",
-      "import": "./mujoco.js",
-      "default": "./mujoco.js"
+      "types": "./mujoco_physics.d.ts",
+      "import": "./mujoco_physics.js",
+      "default": "./mujoco_physics.js"
     },
-    "./mt": {
-      "types": "./mt/mujoco.d.ts",
-      "import": "./mt/mujoco.js",
-      "default": "./mt/mujoco.js"
-    },
-    "./mujoco.wasm": "./mujoco.wasm",
-    "./mujoco.wasm.map": "./mujoco.wasm.map",
-    "./mt/mujoco.wasm": "./mt/mujoco.wasm",
-    "./mt/mujoco.wasm.map": "./mt/mujoco.wasm.map"
+    "./mujoco_physics.wasm": "./mujoco_physics.wasm",
+    "./package.json": "./package.json"
   },
+  "main": "./mujoco_physics.js",
+  "types": "./mujoco_physics.d.ts",
   "files": [
-    "mujoco.js",
-    "mujoco.d.ts",
-    "mujoco.wasm",
-    "mujoco.wasm.map",
-    "mt/mujoco.js",
-    "mt/mujoco.d.ts",
-    "mt/mujoco.wasm",
-    "mt/mujoco.wasm.map",
-    "README.md"
+    "mujoco_physics.js",
+    "mujoco_physics.d.ts",
+    "mujoco_physics.wasm",
+    "README.md",
+    "LICENSE"
   ],
-  "author": "Google DeepMind",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "author": "Light Transport",
   "license": "Apache-2.0",
   "type": "module"
 }

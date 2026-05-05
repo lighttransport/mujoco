@@ -232,14 +232,36 @@ build_test_wasm() {
     npm run test --prefix ./wasm
 }
 
+build_physics_wasm() {
+    echo "Building physics-only WASM bindings..."
+    source emsdk/emsdk_env.sh
+
+    emcmake cmake -B build_wasm_physics \
+        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION:BOOL=OFF \
+        -DMUJOCO_ENABLE_FETCHCONTENT:BOOL=ON \
+        -DMUJOCO_BUILD_TESTS_WASM:BOOL=OFF \
+        -DMUJOCO_BUILD_PHYSICS_WASM:BOOL=ON \
+        -DMUJOCO_WASM_THREADS:BOOL=OFF \
+        -DMUJOCO_PHYSICS_ENABLE_THREADS:BOOL=OFF \
+        -DMUJOCO_ENABLE_PNG:BOOL=OFF \
+        $WASM_CMAKE_ARGS
+    cmake --build build_wasm_physics --target mujoco_physics_wasm --parallel $(nproc)
+
+    test -s wasm/dist/mujoco_physics.js
+    test -s wasm/dist/mujoco_physics.wasm
+    test -s wasm/dist/mujoco_physics.d.ts
+}
+
 package_wasm() {
-    echo "Publishing WASM bindings..."
+    echo "Publishing physics-only WASM bindings..."
     cp wasm/package.npm.json wasm/dist/package.json
-    cp wasm/README.md wasm/dist/README.md
+    cp wasm/README.npm.md wasm/dist/README.md
+    cp LICENSE wasm/dist/LICENSE
     VERSION="${VERSION:-${GITHUB_REF#refs/tags/}}"
-    npm --prefix wasm/dist version "${VERSION}" --no-git-tag-version
+    VERSION="${VERSION#v}"
+    npm --prefix wasm/dist version "${VERSION}" --no-git-tag-version --allow-same-version
     npm pack --dry-run ./wasm/dist
-    npm publish ./wasm/dist --access public --provenance
+    npm publish ./wasm/dist --access public
 }
 
 
