@@ -235,6 +235,30 @@ void setBodyMass(mjsBody* body, double mass) {
   body->mass = mass;
 }
 
+// Inertial-frame position (CoM in body frame). When set together with
+// non-zero body mass and inertia, the MuJoCo compiler uses these values
+// directly instead of deriving inertia from geom volumes.
+void setBodyIPos(mjsBody* body, double x, double y, double z) {
+  body->ipos[0] = x;
+  body->ipos[1] = y;
+  body->ipos[2] = z;
+}
+
+// Inertial-frame orientation. Identity default is (1,0,0,0).
+void setBodyIQuat(mjsBody* body, double w, double x, double y, double z) {
+  body->iquat[0] = w;
+  body->iquat[1] = x;
+  body->iquat[2] = y;
+  body->iquat[3] = z;
+}
+
+// Diagonal inertia tensor in the inertial frame (kg·m^2 per axis).
+void setBodyDiagInertia(mjsBody* body, double ixx, double iyy, double izz) {
+  body->inertia[0] = ixx;
+  body->inertia[1] = iyy;
+  body->inertia[2] = izz;
+}
+
 // Geom helpers
 
 mjsGeom* addGeom(mjsBody* body, const std::string& name) {
@@ -434,7 +458,10 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .class_function("add", &addBody, emscripten::allow_raw_pointers())
       .class_function("setPos", &setBodyPos, emscripten::allow_raw_pointers())
       .class_function("setQuat", &setBodyQuat, emscripten::allow_raw_pointers())
-      .class_function("setMass", &setBodyMass, emscripten::allow_raw_pointers());
+      .class_function("setMass", &setBodyMass, emscripten::allow_raw_pointers())
+      .class_function("setIPos", &setBodyIPos, emscripten::allow_raw_pointers())
+      .class_function("setIQuat", &setBodyIQuat, emscripten::allow_raw_pointers())
+      .class_function("setDiagInertia", &setBodyDiagInertia, emscripten::allow_raw_pointers());
 
   // --- Geom ---
   emscripten::class_<mjsGeom>("MjsGeom")
