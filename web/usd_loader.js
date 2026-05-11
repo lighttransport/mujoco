@@ -8,6 +8,75 @@ import * as THREE from "three";
 import { TinyUSDZLoader } from "tinyusdz/TinyUSDZLoader.js";
 import { TinyUSDZLoaderUtils } from "tinyusdz/TinyUSDZLoaderUtils.js";
 
+// Cross-engine joint-dynamics extraction. Reads damping / stiffness /
+// armature / frictionloss / initial position+velocity from a USD prim's
+// JSON-encoded properties bag, honoring the canonical namespace priority
+// physics:* > physxJoint:* / physxLimit:* > state:* > mjc:*.
+//
+// Mirrors web/sim/src/usd-physics.js (the canonical pattern source). This
+// helper is exported so a future joint-aware caller can apply dynamics to
+// MjsJoint via setDamping / setStiffness / setArmature / setFrictionLoss.
+// The mesh-only entry point below doesn't construct articulated joints, so
+// it doesn't consume this yet — it's wired so callers that DO build joints
+// can use a single import.
+export function jointDynamicsFromUsdPrim(props, isHinge = true) {
+  const limitNs = isHinge ? "physxLimit:angular" : "physxLimit:linear";
+  const firstNumber = (...keys) => {
+    for (const k of keys) {
+      const v = props?.[k];
+      if (typeof v === "number") return v;
+    }
+    return null;
+  };
+  const damping = firstNumber(
+    `${limitNs}:damping`, "mjc:jointDamping", "mjc:damping");
+  const stiffness = firstNumber(
+    `${limitNs}:stiffness`, "mjc:jointStiffness", "mjc:stiffness");
+  const armature = firstNumber(
+    "physxJoint:armature", "mjc:jointArmature", "mjc:armature");
+  const frictionloss = firstNumber(
+    "physxJoint:jointFriction", "mjc:jointFrictionLoss", "mjc:frictionloss");
+  const stateNs = isHinge ? "state:angular:physics" : "state:linear:physics";
+  // PhysX/Newton ship revolute state in degrees / deg-per-sec; convert on
+  // the consumer side. Callers handling slide joints should treat the
+  // numbers as meters / m-per-sec (no scaling).
+  const degToRad = isHinge ? Math.PI / 180 : 1;
+  const initPosition = (() => {
+    const v = firstNumber(`${stateNs}:position`);
+    return v == null ? null : v * degToRad;
+  })();
+  const initVelocity = (() => {
+    const v = firstNumber(`${stateNs}:velocity`);
+    return v == null ? null : v * degToRad;
+  })();
+  return { damping, stiffness, armature, frictionloss,
+           initPosition, initVelocity };
+}
+
+// Apply a dynamics struct (from jointDynamicsFromUsdPrim) onto a MuJoCo
+// joint handle, gated on the presence of the corresponding embind setters.
+// Older MuJoCo WASM builds may not expose all of these; this is a no-op
+// for any missing setter.
+export function applyJointDynamics(mj, jnt, dyn) {
+  if (!dyn || !jnt) return;
+  if (typeof dyn.damping === "number"
+      && typeof mj.MjsJoint.setDamping === "function") {
+    mj.MjsJoint.setDamping(jnt, dyn.damping);
+  }
+  if (typeof dyn.stiffness === "number"
+      && typeof mj.MjsJoint.setStiffness === "function") {
+    mj.MjsJoint.setStiffness(jnt, dyn.stiffness);
+  }
+  if (typeof dyn.armature === "number"
+      && typeof mj.MjsJoint.setArmature === "function") {
+    mj.MjsJoint.setArmature(jnt, dyn.armature);
+  }
+  if (typeof dyn.frictionloss === "number"
+      && typeof mj.MjsJoint.setFrictionLoss === "function") {
+    mj.MjsJoint.setFrictionLoss(jnt, dyn.frictionloss);
+  }
+}
+
 // Singleton loader — avoids re-initializing the tinyusdz WASM module.
 let loader = null;
 async function getLoader() {
