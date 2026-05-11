@@ -357,6 +357,27 @@ void setJointDamping(mjsJoint* j, double d) {
   j->damping[0] = d;
 }
 
+// Joint stiffness: degree-0 coefficient of the polynomial spring law.
+// MuJoCo applies a restoring torque/force toward j->springref with this
+// constant. PhysX/Newton authoring is a scalar; we map directly to the
+// first polynomial coefficient (the others stay zero, matching MJCF
+// `<joint stiffness=...>`).
+void setJointStiffness(mjsJoint* j, double k) {
+  j->stiffness[0] = k;
+}
+
+// Joint armature: rotational inertia added on top of the body inertia
+// projected through the joint axis. Required to make MuJoCo behave like
+// PhysX/Newton at small dt for high-mass-ratio chains.
+void setJointArmature(mjsJoint* j, double a) {
+  j->armature = a;
+}
+
+// Joint friction loss: coulomb-friction torque/force opposing motion.
+void setJointFrictionLoss(mjsJoint* j, double f) {
+  j->frictionloss = f;
+}
+
 // Light helpers
 
 mjsLight* addLight(mjsBody* body, const std::string& name) {
@@ -484,7 +505,10 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .class_function("setType", &setJointType, emscripten::allow_raw_pointers())
       .class_function("setAxis", &setJointAxis, emscripten::allow_raw_pointers())
       .class_function("setRange", &setJointRange, emscripten::allow_raw_pointers())
-      .class_function("setDamping", &setJointDamping, emscripten::allow_raw_pointers());
+      .class_function("setDamping", &setJointDamping, emscripten::allow_raw_pointers())
+      .class_function("setStiffness", &setJointStiffness, emscripten::allow_raw_pointers())
+      .class_function("setArmature", &setJointArmature, emscripten::allow_raw_pointers())
+      .class_function("setFrictionLoss", &setJointFrictionLoss, emscripten::allow_raw_pointers());
 
   // --- Light ---
   emscripten::class_<mjsLight>("MjsLight")
