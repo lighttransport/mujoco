@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include <mujoco/mjspec.h>
 #include "mujoco/mujoco.h"
@@ -125,9 +126,41 @@ class PhysicsData {
     return val(typed_memory_view(model_->ngeom * 9, data_->geom_xmat));
   }
 
+  // Per-body external force/torque accumulator, layout [fx,fy,fz, tx,ty,tz]
+  // per body in the world frame. Writeable: the JS side mutates it directly
+  // (e.g. the interactive grab-spring) and mj_step consumes it. Caller is
+  // responsible for zeroing it when the interaction ends.
+  val xfrc_applied() const {
+    return val(typed_memory_view(model_->nbody * 6, data_->xfrc_applied));
+  }
+
+  // Number of active contacts after the last mj_forward / mj_step.
+  int ncon() const { return data_->ncon; }
+
+  // Flat contact summary: 9 doubles per active contact —
+  // [dist, px,py,pz, nx,ny,nz, geom1, geom2]. `dist` < 0 means penetration;
+  // (px,py,pz) is the world contact point; (nx,ny,nz) is the contact-frame
+  // normal; geom1/geom2 are the colliding geom indices. Backed by a member
+  // buffer so the returned view stays valid until the next call.
+  val contacts() const {
+    const int n = data_->ncon;
+    contact_buf_.resize(static_cast<std::size_t>(n) * 9);
+    for (int i = 0; i < n; ++i) {
+      const mjContact& c = data_->contact[i];
+      double* row = contact_buf_.data() + static_cast<std::size_t>(i) * 9;
+      row[0] = c.dist;
+      row[1] = c.pos[0]; row[2] = c.pos[1]; row[3] = c.pos[2];
+      row[4] = c.frame[0]; row[5] = c.frame[1]; row[6] = c.frame[2];
+      row[7] = static_cast<double>(c.geom[0]);
+      row[8] = static_cast<double>(c.geom[1]);
+    }
+    return val(typed_memory_view(contact_buf_.size(), contact_buf_.data()));
+  }
+
  private:
   mjModel* model_;
   mjData* data_ = nullptr;
+  mutable std::vector<double> contact_buf_;
 };
 
 // ---------------------------------------------------------------------------
@@ -458,7 +491,10 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("xpos", &PhysicsData::xpos)
       .function("xquat", &PhysicsData::xquat)
       .function("geom_xpos", &PhysicsData::geom_xpos)
-      .function("geom_xmat", &PhysicsData::geom_xmat);
+      .function("geom_xmat", &PhysicsData::geom_xmat)
+      .function("xfrc_applied", &PhysicsData::xfrc_applied)
+      .function("ncon", &PhysicsData::ncon)
+      .function("contacts", &PhysicsData::contacts);
 
   // --- Load from binary ---
   emscripten::function("loadModelFromArrayBuffer", &LoadModelFromArrayBuffer,
