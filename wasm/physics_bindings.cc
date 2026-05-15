@@ -137,22 +137,30 @@ class PhysicsData {
   // Number of active contacts after the last mj_forward / mj_step.
   int ncon() const { return data_->ncon; }
 
-  // Flat contact summary: 9 doubles per active contact —
-  // [dist, px,py,pz, nx,ny,nz, geom1, geom2]. `dist` < 0 means penetration;
-  // (px,py,pz) is the world contact point; (nx,ny,nz) is the contact-frame
-  // normal; geom1/geom2 are the colliding geom indices. Backed by a member
-  // buffer so the returned view stays valid until the next call.
+  // Flat contact summary: 10 doubles per active contact —
+  // [dist, px,py,pz, nx,ny,nz, geom1, geom2, normalForce]. `dist` < 0 means
+  // penetration; (px,py,pz) is the world contact point; (nx,ny,nz) is the
+  // contact-frame normal; geom1/geom2 are the colliding geom indices;
+  // normalForce is the solver-computed normal-force magnitude (N) from
+  // mj_contactForce — 0 when the contact isn't in the constraint set.
+  // Backed by a member buffer so the returned view stays valid until the
+  // next call.
   val contacts() const {
     const int n = data_->ncon;
-    contact_buf_.resize(static_cast<std::size_t>(n) * 9);
+    contact_buf_.resize(static_cast<std::size_t>(n) * 10);
     for (int i = 0; i < n; ++i) {
       const mjContact& c = data_->contact[i];
-      double* row = contact_buf_.data() + static_cast<std::size_t>(i) * 9;
+      double* row = contact_buf_.data() + static_cast<std::size_t>(i) * 10;
       row[0] = c.dist;
       row[1] = c.pos[0]; row[2] = c.pos[1]; row[3] = c.pos[2];
       row[4] = c.frame[0]; row[5] = c.frame[1]; row[6] = c.frame[2];
       row[7] = static_cast<double>(c.geom[0]);
       row[8] = static_cast<double>(c.geom[1]);
+      mjtNum force[6] = {0};
+      if (c.efc_address >= 0) {
+        mj_contactForce(model_, data_, i, force);
+      }
+      row[9] = force[0];   // normal component, contact frame
     }
     return val(typed_memory_view(contact_buf_.size(), contact_buf_.data()));
   }
