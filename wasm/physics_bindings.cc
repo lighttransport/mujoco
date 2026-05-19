@@ -15,6 +15,7 @@
 #ifdef __EMSCRIPTEN__
 
 #include <emscripten/bind.h>
+#include <emscripten/emscripten.h>
 #include <emscripten/val.h>
 
 #include <cstddef>
@@ -27,6 +28,31 @@
 #include "mujoco/mujoco.h"
 
 namespace {
+
+// Route mju_warning / mju_error directly to JS console.{warn,error}.
+// Otherwise MuJoCo falls back to vfprintf via newlib stdio, which on
+// `-s FILESYSTEM=0` ends up driving `fd_write` with a partly-initialized
+// FILE struct (fd=0). The glue's per-fd buffer table only allocates
+// slots for stdout/stderr, so a write to fd=0 crashes with
+// "Cannot read properties of null (reading 'push')".
+EM_JS(void, lg_console_warn, (const char* msg), {
+  console.warn('[mj]', UTF8ToString(msg));
+});
+
+EM_JS(void, lg_console_error, (const char* msg), {
+  console.error('[mj]', UTF8ToString(msg));
+});
+
+void warning_to_console(const char* msg) { lg_console_warn(msg); }
+void error_to_console(const char* msg) { lg_console_error(msg); }
+
+struct InstallMujocoCallbacks {
+  InstallMujocoCallbacks() {
+    mju_user_warning = &warning_to_console;
+    mju_user_error = &error_to_console;
+  }
+};
+const InstallMujocoCallbacks kInstallMujocoCallbacks;
 
 using emscripten::typed_memory_view;
 using emscripten::val;
@@ -235,6 +261,23 @@ class SpecWrapper {
     return mjs_findBody(spec_, "world");
   }
 
+  // Mesh asset (procedural). Member function so embind doesn't need
+  // to marshal a SpecWrapper handle as a free-function parameter
+  // (cross-class type marshalling triggers a "parameter 0 has
+  // unknown type" registration error in embind). Returns the new
+  // mjsMesh* the caller then populates via MjsMesh.setUserVert /
+  // setUserFace / setMaxHullVert.
+  mjsMesh* addMesh(const std::string& name) {
+    mjsMesh* m = mjs_addMesh(spec_, nullptr);
+    if (!m) {
+      mju_error("mjs_addMesh failed");
+    }
+    if (!name.empty()) {
+      mjs_setName(m->element, name.c_str());
+    }
+    return m;
+  }
+
   PhysicsModel* compile() {
     mjModel* m = mj_compile(spec_, nullptr);
     if (!m) {
@@ -356,6 +399,45 @@ void setGeomFriction(mjsGeom* g, double slide, double roll, double spin) {
 void setGeomConType(mjsGeom* g, int contype) { g->contype = contype; }
 void setGeomConAffinity(mjsGeom* g, int conaffinity) { g->conaffinity = conaffinity; }
 void setGeomCondim(mjsGeom* g, int condim) { g->condim = condim; }
+
+// Bind a `<geom type="mesh">` to the named MjsMesh asset (the same
+// name passed to addMesh). MuJoCo computes a convex hull from the
+// referenced mesh's user-supplied vertices at compile time.
+void setGeomMeshName(mjsGeom* g, const std::string& name) {
+  mjs_setString(g->meshname, name.c_str());
+}
+
+// Mesh helpers — procedural mesh assets for mesh-typed colliders
+// authored from JS-side data (USD mesh points/indices).
+// `addMesh` itself lives on SpecWrapper (above) — see the comment
+// there for the embind-marshalling rationale.
+
+// Populate the mesh's user vertex buffer from a flat (x,y,z,…) array
+// living in the WASM heap. `ptr` is the byte offset of a Float32Array
+// view's underlying buffer; `n` is the element count. JS side
+// allocates via `Module._malloc`, writes via a typed-array view over
+// `Module.HEAPF32.buffer`, calls this, then `Module._free`. We pass
+// raw heap pointers rather than `val` (which trips an LTO/closure
+// funcref crash on the physics-only build) and rather than
+// `register_vector<float>` (the per-element marshalling cost is
+// prohibitive for meshes with thousands of vertices).
+void setMeshUserVertPtr(mjsMesh* mesh, uintptr_t ptr, int n) {
+  const float* data = reinterpret_cast<const float*>(ptr);
+  mjs_setFloat(mesh->uservert, data, n);
+}
+
+void setMeshUserFacePtr(mjsMesh* mesh, uintptr_t ptr, int n) {
+  const int* data = reinterpret_cast<const int*>(ptr);
+  mjs_setInt(mesh->userface, data, n);
+}
+
+// Optional cap on the convex-hull vertex count MuJoCo computes
+// (default 0 = no limit). Useful for pathological high-poly meshes
+// where the full convex hull would be too expensive to maintain
+// each step.
+void setMeshMaxHullVert(mjsMesh* mesh, int n) {
+  mesh->maxhullvert = n;
+}
 
 // Joint helpers
 
@@ -516,6 +598,7 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("getTimestep", &SpecWrapper::getTimestep)
       .function("setGravity", &SpecWrapper::setGravity)
       .function("worldBody", &SpecWrapper::worldBody, emscripten::allow_raw_pointers())
+      .function("addMesh", &SpecWrapper::addMesh, emscripten::allow_raw_pointers())
       .function("compile", &SpecWrapper::compile, emscripten::allow_raw_pointers());
 
   // --- Body ---
@@ -540,7 +623,23 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .class_function("setFriction", &setGeomFriction, emscripten::allow_raw_pointers())
       .class_function("setConType", &setGeomConType, emscripten::allow_raw_pointers())
       .class_function("setConAffinity", &setGeomConAffinity, emscripten::allow_raw_pointers())
-      .class_function("setCondim", &setGeomCondim, emscripten::allow_raw_pointers());
+      .class_function("setCondim", &setGeomCondim, emscripten::allow_raw_pointers())
+      .class_function("setMeshName", &setGeomMeshName, emscripten::allow_raw_pointers());
+
+  // --- Mesh asset (for `<geom type="mesh">`). MuJoCo computes the
+  //     convex hull from the user-supplied vertices at compile time;
+  //     the resulting geom uses true mesh-vs-* collision (per the
+  //     mjGEOM_MESH branch of mj_collision), no AABB / OBB proxy.
+  //     The constructor lives on MjSpec (`spec.addMesh(name)`) since
+  //     a free function taking SpecWrapper& as parameter 0 trips up
+  //     embind's parameter-type registration. ---
+  emscripten::class_<mjsMesh>("MjsMesh")
+      .class_function("setUserVertPtr", &setMeshUserVertPtr,
+                      emscripten::allow_raw_pointers())
+      .class_function("setUserFacePtr", &setMeshUserFacePtr,
+                      emscripten::allow_raw_pointers())
+      .class_function("setMaxHullVert", &setMeshMaxHullVert,
+                      emscripten::allow_raw_pointers());
 
   // --- Joint ---
   emscripten::class_<mjsJoint>("MjsJoint")
@@ -569,6 +668,7 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
   emscripten::constant("GEOM_ELLIPSOID", static_cast<int>(mjGEOM_ELLIPSOID));
   emscripten::constant("GEOM_CYLINDER", static_cast<int>(mjGEOM_CYLINDER));
   emscripten::constant("GEOM_BOX", static_cast<int>(mjGEOM_BOX));
+  emscripten::constant("GEOM_MESH", static_cast<int>(mjGEOM_MESH));
 
   // --- Joint type constants ---
   emscripten::constant("JNT_FREE", static_cast<int>(mjJNT_FREE));
