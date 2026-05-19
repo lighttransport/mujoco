@@ -45,6 +45,9 @@ jobs:
     - name: Prepare Linux
       run: bash ./.github/workflows/build_steps.sh prepare_linux
 
+    - name: Install NPM dependencies for WASM bindings
+      run: bash ./.github/workflows/build_steps.sh npm_ci
+
     - name: Setup Emscripten for WASM bindings
       run: bash ./.github/workflows/build_steps.sh setup_emsdk
 

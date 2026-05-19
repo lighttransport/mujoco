@@ -56,6 +56,10 @@ npm_ci() {
     popd
 }
 
+use_wasm_npm_bins() {
+    export PATH="$(pwd)/wasm/node_modules/.bin:$PATH"
+}
+
 
 setup_emsdk() {
     echo "Setting up Emscripten..."
@@ -209,7 +213,7 @@ test_python_bindings() {
 build_test_wasm() {
     echo "Building and testing WASM bindings..."
     source emsdk/emsdk_env.sh
-    export PATH="$(pwd)/node_modules/.bin:$PATH"
+    use_wasm_npm_bins
 
     echo "Building Multi-Threaded version..."
     emcmake cmake -B build_wasm_mt \
@@ -235,6 +239,7 @@ build_test_wasm() {
 build_physics_wasm() {
     echo "Building physics-only WASM bindings..."
     source emsdk/emsdk_env.sh
+    use_wasm_npm_bins
 
     emcmake cmake -B build_wasm_physics \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION:BOOL=OFF \
