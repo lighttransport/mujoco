@@ -263,6 +263,7 @@ package_wasm() {
     cp wasm/README.npm.md wasm/dist/README.md
     cp LICENSE wasm/dist/LICENSE
     VERSION="${VERSION:-${GITHUB_REF#refs/tags/}}"
+    VERSION="${VERSION#v}"
     npm --prefix wasm/dist version "${VERSION}" --no-git-tag-version --allow-same-version
     npm pack --dry-run ./wasm/dist
     if [[ "${PUBLISH_TO_NPM:-1}" == "1" ]]; then

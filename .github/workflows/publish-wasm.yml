@@ -6,13 +6,14 @@ on:
       - tinyusdz
     tags:
       - '[0-9]*.[0-9]*.[0-9]*'
+      - 'v[0-9]*.[0-9]*.[0-9]*'
 
   workflow_dispatch:
     inputs:
       tag_version:
         description: 'Release tag version to deploy'
         required: true
-        default: '0.0.0'
+        default: '0.0.9'
 
 permissions:
   id-token: write
