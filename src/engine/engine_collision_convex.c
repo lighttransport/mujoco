@@ -108,16 +108,31 @@ static int mjc_penetration(const mjModel* m, mjData* d, mjCCDObj* obj1, mjCCDObj
 
   if ((dist = mjc_ccd(&config, &status, obj1, obj2)) < 0) {
     int nwitness = status.nx;
-    for (int i = 0; i < nwitness; i++, con++) {
+    int ngood = 0;
+    for (int i = 0; i < nwitness; i++) {
+      mjtNum pos[3], frame[3];
+      pos[0] = 0.5*(status.x1[3*i + 0] + status.x2[3*i + 0]);
+      pos[1] = 0.5*(status.x1[3*i + 1] + status.x2[3*i + 1]);
+      pos[2] = 0.5*(status.x1[3*i + 2] + status.x2[3*i + 2]);
+      mji_sub3(frame, status.x1 + 3*i, status.x2 + 3*i);
+      mju_normalize3(frame);
+
+      // reject any witness that produced a non-finite/huge contact (defensive):
+      // degenerate thin hulls can yield NaN/Inf witness points in EPA
+      if (mju_isBad(margin + dist) ||
+          mju_isBad(pos[0]) || mju_isBad(pos[1]) || mju_isBad(pos[2]) ||
+          mju_isBad(frame[0]) || mju_isBad(frame[1]) || mju_isBad(frame[2])) {
+        continue;
+      }
+
       con->dist = margin + dist;
-      con->pos[0] = 0.5*(status.x1[3*i + 0] + status.x2[3*i + 0]);
-      con->pos[1] = 0.5*(status.x1[3*i + 1] + status.x2[3*i + 1]);
-      con->pos[2] = 0.5*(status.x1[3*i + 2] + status.x2[3*i + 2]);
-      mji_sub3(con->frame, status.x1 + 3*i, status.x2 + 3*i);
-      mju_normalize3(con->frame);
+      mji_copy3(con->pos, pos);
+      mji_copy3(con->frame, frame);
       mji_zero3(con->frame + 3);
+      con++;
+      ngood++;
     }
-    return nwitness;
+    return ngood;
   }
   return 0;
 }

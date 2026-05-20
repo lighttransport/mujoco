@@ -513,6 +513,7 @@ static int projectOriginPlane(mjtNum res[3], const mjtNum v1[3], const mjtNum v2
   cross3(n, diff31, diff32);
   nv = dot3(n, v3);
   nn = dot3(n, n);
+  if (nn == 0) return 1;
   scl3(res, n, nv / nn);
   return 0;
 }
@@ -1024,6 +1025,14 @@ static void triAffineCoord(mjtNum lambda[3], const mjtNum v1[3], const mjtNum v2
   // C33 corresponds to the signed area of 2-simplex: (v, s1, s2)
   mjtNum C33 = p[x]*v1[y] + p[y]*v2[x] + v1[x]*v2[y]
              - p[x]*v2[y] - p[y]*v1[x] - v2[x]*v1[y];
+
+  // guard against a degenerate (near-zero-area) projected triangle, which would
+  // otherwise divide by ~0 and yield Inf/NaN witness points (see epaWitness).
+  // depth comes from face->dist2 independently; lambda only blends witness points.
+  if (mju_abs(M_max) < mjMINVAL) {
+    lambda[0] = lambda[1] = lambda[2] = 1.0/3.0;
+    return;
+  }
 
   // compute affine coordinates
   lambda[0] = C31 / M_max;

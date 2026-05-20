@@ -16,7 +16,10 @@
 
 #include "src/engine/engine_collision_gjk.h"
 
+#include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <string>
 #include <vector>
 
 #include <ccd/ccd.h>  // IWYU pragma: keep
@@ -1375,6 +1378,147 @@ TEST_F(MjGjkTest, BoxMesh) {
   int ncons = Penetration(status, dist, dir, pos, model, data, g2, g1, 0, 1000);
   EXPECT_EQ(model->nmeshpoly, 7);
   EXPECT_EQ(ncons, 4);
+  mj_deleteData(data);
+  mj_deleteModel(model);
+}
+
+// build a thin faceted-disc hull mesh vertex string into buf
+static std::string ThinDiscVerts(int N, double R, double t) {
+  std::string s;
+  char b[64];
+  for (int half = 0; half < 2; ++half) {
+    double z = half ? t : -t;
+    for (int i = 0; i < N; ++i) {
+      double a = 2.0 * mjPI * i / N;
+      std::snprintf(b, sizeof(b), "%.17g %.17g %.17g  ",
+                    R * std::cos(a), R * std::sin(a), z);
+      s += b;
+    }
+  }
+  return s;
+}
+
+// Invariant sweep: collisions between thin / finely-faceted convex hulls (the
+// regime that stresses GJK/EPA witness recovery) must never yield non-finite
+// (NaN/Inf/huge) contact quantities. This guards the triAffineCoord and
+// projectOriginPlane divide-by-near-zero fixes against future regressions.
+// See google-deepmind/mujoco#1593.
+TEST_F(MjGjkTest, ThinMeshContactsAreFinite) {
+  const int    sides[]  = {4, 8, 16, 64};
+  const double scales[] = {1.0, 1e-2, 1e-4};
+  const double ratios[] = {1e-2, 1e-4, 1e-6, 1e-8};  // thickness / radius
+  const double tilts[]  = {0.0, 1e-3, 1e-1, 1.0, 5.0};
+  const char*  axes[]   = {"z", "x"};  // face-on vs edge-on penetration
+  const double depths[] = {0.25, 0.75};
+  int ncfg = 0;
+  for (int N : sides)
+  for (double s : scales)
+  for (double r : ratios)
+  for (double tilt : tilts)
+  for (const char* ax : axes)
+  for (double depth : depths) {
+    double R = s, t = s * r;
+    std::string v = ThinDiscVerts(N, R, t);
+    // position of geom2 so the two discs overlap by `depth`
+    double px = 0, py = 0, pz = 0;
+    if (ax[0] == 'z') pz = (1.0 - depth) * 2 * t;       // face-on (thin axis)
+    else              px = (1.0 - depth) * 2 * R;       // edge-on (in-plane)
+    char xml[1 << 16];
+    std::snprintf(xml, sizeof(xml), R"(
+    <mujoco>
+      <asset>
+        <mesh name="m1" vertex="%s"/>
+        <mesh name="m2" vertex="%s"/>
+      </asset>
+      <worldbody>
+        <geom name="geom1" type="mesh" mesh="m1" pos="0 0 0"/>
+        <geom name="geom2" type="mesh" mesh="m2" pos="%.17g %.17g %.17g" euler="0 0 %g"/>
+      </worldbody>
+    </mujoco>)", v.c_str(), v.c_str(), px, py, pz, tilt);
+
+    char error[1024];
+    mjModel* model = LoadModelFromString(xml, error, sizeof(error));
+    if (model == nullptr) continue;  // mesh too small/degenerate to compile
+    ncfg++;
+    mjData* data = mj_makeData(model);
+    mj_forward(model, data);
+    int g1 = mj_name2id(model, mjOBJ_GEOM, "geom1");
+    int g2 = mj_name2id(model, mjOBJ_GEOM, "geom2");
+    for (int mc : {1, 1000}) {
+      mjCCDStatus status; std::vector<mjtNum> dir, pos; mjtNum dist;
+      int ncons = Penetration(status, dist, dir, pos, model, data, g1, g2, 0, mc);
+      EXPECT_FALSE(mju_isBad(dist))
+          << "N=" << N << " s=" << s << " r=" << r << " tilt=" << tilt
+          << " ax=" << ax << " depth=" << depth << " mc=" << mc;
+      for (int i = 0; i < 3*ncons; ++i) {
+        EXPECT_FALSE(mju_isBad(dir[i]) || mju_isBad(pos[i]))
+            << "N=" << N << " s=" << s << " r=" << r << " tilt=" << tilt
+            << " ax=" << ax << " depth=" << depth << " mc=" << mc << " i=" << i;
+      }
+    }
+    mj_deleteData(data);
+    mj_deleteModel(model);
+  }
+  EXPECT_GT(ncfg, 0) << "no thin-mesh configurations compiled";
+}
+
+// Two thin, nearly-planar convex hull meshes overlapping face-to-face. EPA can
+// select a sliver (near-zero-area) face; without the triAffineCoord /
+// projectOriginPlane guards this produced NaN/Inf/huge witness points and the
+// "Nan, Inf or huge value in QACC" instability. Regression: all reported contact
+// quantities must be finite. See google-deepmind/mujoco#1593.
+TEST_F(MjGjkTest, ThinMeshNoNanWitness) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <asset>
+      <mesh name="plate1"
+            vertex="-1 -1 0   1 -1 0   1 1 0   -1 1 0
+                    -1 -1 0.001   1 -1 0.001   1 1 0.001   -1 1 0.001"/>
+      <mesh name="plate2"
+            vertex="-1 -1 0   1 -1 0   1 1 0   -1 1 0
+                    -1 -1 0.001   1 -1 0.001   1 1 0.001   -1 1 0.001"/>
+    </asset>
+    <worldbody>
+      <geom name="geom1" type="mesh" mesh="plate1" pos="0 0 0"/>
+      <geom name="geom2" type="mesh" mesh="plate2" pos="0.05 0.05 0.0005"
+            euler="0 0 5"/>
+    </worldbody>
+  </mujoco>)";
+
+  char error[1024];
+  mjModel* model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model, NotNull()) << "Failed to load model: " << error;
+
+  mjData* data = mj_makeData(model);
+  mj_forward(model, data);
+
+  int g1 = mj_name2id(model, mjOBJ_GEOM, "geom1");
+  int g2 = mj_name2id(model, mjOBJ_GEOM, "geom2");
+
+  mjCCDStatus status;
+  std::vector<mjtNum> dir, pos;
+  mjtNum dist;
+
+  // exercise both single- and multi-contact (polygonClip) witness paths
+  for (int max_contacts : {1, 1000}) {
+    int ncons = Penetration(status, dist, dir, pos, model, data, g1, g2, 0,
+                            max_contacts);
+
+    EXPECT_FALSE(mju_isBad(dist))
+        << "non-finite depth, max_contacts=" << max_contacts;
+
+    for (int i = 0; i < ncons; ++i) {
+      for (int k = 0; k < 3; ++k) {
+        EXPECT_FALSE(mju_isBad(dir[3*i + k]))
+            << "non-finite dir, contact " << i << " max_contacts="
+            << max_contacts;
+        EXPECT_FALSE(mju_isBad(pos[3*i + k]))
+            << "non-finite pos, contact " << i << " max_contacts="
+            << max_contacts;
+      }
+    }
+  }
+
   mj_deleteData(data);
   mj_deleteModel(model);
 }
