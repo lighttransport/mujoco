@@ -281,6 +281,14 @@ class SpecWrapper {
   PhysicsModel* compile() {
     mjModel* m = mj_compile(spec_, nullptr);
     if (!m) {
+      // Surface the real MuJoCo error string before aborting so the JS
+      // console isn't left with just "mj_compile failed". The JS glue
+      // treats mju_error as a fatal exit which tears down the wasm before
+      // mjs_getError could be retrieved from JS afterwards.
+      const char* err = mjs_getError(spec_);
+      if (err && *err) {
+        lg_console_error(err);
+      }
       mju_error("mj_compile failed");
     }
     return new PhysicsModel(m);
