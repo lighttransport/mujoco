@@ -152,6 +152,15 @@ class PhysicsData {
     return val(typed_memory_view(model_->ngeom * 9, data_->geom_xmat));
   }
 
+  // Mocap targets, writeable: [x,y,z] / [w,x,y,z] per mocap body. The JS side
+  // sets these each substep to drive kinematic (mocap) bodies.
+  val mocap_pos() const {
+    return val(typed_memory_view(model_->nmocap * 3, data_->mocap_pos));
+  }
+  val mocap_quat() const {
+    return val(typed_memory_view(model_->nmocap * 4, data_->mocap_quat));
+  }
+
   // Per-body external force/torque accumulator, layout [fx,fy,fz, tx,ty,tz]
   // per body in the world frame. Writeable: the JS side mutates it directly
   // (e.g. the interactive grab-spring) and mj_step consumes it. Caller is
@@ -278,6 +287,18 @@ class SpecWrapper {
     return m;
   }
 
+  // Contact-exclusion pair: emit a <contact><exclude> between two named
+  // bodies so authored collision filtering (UsdPhysicsFilteredPairsAPI) is
+  // honored exactly, instead of being packed into contype/conaffinity bits.
+  void addExclude(const std::string& bodyName1, const std::string& bodyName2) {
+    mjsExclude* ex = mjs_addExclude(spec_);
+    if (!ex) {
+      mju_error("mjs_addExclude failed");
+    }
+    mjs_setString(ex->bodyname1, bodyName1.c_str());
+    mjs_setString(ex->bodyname2, bodyName2.c_str());
+  }
+
   PhysicsModel* compile() {
     mjModel* m = mj_compile(spec_, nullptr);
     if (!m) {
@@ -325,6 +346,12 @@ void setBodyQuat(mjsBody* body, double w, double x, double y, double z) {
 
 void setBodyMass(mjsBody* body, double mass) {
   body->mass = mass;
+}
+
+// Mark a body as a mocap body (kinematically driven via data.mocap_pos/quat
+// rather than a free joint). MuJoCo mocap bodies must have no joints.
+void setBodyMocap(mjsBody* body, bool mocap) {
+  body->mocap = mocap ? 1 : 0;
 }
 
 // Inertial-frame position (CoM in body frame). When set together with
@@ -590,6 +617,8 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("xquat", &PhysicsData::xquat)
       .function("geom_xpos", &PhysicsData::geom_xpos)
       .function("geom_xmat", &PhysicsData::geom_xmat)
+      .function("mocap_pos", &PhysicsData::mocap_pos)
+      .function("mocap_quat", &PhysicsData::mocap_quat)
       .function("xfrc_applied", &PhysicsData::xfrc_applied)
       .function("ncon", &PhysicsData::ncon)
       .function("contacts", &PhysicsData::contacts);
@@ -607,6 +636,7 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("setGravity", &SpecWrapper::setGravity)
       .function("worldBody", &SpecWrapper::worldBody, emscripten::allow_raw_pointers())
       .function("addMesh", &SpecWrapper::addMesh, emscripten::allow_raw_pointers())
+      .function("addExclude", &SpecWrapper::addExclude)
       .function("compile", &SpecWrapper::compile, emscripten::allow_raw_pointers());
 
   // --- Body ---
@@ -617,7 +647,8 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .class_function("setMass", &setBodyMass, emscripten::allow_raw_pointers())
       .class_function("setIPos", &setBodyIPos, emscripten::allow_raw_pointers())
       .class_function("setIQuat", &setBodyIQuat, emscripten::allow_raw_pointers())
-      .class_function("setDiagInertia", &setBodyDiagInertia, emscripten::allow_raw_pointers());
+      .class_function("setDiagInertia", &setBodyDiagInertia, emscripten::allow_raw_pointers())
+      .class_function("setMocap", &setBodyMocap, emscripten::allow_raw_pointers());
 
   // --- Geom ---
   emscripten::class_<mjsGeom>("MjsGeom")
