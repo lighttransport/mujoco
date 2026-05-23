@@ -3,7 +3,10 @@
 This document summarizes all physics annotations (attributes) that MuJoCo supports in USD
 via the **mjcPhysics** custom schema, and describes the current TinyUSDZ (WASM) support status.
 
-For full documentation see [`doc/OpenUSD/`](OpenUSD/index.rst).
+For full documentation see [`doc/OpenUSD/`](OpenUSD/index.rst). For how MuJoCo treats
+collision/"hull" meshes — convex-hull collision, the `group 2` (visual) / `group 3`
+(collision) convention, `contype`/`conaffinity` filtering, and the USD → MJCF collision
+mapping — see [`collision-mesh-handling.md`](collision-mesh-handling.md).
 
 ## Architecture Overview
 
@@ -174,6 +177,13 @@ The contact dimensionality (`condim`) values:
 - **4**: + torsional friction
 - **6**: + rolling friction (full)
 
+> **`mjc:group` is not a collision filter.** It maps to the MJCF geom `group`, a
+> *visualization / inertia-selection* tag. Whether two colliders interact is decided by the
+> `contype`/`conaffinity` bitmasks — `(contype1 & conaffinity2) || (contype2 & conaffinity1)`
+> — not by `group`. There is no dedicated `mjc:contype`/`mjc:conaffinity` USD attribute;
+> visual-only prims instead use `MjcImageableAPI` (§9), which sets `contype = conaffinity = 0`.
+> See [`collision-mesh-handling.md`](collision-mesh-handling.md) §3–§4.
+
 ---
 
 ## 4. MjcMeshCollisionAPI — Mesh Collision Properties
@@ -184,6 +194,13 @@ Applied to mesh collision prims alongside `UsdPhysicsMeshCollisionAPI`.
 |---|---|---|---|
 | `mjc:inertia` | token | `legacy` | Mesh inertia computation mode (`legacy`, `convex`, `exact`, `shell`) |
 | `mjc:maxhullvert` | int | -1 | Max vertices in convex hull (-1 = unlimited) |
+
+> MuJoCo collides a mesh as its **convex hull** (computed by qhull at compile time);
+> `mjc:maxhullvert` caps the hull's vertex count. A non-convex collider must be supplied as
+> several convex pieces (convex decomposition) — MuJoCo does **not** auto-decompose. For the
+> `UsdPhysicsMeshCollisionAPI` `approximation` → MJCF mapping (`convexHull`,
+> `convexDecomposition`, `boundingCube`/`boundingSphere`, `none`), see
+> [`collision-mesh-handling.md`](collision-mesh-handling.md) §5 and §7.
 
 ---
 
