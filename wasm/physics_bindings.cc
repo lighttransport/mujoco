@@ -94,6 +94,9 @@ class PhysicsModel {
   val dof_frictionloss() const { return val(typed_memory_view(model_->nv, model_->dof_frictionloss)); }
   double timestep() const { return model_->opt.timestep; }
   void setTimestep(double dt) { model_->opt.timestep = dt; }
+  int iterations() const { return model_->opt.iterations; }
+  int ls_iterations() const { return model_->opt.ls_iterations; }
+  int solver() const { return model_->opt.solver; }
   val gravity() const {
     return val(typed_memory_view(3, model_->opt.gravity));
   }
@@ -324,6 +327,15 @@ class SpecWrapper {
   // them explicitly and a stiff servo then blows up.
   void setIntegrator(int which) {
     spec_->option.integrator = static_cast<mjtIntegrator>(which);
+  }
+
+  // Constraint-solver budget (opt-in; keeps MuJoCo's default when 0). More
+  // iterations resolve many simultaneous contacts more completely each step,
+  // for dense-contact scenes. iterations = main solver passes; lsIterations =
+  // per-pass line-search steps.
+  void setSolverIterations(int iterations, int lsIterations) {
+    if (iterations > 0) spec_->option.iterations = iterations;
+    if (lsIterations > 0) spec_->option.ls_iterations = lsIterations;
   }
 
   mjsBody* worldBody() {
@@ -726,6 +738,9 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("nsensordata", &PhysicsModel::nsensordata)
       .function("timestep", &PhysicsModel::timestep)
       .function("setTimestep", &PhysicsModel::setTimestep)
+      .function("iterations", &PhysicsModel::iterations)
+      .function("ls_iterations", &PhysicsModel::ls_iterations)
+      .function("solver", &PhysicsModel::solver)
       .function("gravity", &PhysicsModel::gravity)
       .function("o_solref", &PhysicsModel::o_solref)
       .function("o_solimp", &PhysicsModel::o_solimp)
@@ -769,6 +784,7 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .constructor<>()
       .function("setModelName", &SpecWrapper::setModelName)
       .function("setIntegrator", &SpecWrapper::setIntegrator)
+      .function("setSolverIterations", &SpecWrapper::setSolverIterations)
       .function("setTimestep", &SpecWrapper::setTimestep)
       .function("getTimestep", &SpecWrapper::getTimestep)
       .function("setGravity", &SpecWrapper::setGravity)
