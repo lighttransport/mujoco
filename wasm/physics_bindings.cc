@@ -83,7 +83,15 @@ class PhysicsModel {
   int nbody() const { return model_->nbody; }
   int ngeom() const { return model_->ngeom; }
   int njnt() const { return model_->njnt; }
+  int neq() const { return model_->neq; }
+  int ntendon() const { return model_->ntendon; }
   int nsensordata() const { return model_->nsensordata; }
+  // Diagnostics: passive joint/dof properties + compiled joint ranges.
+  val jnt_stiffness() const { return val(typed_memory_view(model_->njnt, model_->jnt_stiffness)); }
+  val jnt_range() const { return val(typed_memory_view(model_->njnt * 2, model_->jnt_range)); }
+  val dof_damping() const { return val(typed_memory_view(model_->nv, model_->dof_damping)); }
+  val dof_armature() const { return val(typed_memory_view(model_->nv, model_->dof_armature)); }
+  val dof_frictionloss() const { return val(typed_memory_view(model_->nv, model_->dof_frictionloss)); }
   double timestep() const { return model_->opt.timestep; }
   void setTimestep(double dt) { model_->opt.timestep = dt; }
   val gravity() const {
@@ -310,6 +318,14 @@ class SpecWrapper {
     spec_->option.gravity[2] = z;
   }
 
+  // Integrator: 0=Euler, 1=RK4, 2=implicit, 3=implicitfast. implicit(fast)
+  // integrates actuator gains and joint damping implicitly, which is what
+  // makes stiff position servos stable at the sim timestep — Euler integrates
+  // them explicitly and a stiff servo then blows up.
+  void setIntegrator(int which) {
+    spec_->option.integrator = static_cast<mjtIntegrator>(which);
+  }
+
   mjsBody* worldBody() {
     return mjs_findBody(spec_, "world");
   }
@@ -341,6 +357,35 @@ class SpecWrapper {
     }
     mjs_setString(ex->bodyname1, bodyName1.c_str());
     mjs_setString(ex->bodyname2, bodyName2.c_str());
+  }
+
+  // Position servo actuator on a joint — the MuJoCo `<position kp kv>`
+  // expansion (gaintype FIXED with gainprm[0]=kp; biastype AFFINE with
+  // biasprm=[0,-kp,-kv]). Generalized force = kp*(ctrl - qpos) - kv*qvel,
+  // integrated implicitly by mj_step, so a joint can be servoed to a target
+  // angle/length (write data.ctrl[i] = target) stably at the sim timestep —
+  // unlike an explicit qfrc PD. Actuators are indexed by creation order, which
+  // is the same order as data.ctrl, so the caller tracks the ctrl index itself.
+  // forcerange optionally clamps |output| (0 = unlimited).
+  void addPositionActuator(const std::string& jointName, double kp, double kv,
+                           double forceRange) {
+    mjsActuator* a = mjs_addActuator(spec_, nullptr);
+    if (!a) {
+      mju_error("mjs_addActuator failed");
+    }
+    a->trntype = mjTRN_JOINT;
+    mjs_setString(a->target, jointName.c_str());
+    a->gaintype = mjGAIN_FIXED;
+    a->gainprm[0] = kp;
+    a->biastype = mjBIAS_AFFINE;
+    a->biasprm[0] = 0.0;
+    a->biasprm[1] = -kp;
+    a->biasprm[2] = -kv;
+    if (forceRange > 0.0) {
+      a->forcelimited = mjLIMITED_TRUE;
+      a->forcerange[0] = -forceRange;
+      a->forcerange[1] = forceRange;
+    }
   }
 
   PhysicsModel* compile() {
@@ -643,6 +688,13 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("nbody", &PhysicsModel::nbody)
       .function("ngeom", &PhysicsModel::ngeom)
       .function("njnt", &PhysicsModel::njnt)
+      .function("neq", &PhysicsModel::neq)
+      .function("ntendon", &PhysicsModel::ntendon)
+      .function("jnt_stiffness", &PhysicsModel::jnt_stiffness)
+      .function("jnt_range", &PhysicsModel::jnt_range)
+      .function("dof_damping", &PhysicsModel::dof_damping)
+      .function("dof_armature", &PhysicsModel::dof_armature)
+      .function("dof_frictionloss", &PhysicsModel::dof_frictionloss)
       .function("nsensordata", &PhysicsModel::nsensordata)
       .function("timestep", &PhysicsModel::timestep)
       .function("setTimestep", &PhysicsModel::setTimestep)
@@ -688,12 +740,14 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
   emscripten::class_<SpecWrapper>("MjSpec")
       .constructor<>()
       .function("setModelName", &SpecWrapper::setModelName)
+      .function("setIntegrator", &SpecWrapper::setIntegrator)
       .function("setTimestep", &SpecWrapper::setTimestep)
       .function("getTimestep", &SpecWrapper::getTimestep)
       .function("setGravity", &SpecWrapper::setGravity)
       .function("worldBody", &SpecWrapper::worldBody, emscripten::allow_raw_pointers())
       .function("addMesh", &SpecWrapper::addMesh, emscripten::allow_raw_pointers())
       .function("addExclude", &SpecWrapper::addExclude)
+      .function("addPositionActuator", &SpecWrapper::addPositionActuator)
       .function("compile", &SpecWrapper::compile, emscripten::allow_raw_pointers());
 
   // --- Body ---
