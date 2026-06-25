@@ -388,6 +388,34 @@ class SpecWrapper {
     }
   }
 
+  // Velocity servo actuator on a joint — the MuJoCo `<velocity kv>` expansion
+  // (gaintype FIXED gainprm[0]=kv; biastype AFFINE biasprm=[0,0,-kv]).
+  // Generalized force = kv*(ctrl - qvel): write data.ctrl[i] = target rate and
+  // the joint is driven to that speed with a force that tapers to zero as it
+  // converges — the right model for free-spinning joints (wheels), where a
+  // stiff position servo would over-torque and launch the body. forcerange
+  // optionally clamps |output| (0 = unlimited).
+  void addVelocityActuator(const std::string& jointName, double kv,
+                           double forceRange) {
+    mjsActuator* a = mjs_addActuator(spec_, nullptr);
+    if (!a) {
+      mju_error("mjs_addActuator failed");
+    }
+    a->trntype = mjTRN_JOINT;
+    mjs_setString(a->target, jointName.c_str());
+    a->gaintype = mjGAIN_FIXED;
+    a->gainprm[0] = kv;
+    a->biastype = mjBIAS_AFFINE;
+    a->biasprm[0] = 0.0;
+    a->biasprm[1] = 0.0;
+    a->biasprm[2] = -kv;
+    if (forceRange > 0.0) {
+      a->forcelimited = mjLIMITED_TRUE;
+      a->forcerange[0] = -forceRange;
+      a->forcerange[1] = forceRange;
+    }
+  }
+
   PhysicsModel* compile() {
     mjModel* m = mj_compile(spec_, nullptr);
     if (!m) {
@@ -748,6 +776,7 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("addMesh", &SpecWrapper::addMesh, emscripten::allow_raw_pointers())
       .function("addExclude", &SpecWrapper::addExclude)
       .function("addPositionActuator", &SpecWrapper::addPositionActuator)
+      .function("addVelocityActuator", &SpecWrapper::addVelocityActuator)
       .function("compile", &SpecWrapper::compile, emscripten::allow_raw_pointers());
 
   // --- Body ---
