@@ -185,6 +185,19 @@ class PhysicsData {
     return val(typed_memory_view(model_->nbody * 6, data_->xfrc_applied));
   }
 
+  // Joint-space applied generalized force (nv), indexed by DOF address. Lets
+  // callers do PD / torque control without compiled actuators: write a torque
+  // per joint DOF each substep and mj_step consumes it. Zero it on release.
+  val qfrc_applied() const {
+    return val(typed_memory_view(model_->nv, data_->qfrc_applied));
+  }
+
+  // Bias force (gravity + Coriolis/centrifugal), nv, from the last forward
+  // pass. Read-only feedforward term for gravity-compensated control.
+  val qfrc_bias() const {
+    return val(typed_memory_view(model_->nv, data_->qfrc_bias));
+  }
+
   // Number of active contacts after the last mj_forward / mj_step.
   int ncon() const { return data_->ncon; }
 
@@ -216,10 +229,25 @@ class PhysicsData {
     return val(typed_memory_view(contact_buf_.size(), contact_buf_.data()));
   }
 
+  // Diagonal of the joint-space inertia (mass) matrix, nv entries, from the
+  // last forward pass. qM is stored sparse; model->dof_Madr[i] addresses the
+  // diagonal element of DOF i. Lets callers scale PD gains by per-joint
+  // inertia so impedance control is uniformly stable across heavy and
+  // light joints (gains become natural-frequency units, inertia-independent).
+  val qM_diag() const {
+    const int nv = model_->nv;
+    qm_diag_buf_.resize(static_cast<std::size_t>(nv));
+    for (int i = 0; i < nv; ++i) {
+      qm_diag_buf_[i] = data_->qM[model_->dof_Madr[i]];
+    }
+    return val(typed_memory_view(qm_diag_buf_.size(), qm_diag_buf_.data()));
+  }
+
  private:
   mjModel* model_;
   mjData* data_ = nullptr;
   mutable std::vector<double> contact_buf_;
+  mutable std::vector<double> qm_diag_buf_;
 };
 
 // ---------------------------------------------------------------------------
@@ -646,6 +674,9 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("mocap_pos", &PhysicsData::mocap_pos)
       .function("mocap_quat", &PhysicsData::mocap_quat)
       .function("xfrc_applied", &PhysicsData::xfrc_applied)
+      .function("qfrc_applied", &PhysicsData::qfrc_applied)
+      .function("qfrc_bias", &PhysicsData::qfrc_bias)
+      .function("qM_diag", &PhysicsData::qM_diag)
       .function("ncon", &PhysicsData::ncon)
       .function("contacts", &PhysicsData::contacts);
 
