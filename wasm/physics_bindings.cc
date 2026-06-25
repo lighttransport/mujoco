@@ -90,6 +90,22 @@ class PhysicsModel {
     return val(typed_memory_view(3, model_->opt.gravity));
   }
 
+  // Solver contact-override parameters (mjModel.opt). When the
+  // mjENBL_OVERRIDE enable bit is set, MuJoCo uses o_solref/o_solimp for
+  // EVERY contact instead of the per-geom-derived values — a runtime,
+  // rebuild-free lever for global contact compliance (softness). Returned as
+  // typed_memory_views so JS can read/write the arrays in place.
+  val o_solref() const {
+    return val(typed_memory_view(mjNREF, model_->opt.o_solref));
+  }
+  val o_solimp() const {
+    return val(typed_memory_view(mjNIMP, model_->opt.o_solimp));
+  }
+  double o_margin() const { return model_->opt.o_margin; }
+  void setOMargin(double m) { model_->opt.o_margin = m; }
+  int enableflags() const { return model_->opt.enableflags; }
+  void setEnableFlags(int f) { model_->opt.enableflags = f; }
+
  private:
   mjModel* model_;
 };
@@ -602,7 +618,17 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("nsensordata", &PhysicsModel::nsensordata)
       .function("timestep", &PhysicsModel::timestep)
       .function("setTimestep", &PhysicsModel::setTimestep)
-      .function("gravity", &PhysicsModel::gravity);
+      .function("gravity", &PhysicsModel::gravity)
+      .function("o_solref", &PhysicsModel::o_solref)
+      .function("o_solimp", &PhysicsModel::o_solimp)
+      .function("o_margin", &PhysicsModel::o_margin)
+      .function("setOMargin", &PhysicsModel::setOMargin)
+      .function("enableflags", &PhysicsModel::enableflags)
+      .function("setEnableFlags", &PhysicsModel::setEnableFlags);
+
+  // Enable bit that makes the solver use opt.o_solref/o_solimp/o_margin for
+  // all contacts (runtime contact-compliance override).
+  emscripten::constant("mjENBL_OVERRIDE", static_cast<int>(mjENBL_OVERRIDE));
 
   // --- PhysicsData ---
   emscripten::class_<PhysicsData>("PhysicsData")
