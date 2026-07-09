@@ -87,6 +87,12 @@ class PhysicsModel {
   int ntendon() const { return model_->ntendon; }
   int nsensordata() const { return model_->nsensordata; }
   // Diagnostics: passive joint/dof properties + compiled joint ranges.
+  // Writable collision masks. Lets the backend contact-filter an IK-held
+  // chain (a kinematically pinned leg in ground contact pumps momentum into
+  // the free root every step — the intended design is contype=0 while held)
+  // and restore the authored masks afterwards.
+  val geom_contype() const { return val(typed_memory_view(model_->ngeom, model_->geom_contype)); }
+  val geom_conaffinity() const { return val(typed_memory_view(model_->ngeom, model_->geom_conaffinity)); }
   val jnt_stiffness() const { return val(typed_memory_view(model_->njnt, model_->jnt_stiffness)); }
   val jnt_range() const { return val(typed_memory_view(model_->njnt * 2, model_->jnt_range)); }
   val dof_damping() const { return val(typed_memory_view(model_->nv, model_->dof_damping)); }
@@ -746,6 +752,8 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("nsensordata", &PhysicsModel::nsensordata)
       .function("timestep", &PhysicsModel::timestep)
       .function("setTimestep", &PhysicsModel::setTimestep)
+      .function("geom_contype", &PhysicsModel::geom_contype)
+      .function("geom_conaffinity", &PhysicsModel::geom_conaffinity)
       .function("cone", &PhysicsModel::cone)
       .function("setCone", &PhysicsModel::setCone)
       .function("impratio", &PhysicsModel::impratio)
