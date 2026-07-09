@@ -94,6 +94,14 @@ class PhysicsModel {
   val dof_frictionloss() const { return val(typed_memory_view(model_->nv, model_->dof_frictionloss)); }
   double timestep() const { return model_->opt.timestep; }
   void setTimestep(double dt) { model_->opt.timestep = dt; }
+  // Friction-cone type (mjCONE_PYRAMIDAL=0 / mjCONE_ELLIPTIC=1) and
+  // impratio. Menagerie quadrupeds author cone="elliptic" impratio="100"
+  // and tune foot friction against them — runtime-writable like timestep so
+  // the backend can honor the authored solver options without a recompile.
+  int cone() const { return model_->opt.cone; }
+  void setCone(int c) { model_->opt.cone = c; }
+  double impratio() const { return model_->opt.impratio; }
+  void setImpratio(double r) { model_->opt.impratio = r; }
   int iterations() const { return model_->opt.iterations; }
   int ls_iterations() const { return model_->opt.ls_iterations; }
   int solver() const { return model_->opt.solver; }
@@ -738,6 +746,10 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("nsensordata", &PhysicsModel::nsensordata)
       .function("timestep", &PhysicsModel::timestep)
       .function("setTimestep", &PhysicsModel::setTimestep)
+      .function("cone", &PhysicsModel::cone)
+      .function("setCone", &PhysicsModel::setCone)
+      .function("impratio", &PhysicsModel::impratio)
+      .function("setImpratio", &PhysicsModel::setImpratio)
       .function("iterations", &PhysicsModel::iterations)
       .function("ls_iterations", &PhysicsModel::ls_iterations)
       .function("solver", &PhysicsModel::solver)
