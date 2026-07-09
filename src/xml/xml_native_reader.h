@@ -44,7 +44,7 @@ class mjXReader : public mjXBase {
 
   // XML sections embedded in all formats
   static void Compiler(tinyxml2::XMLElement* section, mjSpec* s);    // compiler section
-  static void Option(tinyxml2::XMLElement* section, mjOption* opt);  // option section
+  static void Option(tinyxml2::XMLElement* section, mjSpec* s, mjOption* opt);  // option section
   static void Size(tinyxml2::XMLElement* section, mjSpec* s);        // size section
 
  private:
@@ -102,7 +102,7 @@ class mjXReader : public mjXBase {
 };
 
 // MJCF schema
-#define nMJCF 246
+#define nMJCF 248
 extern std::vector<const char*> MJCF[nMJCF];
 
 #endif  // MUJOCO_SRC_XML_XML_NATIVE_READER_H_

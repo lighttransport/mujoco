@@ -15,13 +15,13 @@
 #include "engine/engine_util_misc.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <mujoco/mjdata.h>
 #include <mujoco/mjmacro.h>
 #include <mujoco/mjmodel.h>
 #include "engine/engine_array_safety.h"
@@ -33,21 +33,21 @@
 //------------------------------ tendon wrapping ---------------------------------------------------
 
 // check for intersection of two 2D line segments
-static mjtByte is_intersect(const mjtNum* p1, const mjtNum* p2,
+static mjtBool is_intersect(const mjtNum* p1, const mjtNum* p2,
                             const mjtNum* p3, const mjtNum* p4) {
   mjtNum a, b;
 
   // compute determinant, check
   mjtNum det = (p4[1]-p3[1])*(p2[0]-p1[0]) - (p4[0]-p3[0])*(p2[1]-p1[1]);
   if (mju_abs(det) < mjMINVAL) {
-    return 0;
+    return false;
   }
 
   // compute intersection point on each line
   a = ((p4[0]-p3[0])*(p1[1]-p3[1]) - (p4[1]-p3[1])*(p1[0]-p3[0])) / det;
   b = ((p2[0]-p1[0])*(p1[1]-p3[1]) - (p2[1]-p1[1])*(p1[0]-p3[0])) / det;
 
-  return ((a >= 0 && a <= 1 && b >= 0 && b <= 1) ? 1 : 0);
+  return ((a >= 0 && a <= 1 && b >= 0 && b <= 1) ? true : false);
 }
 
 
@@ -533,47 +533,9 @@ void mju_camPixelRay(mjtNum origin[3], mjtNum direction[3],
 
 // ----------------------------- flex interpolation ------------------------------------------------
 
-mjtNum static inline phi(mjtNum s, int i, int order) {
-  if (order == 1) {
-    return i == 0 ? 1 - s : s;
-  } else if (order == 2) {
-    switch (i) {
-      case 0:
-        return 2 * s * s - 3 * s + 1;
-      case 1:
-        return 4 * (s - s * s);
-      case 2:
-        return 2 * s * s - s;
-      default:
-        mjERROR("invalid index %d", i);
-        return 0;
-    }
-  } else {
-    mjERROR("order must be 1 or 2");
-    return 0;
-  }
-}
-
-mjtNum static inline dphi(mjtNum s, int i, int order) {
-  if (order == 1) {
-    return i == 0 ? -1 : 1;
-  } else if (order == 2) {
-    switch (i) {
-      case 0:
-        return 4 * s - 3;
-      case 1:
-        return 4 * (1 - 2 * s);
-      case 2:
-        return 4 * s - 1;
-      default:
-        mjERROR("invalid index %d, must be 0, 1, or 2", i);
-        return 0;
-    }
-  } else {
-    mjERROR("order must be 1 or 2");
-    return 0;
-  }
-}
+// use shared shape functions from engine_util_misc.h
+#define phi mju_flexPhi
+#define dphi mju_flexDphi
 
 // evaluate the deformation gradient at p using the nodal dof values
 void mju_defGradient(mjtNum res[9], const mjtNum p[3], const mjtNum* dof, int order) {
@@ -612,12 +574,472 @@ mjtNum mju_evalBasis(const mjtNum x[3], int i, int order) {
   }
 }
 
-// interpolate a function at x with given interpolation coefficients and order n
-void mju_interpolate3D(mjtNum res[3], const mjtNum x[3], const mjtNum* coeff, int order) {
-  int npoint = (order + 1) * (order + 1) * (order + 1);
-  for (int j=0; j < npoint; j++) {
-    mju_addToScl3(res, coeff+3*j, mju_evalBasis(x, j, order));
+// evaluate the basis functions at x for all nodes in the cell
+void mju_evalBasisArray(mjtNum* basis, const mjtNum x[3], int order) {
+  if (order == 1) {
+    mjtNum p[3][2] = {
+      {1 - x[0], x[0]},
+      {1 - x[1], x[1]},
+      {1 - x[2], x[2]}
+    };
+    int j = 0;
+    for (int i0=0; i0<2; i0++) {
+      mjtNum w0 = p[0][i0];
+      for (int i1=0; i1<2; i1++) {
+        mjtNum w01 = w0 * p[1][i1];
+        for (int i2=0; i2<2; i2++) {
+          basis[j++] = w01 * p[2][i2];
+        }
+      }
+    }
+  } else if (order == 2) {
+    mjtNum p[3][3];
+    for (int d=0; d<3; d++) {
+      for (int i=0; i<3; i++) {
+        p[d][i] = phi(x[d], i, 2);
+      }
+    }
+    int j = 0;
+    for (int i0=0; i0<3; i0++) {
+      mjtNum w0 = p[0][i0];
+      for (int i1=0; i1<3; i1++) {
+        mjtNum w01 = w0 * p[1][i1];
+        for (int i2=0; i2<3; i2++) {
+          basis[j++] = w01 * p[2][i2];
+        }
+      }
+    }
+  } else {
+    int npoint = (order + 1) * (order + 1) * (order + 1);
+    for (int j=0; j < npoint; j++) {
+      basis[j] = mju_evalBasis(x, j, order);
+    }
   }
+}
+
+// map global parametric coord to cell-local coord and build node indices
+//   coord: [0,1]^3 parametric coordinates
+//   cellnum: cell counts (cx, cy, cz)
+//   order: interpolation order (1=trilinear, 2=triquadratic)
+//   local: output local parametric coordinates within cell [0,1]^3
+//   nodeindices: output array of global node indices for the cell (size (order+1)^3, may be NULL)
+//   returns: number of nodes per cell (order+1)^3
+int mju_cellLookup(const mjtNum coord[3], const int cellnum[3], int order, mjtNum local[3],
+                   int* nodeindices) {
+  int cx = cellnum[0], cy = cellnum[1], cz = cellnum[2];
+
+  // find containing cell
+  int ci = (int)mju_floor(coord[0] * cx);
+  int cj = (int)mju_floor(coord[1] * cy);
+  int ck = (int)mju_floor(coord[2] * cz);
+  ci = mjMIN(ci, cx - 1); ci = mjMAX(ci, 0);
+  cj = mjMIN(cj, cy - 1); cj = mjMAX(cj, 0);
+  ck = mjMIN(ck, cz - 1); ck = mjMAX(ck, 0);
+
+  // local parametric coordinates within cell
+  local[0] = mju_clip(coord[0] * cx - ci, 0, 1);
+  local[1] = mju_clip(coord[1] * cy - cj, 0, 1);
+  local[2] = mju_clip(coord[2] * cz - ck, 0, 1);
+
+  // build node indices for this cell
+  if (nodeindices) {
+    int gi_base = ci * order;
+    int gj_base = cj * order;
+    int gk_base = ck * order;
+    int ny_g = cy * order + 1;
+    int nz_g = cz * order + 1;
+    int ni = 0;
+    for (int li = 0; li <= order; li++) {
+      int gi = gi_base + li;
+      int gi_stride = gi * ny_g * nz_g;
+      for (int lj = 0; lj <= order; lj++) {
+        int gj = gj_base + lj;
+        int gj_stride = gi_stride + gj * nz_g;
+        for (int lk = 0; lk <= order; lk++) {
+          int gk = gk_base + lk;
+          nodeindices[ni++] = gj_stride + gk;
+        }
+      }
+    }
+  }
+
+  int npc = (order + 1) * (order + 1) * (order + 1);
+  return npc;
+}
+
+
+// interpolate a function at x with given interpolation coefficients and order n
+void mju_interpolate3D(mjtNum res[3], const mjtNum x[3], const mjtNum* coeff, int order,
+                       const int* nodeindices) {
+  int npoint = (order + 1) * (order + 1) * (order + 1);
+
+  if (npoint > 27) {
+    for (int j=0; j < npoint; j++) {
+      int idx = nodeindices ? nodeindices[j] : j;
+      mju_addToScl3(res, coeff+3*idx, mju_evalBasis(x, j, order));
+    }
+    return;
+  }
+
+  mjtNum basis[27];
+  mju_evalBasisArray(basis, x, order);
+
+  for (int j=0; j < npoint; j++) {
+    int idx = nodeindices ? nodeindices[j] : j;
+    mju_addToScl3(res, coeff+3*idx, basis[j]);
+  }
+}
+
+
+static void flexInterpRotation(int order, const mjtNum* xpos_c,
+                               const mjtNum local[3], mjtNum* quat) {
+  mjtNum mat[9] = {0};
+
+  if (order > 0) {
+    mju_defGradient(mat, local, xpos_c, order);
+  } else {
+    // order 0: fallback to identity matrix
+    mat[0] = 1;
+    mat[4] = 1;
+    mat[8] = 1;
+  }
+
+  // find rotation
+  quat[0] = 1;
+  quat[1] = 0;
+  quat[2] = 0;
+  quat[3] = 0;
+  mju_mat2Rot(quat, mat);
+  mju_negQuat(quat, quat);
+}
+
+
+// gather cell-local quantities and optionally compute rotation
+void mju_flexGatherCellState(int order, int cy, int cz, int ci, int cj, int ck,
+                             const mjtNum* xpos_g, const mjtNum* vel_g, const mjtNum* xpos0_g,
+                             mjtNum* xpos_c, mjtNum* vel_c, mjtNum* xpos0_c,
+                             int* nodeindices, mjtNum* quat) {
+  int ny_g = cy * order + 1;
+  int nz_g = cz * order + 1;
+
+  int local = 0;
+  for (int li = 0; li <= order; li++) {
+    for (int lj = 0; lj <= order; lj++) {
+      for (int lk = 0; lk <= order; lk++) {
+        int gi = ci*order + li;
+        int gj = cj*order + lj;
+        int gk = ck*order + lk;
+        int gidx = gi*ny_g*nz_g + gj*nz_g + gk;
+
+        if (xpos_c && xpos_g) mju_copy3(xpos_c + 3*local, xpos_g + 3*gidx);
+        if (vel_c && vel_g) mju_copy3(vel_c + 3*local, vel_g + 3*gidx);
+        if (xpos0_c && xpos0_g) mju_copy3(xpos0_c + 3*local, xpos0_g + 3*gidx);
+        if (nodeindices) nodeindices[local] = gidx;
+
+        local++;
+      }
+    }
+  }
+
+  if (quat && xpos_c) {
+    mjtNum p[3] = {.5, .5, .5};
+    flexInterpRotation(order, xpos_c, p, quat);
+  }
+}
+
+
+// compute corotational rotation from 2D deformation gradient on a flat face
+void mju_flexInterpRotation2D(int order, const mjtNum* xpos_f, int npe,
+                              int axis0, int axis1, int normal_axis,
+                              const mjtNum local[2], mjtNum* quat) {
+  // compute 3x2 deformation gradient F at parametric point local
+  mjtNum t1[3] = {0, 0, 0};  // tangent along axis0
+  mjtNum t2[3] = {0, 0, 0};  // tangent along axis1
+  int idx = 0;
+  for (int l0 = 0; l0 <= order; l0++) {
+    for (int l1 = 0; l1 <= order; l1++) {
+      mjtNum grad0 = dphi(local[0], l0, order) * phi(local[1], l1, order);
+      mjtNum grad1 = phi(local[0], l0, order) * dphi(local[1], l1, order);
+      for (int d = 0; d < 3; d++) {
+        t1[d] += xpos_f[3*idx + d] * grad0;
+        t2[d] += xpos_f[3*idx + d] * grad1;
+      }
+      idx++;
+    }
+  }
+
+  // normal = t1 x t2
+  mjtNum normal[3];
+  mju_cross(normal, t1, t2);
+
+  // build 3x3 matrix with columns assigned to canonical axes (row-major)
+  // axis0 → t1, axis1 → t2, normal_axis → normal
+  // this ensures identity rotation for axis-aligned grids
+  mjtNum mat[9] = {0};
+  mjtNum* vecs[3];
+  vecs[axis0] = t1;
+  vecs[axis1] = t2;
+  vecs[normal_axis] = normal;
+
+  for (int col = 0; col < 3; col++) {
+    mat[0*3 + col] = vecs[col][0];
+    mat[1*3 + col] = vecs[col][1];
+    mat[2*3 + col] = vecs[col][2];
+  }
+
+  // extract rotation via polar decomposition
+  quat[0] = 1;
+  quat[1] = 0;
+  quat[2] = 0;
+  quat[3] = 0;
+  mju_mat2Rot(quat, mat);
+  mju_negQuat(quat, quat);
+}
+
+
+// gather face-element-local quantities and optionally compute rotation (shell mode)
+//
+// face element enumeration for a grid with cell counts (cx, cy, cz):
+//   face 0: x=0     cy*cz quads (normal=0)
+//   face 1: x=max   cy*cz quads (normal=0)
+//   face 2: y=0     cx*cz quads (normal=1)
+//   face 3: y=max   cx*cz quads (normal=1)
+//   face 4: z=0     cx*cy quads (normal=2)
+//   face 5: z=max   cx*cy quads (normal=2)
+void mju_flexGatherFaceState(int order, int cx, int cy, int cz,
+                             int face_elem_idx,
+                             const mjtNum* xpos_g, const mjtNum* vel_g,
+                             const mjtNum* xpos0_g,
+                             mjtNum* xpos_f, mjtNum* vel_f, mjtNum* xpos0_f,
+                             int* nodeindices, mjtNum* quat) {
+  int ny_g = cy * order + 1;
+  int nz_g = cz * order + 1;
+  int npe = (order + 1) * (order + 1);
+
+  // face sizes and properties
+  int face_sizes[6] = {cy*cz, cy*cz, cx*cz, cx*cz, cx*cy, cx*cy};
+  int face_normal[6] = {0, 0, 1, 1, 2, 2};
+  int face_count1[6] = {cz, cz, cx, cx, cy, cy};
+  int face_fixed_vals[6];
+  face_fixed_vals[0] = 0;
+  face_fixed_vals[1] = cx * order;
+  face_fixed_vals[2] = 0;
+  face_fixed_vals[3] = cy * order;
+  face_fixed_vals[4] = 0;
+  face_fixed_vals[5] = cz * order;
+
+  // determine which face and quad within face
+  int face_id = 0;
+  int within_face = face_elem_idx;
+  int cumul = 0;
+  for (int f = 0; f < 6; f++) {
+    if (face_elem_idx < cumul + face_sizes[f]) {
+      face_id = f;
+      within_face = face_elem_idx - cumul;
+      break;
+    }
+    cumul += face_sizes[f];
+  }
+
+  int normal_axis = face_normal[face_id];
+  int na0 = (normal_axis + 1) % 3;  // slow in-plane axis
+  int na1 = (normal_axis + 2) % 3;  // fast in-plane axis
+  int c1 = face_count1[face_id];
+  int g_fixed = face_fixed_vals[face_id];
+  int q0 = within_face / c1;
+  int q1 = within_face % c1;
+
+  // gather nodes
+  int local = 0;
+  for (int l0 = 0; l0 <= order; l0++) {
+    for (int l1 = 0; l1 <= order; l1++) {
+      int g[3];
+      g[normal_axis] = g_fixed;
+      g[na0] = q0 * order + l0;
+      g[na1] = q1 * order + l1;
+      int gidx = g[0] * ny_g * nz_g + g[1] * nz_g + g[2];
+
+      if (xpos_f && xpos_g) mju_copy3(xpos_f + 3*local, xpos_g + 3*gidx);
+      if (vel_f && vel_g) mju_copy3(vel_f + 3*local, vel_g + 3*gidx);
+      if (xpos0_f && xpos0_g) mju_copy3(xpos0_f + 3*local, xpos0_g + 3*gidx);
+      if (nodeindices) nodeindices[local] = gidx;
+
+      local++;
+    }
+  }
+
+  if (quat && xpos_f) {
+    mjtNum p[2] = {.5, .5};
+    mju_flexInterpRotation2D(order, xpos_f, npe, na0, na1, normal_axis, p, quat);
+  }
+}
+
+
+// compute unnormalized surface normal and tangent vectors at a parametric point
+// on a 2D face element; normal = t1 x t2 (unnormalized)
+void mju_flexFaceNormal2D(mjtNum normal[3], mjtNum t1[3], mjtNum t2[3],
+                          int order, const mjtNum* xpos_f,
+                          const mjtNum local[2]) {
+  mju_zero3(t1);
+  mju_zero3(t2);
+  int idx = 0;
+  for (int l0 = 0; l0 <= order; l0++) {
+    for (int l1 = 0; l1 <= order; l1++) {
+      mjtNum grad0 = dphi(local[0], l0, order) *  phi(local[1], l1, order);
+      mjtNum grad1 =  phi(local[0], l0, order) * dphi(local[1], l1, order);
+      for (int d = 0; d < 3; d++) {
+        t1[d] += xpos_f[3*idx + d] * grad0;
+        t2[d] += xpos_f[3*idx + d] * grad1;
+      }
+      idx++;
+    }
+  }
+  mju_cross(normal, t1, t2);
+}
+
+
+// helper: get nodexpos value for node (i,j,k) in an nx*ny*nz grid
+static inline const mjtNum* nodeAt(const mjtNum* nodexpos, int ny, int nz, int i, int j, int k) {
+  return nodexpos + 3*(i*ny*nz + j*nz + k);
+}
+
+// reconstruct interior node positions from boundary nodes via Transfinite Interpolation
+void mju_shellTrackInterior(mjtNum* nodexpos, int nx, int ny, int nz) {
+  // need at least 3 nodes in each direction to have interior nodes
+  if (nx < 3 || ny < 3 || nz < 3) {
+    return;
+  }
+
+  for (int i = 1; i < nx-1; i++) {
+    for (int j = 1; j < ny-1; j++) {
+      for (int k = 1; k < nz-1; k++) {
+        // parametric coordinates in [0, 1]
+        mjtNum s = (mjtNum)i / (nx-1);
+        mjtNum t = (mjtNum)j / (ny-1);
+        mjtNum u = (mjtNum)k / (nz-1);
+
+        mjtNum result[3] = {0, 0, 0};
+
+        // --- face contributions (bilinear interpolation on each face pair) ---
+        // x-faces: i=0 and i=nx-1
+        for (int d = 0; d < 3; d++) {
+          result[d] += (1-s) * nodeAt(nodexpos, ny, nz, 0, j, k)[d]
+                     +    s  * nodeAt(nodexpos, ny, nz, nx-1, j, k)[d];
+        }
+        // y-faces: j=0 and j=ny-1
+        for (int d = 0; d < 3; d++) {
+          result[d] += (1-t) * nodeAt(nodexpos, ny, nz, i, 0, k)[d]
+                     +    t  * nodeAt(nodexpos, ny, nz, i, ny-1, k)[d];
+        }
+        // z-faces: k=0 and k=nz-1
+        for (int d = 0; d < 3; d++) {
+          result[d] += (1-u) * nodeAt(nodexpos, ny, nz, i, j, 0)[d]
+                     +    u  * nodeAt(nodexpos, ny, nz, i, j, nz-1)[d];
+        }
+
+        // --- edge corrections (subtract 12 edges, each linearly interpolated) ---
+        // edges along x (4 edges: (j,k) at corners of y-z face)
+        for (int d = 0; d < 3; d++) {
+          result[d] -= (1-t)*(1-u) * nodeAt(nodexpos, ny, nz, i, 0, 0)[d];
+          result[d] -= (1-t)*   u  * nodeAt(nodexpos, ny, nz, i, 0, nz-1)[d];
+          result[d] -=    t *(1-u) * nodeAt(nodexpos, ny, nz, i, ny-1, 0)[d];
+          result[d] -=    t *   u  * nodeAt(nodexpos, ny, nz, i, ny-1, nz-1)[d];
+        }
+        // edges along y (4 edges: (i,k) at corners of x-z face)
+        for (int d = 0; d < 3; d++) {
+          result[d] -= (1-s)*(1-u) * nodeAt(nodexpos, ny, nz, 0, j, 0)[d];
+          result[d] -= (1-s)*   u  * nodeAt(nodexpos, ny, nz, 0, j, nz-1)[d];
+          result[d] -=    s *(1-u) * nodeAt(nodexpos, ny, nz, nx-1, j, 0)[d];
+          result[d] -=    s *   u  * nodeAt(nodexpos, ny, nz, nx-1, j, nz-1)[d];
+        }
+        // edges along z (4 edges: (i,j) at corners of x-y face)
+        for (int d = 0; d < 3; d++) {
+          result[d] -= (1-s)*(1-t) * nodeAt(nodexpos, ny, nz, 0, 0, k)[d];
+          result[d] -= (1-s)*   t  * nodeAt(nodexpos, ny, nz, 0, ny-1, k)[d];
+          result[d] -=    s *(1-t) * nodeAt(nodexpos, ny, nz, nx-1, 0, k)[d];
+          result[d] -=    s *   t  * nodeAt(nodexpos, ny, nz, nx-1, ny-1, k)[d];
+        }
+
+        // --- corner corrections (add 8 corners back) ---
+        for (int d = 0; d < 3; d++) {
+          result[d] += (1-s)*(1-t)*(1-u) * nodeAt(nodexpos, ny, nz, 0, 0, 0)[d];
+          result[d] += (1-s)*(1-t)*   u  * nodeAt(nodexpos, ny, nz, 0, 0, nz-1)[d];
+          result[d] += (1-s)*   t *(1-u) * nodeAt(nodexpos, ny, nz, 0, ny-1, 0)[d];
+          result[d] += (1-s)*   t *   u  * nodeAt(nodexpos, ny, nz, 0, ny-1, nz-1)[d];
+          result[d] +=    s *(1-t)*(1-u) * nodeAt(nodexpos, ny, nz, nx-1, 0, 0)[d];
+          result[d] +=    s *(1-t)*   u  * nodeAt(nodexpos, ny, nz, nx-1, 0, nz-1)[d];
+          result[d] +=    s *   t *(1-u) * nodeAt(nodexpos, ny, nz, nx-1, ny-1, 0)[d];
+          result[d] +=    s *   t *   u  * nodeAt(nodexpos, ny, nz, nx-1, ny-1, nz-1)[d];
+        }
+
+        // write result to interior node
+        mju_copy3(nodexpos + 3*(i*ny*nz + j*nz + k), result);
+      }
+    }
+  }
+}
+
+
+// helper to accumulate weights in a sparse list
+static void addWeight(int* nb, int* body, mjtNum* bweight, int b, mjtNum w) {
+  for (int i = 0; i < *nb; i++) {
+    if (body[i] == b) {
+      if (bweight) {
+        bweight[i] += w;
+      }
+      return;
+    }
+  }
+  body[*nb] = b;
+  if (bweight) {
+    bweight[*nb] = w;
+  }
+  (*nb)++;
+}
+
+// compute TFI weights for an interior node (i,j,k) and distribute to boundary nodes
+void mju_shellTFIWeights(int nx, int ny, int nz, int i, int j, int k,
+                         mjtNum w, int* nb, int* body, mjtNum* bweight,
+                         const int* nodebodyid, int nstart) {
+  mjtNum s = (mjtNum)i / (nx-1);
+  mjtNum t = (mjtNum)j / (ny-1);
+  mjtNum u = (mjtNum)k / (nz-1);
+
+  // face contributions
+  addWeight(nb, body, bweight, nodebodyid[nstart + 0*ny*nz + j*nz + k], w * (1-s));
+  addWeight(nb, body, bweight, nodebodyid[nstart + (nx-1)*ny*nz + j*nz + k], w * s);
+
+  addWeight(nb, body, bweight, nodebodyid[nstart + i*ny*nz + 0*nz + k], w * (1-t));
+  addWeight(nb, body, bweight, nodebodyid[nstart + i*ny*nz + (ny-1)*nz + k], w * t);
+
+  addWeight(nb, body, bweight, nodebodyid[nstart + i*ny*nz + j*nz + 0], w * (1-u));
+  addWeight(nb, body, bweight, nodebodyid[nstart + i*ny*nz + j*nz + (nz-1)], w * u);
+
+  // edge corrections
+  addWeight(nb, body, bweight, nodebodyid[nstart + i*ny*nz + 0*nz + 0], -w * (1-t)*(1-u));
+  addWeight(nb, body, bweight, nodebodyid[nstart + i*ny*nz + 0*nz + (nz-1)], -w * (1-t)*u);
+  addWeight(nb, body, bweight, nodebodyid[nstart + i*ny*nz + (ny-1)*nz + 0], -w * t*(1-u));
+  addWeight(nb, body, bweight, nodebodyid[nstart + i*ny*nz + (ny-1)*nz + (nz-1)], -w * t*u);
+
+  addWeight(nb, body, bweight, nodebodyid[nstart + 0*ny*nz + j*nz + 0], -w * (1-s)*(1-u));
+  addWeight(nb, body, bweight, nodebodyid[nstart + 0*ny*nz + j*nz + (nz-1)], -w * (1-s)*u);
+  addWeight(nb, body, bweight, nodebodyid[nstart + (nx-1)*ny*nz + j*nz + 0], -w * s*(1-u));
+  addWeight(nb, body, bweight, nodebodyid[nstart + (nx-1)*ny*nz + j*nz + (nz-1)], -w * s*u);
+
+  addWeight(nb, body, bweight, nodebodyid[nstart + 0*ny*nz + 0*nz + k], -w * (1-s)*(1-t));
+  addWeight(nb, body, bweight, nodebodyid[nstart + 0*ny*nz + (ny-1)*nz + k], -w * (1-s)*t);
+  addWeight(nb, body, bweight, nodebodyid[nstart + (nx-1)*ny*nz + 0*nz + k], -w * s*(1-t));
+  addWeight(nb, body, bweight, nodebodyid[nstart + (nx-1)*ny*nz + (ny-1)*nz + k], -w * s*t);
+
+  // corner corrections
+  addWeight(nb, body, bweight, nodebodyid[nstart + 0*ny*nz + 0*nz + 0], w * (1-s)*(1-t)*(1-u));
+  addWeight(nb, body, bweight, nodebodyid[nstart + 0*ny*nz + 0*nz + (nz-1)], w * (1-s)*(1-t)*u);
+  addWeight(nb, body, bweight, nodebodyid[nstart + 0*ny*nz + (ny-1)*nz + 0], w * (1-s)*t*(1-u));
+  addWeight(nb, body, bweight, nodebodyid[nstart + 0*ny*nz + (ny-1)*nz + (nz-1)], w * (1-s)*t*u);
+  addWeight(nb, body, bweight, nodebodyid[nstart + (nx-1)*ny*nz + 0*nz + 0], w * s*(1-t)*(1-u));
+  addWeight(nb, body, bweight, nodebodyid[nstart + (nx-1)*ny*nz + 0*nz + (nz-1)], w * s*(1-t)*u);
+  addWeight(nb, body, bweight, nodebodyid[nstart + (nx-1)*ny*nz + (ny-1)*nz + 0], w * s*t*(1-u));
+  addWeight(nb, body, bweight, nodebodyid[nstart + (nx-1)*ny*nz + (ny-1)*nz + (nz-1)], w * s*t*u);
 }
 
 
@@ -766,6 +1188,26 @@ mjtNum mju_muscleDynamics(mjtNum ctrl, mjtNum act, const mjtNum prm[3]) {
 
   // filter output
   return dctrl / mjMAX(mjMINVAL, tau);
+}
+
+
+// LuGre Stribeck function: g(v) = F_C + (F_S - F_C) * exp(-(v/v_S)^2)
+mjtNum mj_lugreStribeck(mjtNum velocity, mjtNum F_C, mjtNum F_S, mjtNum v_S) {
+  mjtNum ratio = velocity / mju_max(mjMINVAL, v_S);
+  return F_C + (F_S - F_C) * mju_exp(-ratio*ratio);
+}
+
+
+// compute DC motor activation slot indices from parameter arrays
+mjDCMotorSlots mj_dcmotorSlots(const mjtNum* dynprm, const mjtNum* gainprm) {
+  mjDCMotorSlots s = {-1, -1, -1, -1, -1, 0};
+  if (dynprm[7] > 0)  s.slew        = s.num_slots++;  // slew rate limiting
+  if (gainprm[5] > 0) s.integral    = s.num_slots++;  // PI integral
+  if (dynprm[2] > 0)  s.temperature = s.num_slots++;  // thermal model
+  if (dynprm[5] > 0)  s.bristle     = s.num_slots++;  // LuGre bristle
+  if (dynprm[0] > 0)  s.current     = s.num_slots++;  // current filter
+
+  return s;
 }
 
 
@@ -1284,58 +1726,34 @@ void mju_printMatSparse(const mjtNum* mat, int nr,
 
 // min function, avoid re-evaluation
 mjtNum mju_min(mjtNum a, mjtNum b) {
-  if (a <= b) {
-    return a;
-  } else {
-    return b;
-  }
+  return a <= b ? a : b;
 }
 
 
 // max function, avoid re-evaluation
 mjtNum mju_max(mjtNum a, mjtNum b) {
-  if (a >= b) {
-    return a;
-  } else {
-    return b;
-  }
+  return a >= b ? a : b;
 }
 
 
 // clip x to the range [min, max]
 mjtNum mju_clip(mjtNum x, mjtNum min, mjtNum max) {
-  if (x < min) {
-    return min;
-  } else if (x > max) {
-    return max;
-  } else {
-    return x;
-  }
+  return x < min ? min : (x > max ? max : x);
 }
 
 
 // sign function
 mjtNum mju_sign(mjtNum x) {
-  if (x < 0) {
-    return -1;
-  } else if (x > 0) {
-    return 1;
-  } else {
-    return 0;
-  }
+  return (x > 0.0) - (x < 0.0);
 }
 
 
 // round to nearest integer
 int mju_round(mjtNum x) {
-  mjtNum lower = floor(x);
-  mjtNum upper = ceil(x);
-
-  if (x-lower < upper-x) {
-    return (int)lower;
-  } else {
-    return (int)upper;
-  }
+  double d = (double)x;
+  if (d > INT_MAX) return INT_MAX;
+  if (d < INT_MIN) return INT_MIN;
+  return (int)round(d);
 }
 
 
@@ -1575,10 +1993,6 @@ const char* mju_warningText(int warning, size_t info) {
                "Increase arena memory allocation above %s bytes.", mju_writeNumBytes(info));
     break;
 
-  case mjWARN_VGEOMFULL:
-    mjSNPRINTF(str, "Pre-allocated visual geom buffer is full. Increase maxgeom above %zu.", info);
-    break;
-
   case mjWARN_BADQPOS:
     mjSNPRINTF(str, "Nan, Inf or huge value in QPOS at DOF %zu. The simulation is unstable.", info);
     break;
@@ -1699,8 +2113,13 @@ void mju_n2d(double* res, const mjtNum* vec, int n) {
 }
 
 
-// gather
+// gather: res[i] = vec[ind[i]], or copy if ind is NULL
 void mju_gather(mjtNum* restrict res, const mjtNum* restrict vec, const int* restrict ind, int n) {
+  if (!ind) {
+    mju_copy(res, vec, n);
+    return;
+  }
+
   for (int i=0; i < n; i++) {
     res[i] = vec[ind[i]];
   }
@@ -1716,8 +2135,13 @@ void mju_gatherMasked(mjtNum* restrict res, const mjtNum* restrict vec,
 }
 
 
-// scatter
+// scatter: res[ind[i]] = vec[i], or copy if ind is NULL
 void mju_scatter(mjtNum* restrict res, const mjtNum* restrict vec, const int* restrict ind, int n) {
+  if (!ind) {
+    mju_copy(res, vec, n);
+    return;
+  }
+
   for (int i=0; i < n; i++) {
     res[ind[i]] = vec[i];
   }

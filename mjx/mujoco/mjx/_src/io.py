@@ -96,16 +96,15 @@ def _resolve_device(
     return cpu_0
 
   if impl == types.Impl.WARP:
-    # WARP implementation requires a CUDA GPU.
-    cuda_gpus = [d for d in jax.devices('cuda')]
-    if not cuda_gpus:
-      raise AssertionError(
-          'No CUDA GPU devices found in'
-          f' jax.devices("cuda")={jax.devices("cuda")}.'
-      )
+    # WARP implementation requires a CUDA GPU or CPU.
+    if has_cuda_gpu_device():
+      cuda_gpus = [d for d in jax.devices('cuda')]
+      if cuda_gpus:
+        logging.debug('Picking default device: %s', cuda_gpus[0])
+        return cuda_gpus[0]
 
-    logging.debug('Picking default device: %s', cuda_gpus[0])
-    return cuda_gpus[0]
+    logging.debug('Picking default device for Warp: CPU')
+    return jax.devices('cpu')[0]
 
   raise ValueError(f'Unsupported implementation: {impl}')
 
@@ -121,9 +120,12 @@ def _check_impl_device_compatibility(
   impl = types.Impl(impl)
 
   if impl == types.Impl.WARP:
-    if not _is_cuda_gpu_device(device):
+    is_cuda_device = _is_cuda_gpu_device(device)
+    is_cpu_device = device.platform == 'cpu'
+    if not (is_cuda_device or is_cpu_device):
       raise AssertionError(
-          f'Warp implementation requires a CUDA GPU device, got {device}.'
+          'Warp implementation requires a CUDA GPU or CPU device, got '
+          f'{device}.'
       )
     _check_warp_installed()
 
@@ -172,13 +174,10 @@ def _strip_weak_type(tree):
 
 def _wp_to_np_type(wp_field: Any, name: str = '') -> Any:
   """Converts a warp type to an MJX compatible numpy type."""
-  if hasattr(wp_field, '_is_batched'):
-    wp_field.strides = wp_field.strides[1:]
-    wp_field.shape = wp_field.shape[1:]
   # warp scalars
   wp_dtype = type(wp_field)
-  if wp_dtype in wp.types.warp_type_to_np_dtype:
-    return wp.types.warp_type_to_np_dtype[wp_dtype](wp_field)
+  if wp_dtype in wp._src.types.warp_type_to_np_dtype:
+    return wp.dtype_to_numpy(wp_dtype)(wp_field)
 
   # warp arrays
   if isinstance(wp_field, wp.array):
@@ -200,7 +199,13 @@ def _wp_to_np_type(wp_field: Any, name: str = '') -> Any:
       wp_field[0], mjwp_types.TileSet
   ):
     return tuple(
-        mjxw.types.TileSet(wp_field[i].adr.numpy(), wp_field[i].size)
+        mjxw.types.TileSet(
+            wp_field[i].adr.numpy(),
+            wp_field[i].size,
+            wp_field[i].elemid.numpy()
+            if wp_field[i].elemid is not None
+            else np.zeros(0, dtype=np.int32),
+        )
         for i in range(len(wp_field))
     )
   if isinstance(wp_field, mjwp_types.BlockDim):
@@ -270,7 +275,15 @@ def _put_option(
 
 
   if impl == types.Impl.WARP:
-    impl_fields = {k: _wp_to_np_type(v) for k, v in impl_fields.items()}
+    impl_fields = {
+        k: (
+            v_np.reshape(v_np.shape[1:])
+            if isinstance(v_np := _wp_to_np_type(v, k), np.ndarray)
+            and mjxw.types._BATCH_DIM['Option'].get(k, False)  # pylint: disable=protected-access
+            else v_np
+        )
+        for k, v in impl_fields.items()
+    }
     return types.Option(**fields, _impl=mjxw.types.OptionWarp(**impl_fields))
 
   raise NotImplementedError(f'Unsupported implementation: {impl}')
@@ -425,8 +438,6 @@ def _put_model_jax(
   return _strip_weak_type(model)
 
 
-
-
 def _put_model_warp(
     m: mujoco.MjModel,
     graph_mode: mjxw.types.GraphMode,
@@ -456,11 +467,18 @@ def _put_model_warp(
     if not hasattr(mw, k) or k in ('stat', 'opt'):
       continue
     field = _wp_to_np_type(getattr(mw, k), k)
+    if mjxw.types._BATCH_DIM['Model'].get(k, False):  # pylint: disable=protected-access
+      field = field.reshape(field.shape[1:])
+    if k == 'geom_dataid' and field.ndim > 1:
+      # Batched geom_dataid is not supported in MJX.
+      field = field[0]
     fields[k] = field
 
   impl_fields = {}
   for k in mjxw.types.ModelWarp.__annotations__.keys():
     field = _wp_to_np_type(getattr(mw, k), k)
+    if mjxw.types._BATCH_DIM['Model'].get(k, False):  # pylint: disable=protected-access
+      field = field.reshape(field.shape[1:])
     impl_fields[k] = field
 
   model = types.Model(
@@ -524,7 +542,7 @@ def put_model(
     device: which device to use - if unspecified picks the default device
     impl: implementation to use
     graph_mode: CUDA graph capture mode (for Warp only). Use GraphMode enum from
-      warp._src.jax_experimental.ffi. GraphMode.WARP is the default mode.
+      warp._src.jax.ffi.GraphMode.WARP is the default mode.
     keepalive_refs: optional dict to store references to underlying MuJoCo
       objects, preventing them from being garbage collected. Required for CPP
       impl to keep the model alive.
@@ -662,8 +680,7 @@ def _make_data_jax(
       'wrap_xpos': (m.nwrap, 6, float_),
       'actuator_moment': (m.nu, m.nv, float_),
       'crb': (m.nbody, 10, float_),
-      'qM': (m.nM, float_) if support.is_sparse(m) else (m.nv, m.nv, float_),
-      'M': (m.nC, float_),
+      'M': (m.nC, float_) if support.is_sparse(m) else (m.nv, m.nv, float_),
       'qLD': (m.nC, float_) if support.is_sparse(m) else (m.nv, m.nv, float_),
       'qLDiagInv': (m.nv, float_) if support.is_sparse(m) else (0, float_),
       'ten_velocity': (m.ntendon, float_),
@@ -716,8 +733,6 @@ def _make_data_jax(
   return d
 
 
-
-
 def _get_nested_attr(obj: Any, attr_name: str, split: str) -> Any:
   """Returns the nested attribute from an object."""
   for part in attr_name.split(split):
@@ -731,6 +746,7 @@ def _make_data_warp(
     naconmax: Optional[int] = None,
     naccdmax: Optional[int] = None,
     njmax: Optional[int] = None,
+    nvmax: Optional[int] = None,
 ) -> types.Data:
   """Allocate and initialize Data for the Warp implementation."""
   if not isinstance(m, mujoco.MjModel):
@@ -740,7 +756,14 @@ def _make_data_warp(
     )
 
   with wp.ScopedDevice('cpu'):  # pylint: disable=undefined-variable
-    dw = mjwp.make_data(m, nworld=1, naconmax=naconmax, naccdmax=naccdmax, njmax=njmax)  # pylint: disable=undefined-variable
+    dw = mjwp.make_data(
+        m,
+        nworld=1,
+        naconmax=naconmax,
+        naccdmax=naccdmax,
+        njmax=njmax,
+        nvmax=nvmax,
+    )  # pylint: disable=undefined-variable
 
   fields = _make_data_public_fields(m)
   for k in fields:
@@ -827,10 +850,10 @@ def make_data(
     device: Optional[jax.Device] = None,
     impl: Optional[Union[str, types.Impl]] = None,
     _full_compat: bool = False,  # pylint: disable=invalid-name
-    nconmax: Optional[int] = None,
     naconmax: Optional[int] = None,
     naccdmax: Optional[int] = None,
     njmax: Optional[int] = None,
+    nvmax: Optional[int] = None,
     keepalive_refs: Optional[Dict[int, Any]] = None,
 ) -> types.Data:
   """Allocate and initialize Data.
@@ -839,20 +862,16 @@ def make_data(
     m: the model to use
     device: which device to use - if unspecified picks the default device
     impl: implementation to use ('jax', 'warp')
-    nconmax: maximum number of contacts to allocate for warp across all worlds
-      Since the number of worlds is **not** pre-defined in JAX, we use the
-      `nconmax` argument to set the upper bound for the number of contacts
-      across all worlds. In MuJoCo Warp, the analgous field is called
-      `naconmax`.
     naconmax: maximum number of contacts to allocate for warp across all worlds
       Since the number of worlds is **not** pre-defined in JAX, we use the
       `naconmax` argument to set the upper bound for the number of contacts
-      across all worlds, rather than the `nconmax` argument from MuJoCo Warp.
+      across all worlds.
     naccdmax: maximum number of contacts for GJK collision detection across all
       worlds. Since the number of worlds is **not** pre-defined in JAX, we use the
       `naccdmax` argument to set the upper bound for the number of contacts
       across all worlds, rather than the `nccdmax` argument from MuJoCo Warp.
     njmax: maximum number of constraints to allocate for warp across all worlds
+    nvmax: capacity for compacted active DOFs per world
     keepalive_refs: optional dict to store references to underlying MuJoCo
       objects, preventing them from being garbage collected. Required for CPP
       impl when passing a types.Model.
@@ -863,14 +882,7 @@ def make_data(
   Raises:
     ValueError: if the model's impl does not match the make_data impl
     NotImplementedError: if the impl is not implemented yet
-    DeprecationWarning: if nconmax is used
   """
-  if nconmax is not None:
-    warnings.warn(
-        'nconmax will be deprecated in mujoco-mjx>=3.5. Use naconmax instead.',
-        DeprecationWarning,
-        stacklevel=2,
-    )
 
   impl, device = _resolve_impl_and_device(impl, device)
 
@@ -885,8 +897,7 @@ def make_data(
     return _make_data_cpp(m, device, keepalive_refs=keepalive_refs)
   elif impl == types.Impl.WARP:
     _check_warp_installed()
-    naconmax = nconmax if naconmax is None else naconmax
-    return _make_data_warp(m, device, naconmax, naccdmax, njmax)
+    return _make_data_warp(m, device, naconmax, naccdmax, njmax, nvmax)
 
   raise NotImplementedError(
       f'make_data for implementation "{impl}" not implemented yet.'
@@ -1054,15 +1065,21 @@ def _put_data_jax(
 
     impl_fields[fname] = value
 
-  # convert qM and qLD if jacobian is dense
+  # convert M and qLD if jacobian is dense
   if not support.is_sparse(m):
-    impl_fields['qM'] = np.zeros((m.nv, m.nv))
-    mujoco.mj_fullM(m, impl_fields['qM'], d.qM)
+    impl_fields['M'] = np.zeros((m.nv, m.nv))
+    mujoco.mju_sym2dense(
+        impl_fields['M'],
+        d.M,
+        m.M_rownnz,
+        m.M_rowadr,
+        m.M_colind,
+    )
     # TODO(erikfrey): derive L*L' from L'*D*L instead of recomputing
     try:
-      impl_fields['qLD'], _ = scipy.linalg.cho_factor(impl_fields['qM'])
+      impl_fields['qLD'], _ = scipy.linalg.cho_factor(impl_fields['M'])
     except scipy.linalg.LinAlgError:
-      # this happens when qM is empty or unstable simulation
+      # this happens when M is empty or unstable simulation
       impl_fields['qLD'] = np.zeros((m.nv, m.nv))
     impl_fields['qLDiagInv'] = np.zeros(0)
 
@@ -1079,8 +1096,6 @@ def _put_data_jax(
 
   data = jax.device_put(data, device=device)
   return _strip_weak_type(data)
-
-
 
 
 # TODO(josechenf): Iterate on the keepalive implementation to make it easier to
@@ -1145,11 +1160,14 @@ def _put_data_warp(
     device: Optional[jax.Device] = None,
     naconmax: Optional[int] = None,
     njmax: Optional[int] = None,
+    nvmax: Optional[int] = None,
 ) -> types.Data:
   """Puts mujoco.MjData onto a device, resulting in mjx.Data."""
 
   with wp.ScopedDevice('cpu'):  # pylint: disable=undefined-variable
-    dw = mjwp.put_data(m, d, nworld=1, naconmax=naconmax, njmax=njmax)  # pylint: disable=undefined-variable
+    dw = mjwp.put_data(
+        m, d, nworld=1, naconmax=naconmax, njmax=njmax, nvmax=nvmax
+    )  # pylint: disable=undefined-variable
 
   fields = _put_data_public_fields(d)
   for k in fields:
@@ -1182,9 +1200,9 @@ def put_data(
     d: mujoco.MjData,
     device: Optional[jax.Device] = None,
     impl: Optional[Union[str, types.Impl]] = None,
-    nconmax: Optional[int] = None,
     naconmax: Optional[int] = None,
     njmax: Optional[int] = None,
+    nvmax: Optional[int] = None,
     dummy_arg_for_batching: Optional[jax.Array] = None,
     keepalive_refs: Optional[Dict[int, Any]] = None,
 ) -> types.Data:
@@ -1195,12 +1213,12 @@ def put_data(
     d: the data to put on device
     device: which device to use - if unspecified picks the default device
     impl: implementation to use ('jax', 'warp')
-    nconmax: maximum number of contacts to allocate for warp
     naconmax: maximum number of contacts to allocate for warp across all worlds
       Since the number of worlds is **not** pre-defined in JAX, we use the
       `naconmax` argument to set the upper bound for the number of contacts
-      across all worlds, rather than the `nconmax` argument from MuJoCo Warp.
+      across all worlds.
     njmax: maximum number of constraints to allocate for warp
+    nvmax: capacity for compacted active DOFs per world
     dummy_arg_for_batching: dummy argument to use for batching in cpp
       implementation
     keepalive_refs: optional dict to store references to underlying MuJoCo
@@ -1208,14 +1226,7 @@ def put_data(
 
   Returns:
     an mjx.Data placed on device
-    DeprecationWarning: if nconmax is used
   """
-  if nconmax is not None:
-    warnings.warn(
-        'nconmax will be deprecated in mujoco-mjx>=3.5. Use naconmax instead.',
-        DeprecationWarning,
-        stacklevel=2,
-    )
 
   impl, device = _resolve_impl_and_device(impl, device)
   if impl == types.Impl.JAX:
@@ -1230,8 +1241,7 @@ def put_data(
     )
   elif impl == types.Impl.WARP:
     _check_warp_installed()
-    naconmax = nconmax if naconmax is None else naconmax
-    return _put_data_warp(m, d, device, naconmax, njmax)
+    return _put_data_warp(m, d, device, naconmax, njmax, nvmax)
 
   raise NotImplementedError(
       f'put_data for implementation "{impl}" not implemented yet.'
@@ -1291,27 +1301,36 @@ def _get_data_into_warp(
       else:
         value = getattr(d_i, field.name)
 
-      if field.name in ('ne', 'nl', 'nf'):
-        pass
+      if field.name in ('ne', 'nl', 'nf', 'nisland', 'nidof'):
+        if isinstance(value, np.ndarray) and value.size == 0:
+          value = 0
+        else:
+          value = int(value)
       elif field.name in ('nefc', 'ncon'):
         value = {'nefc': nefc, 'ncon': ncon}[field.name]
       elif field.name.endswith('xmat') or field.name == 'ximat':
         value = value.reshape((-1, 9))
       # elif field.name == 'efc_J':  # TODO(btaba): add this back
       # elif field.name.startswith('efc_'):  # TODO(btaba): add this back
-      # TODO(btaba): qM, qLD, qLDiagInv
+      # TODO(btaba): qLD, qLDiagInv
 
       if field.name in (
           'actuator_moment',
           'contact',
-          'qM',
           'qLD',
+          'qLU',
           'qLDiagInv',
           'ten_J',
           'flexedge_J',
+          'M',
+          'map_efc2iefc', 'map_iefc2efc'
       ):
         continue
       if field.name.startswith('efc_'):
+        continue
+
+      # Skip island fields; host MjData arena memory cannot be reallocated from Python if not stepped.
+      if field.name.startswith('island_'):
         continue
 
       if isinstance(value, np.ndarray) and value.shape:
@@ -1338,15 +1357,6 @@ def _get_data_into(
   batched = isinstance(result, list)
   d = jax.device_get(d)
   batch_size = d.qpos.shape[0] if batched else 1
-
-  dof_i, dof_j = [], []
-  if d.impl == types.Impl.JAX:
-    for i in range(m.nv):
-      j = i
-      while j > -1:
-        dof_i.append(i)
-        dof_j.append(j)
-        j = m.dof_parentid[j]
 
   for i in range(batch_size):
     d_i = jax.tree_util.tree_map(lambda x, i=i: x[i], d) if batched else d
@@ -1452,8 +1462,14 @@ def _get_data_into(
       elif field.name.startswith('efc_'):
         value = value[efc_active]
       if d.impl == types.Impl.JAX:
-        if field.name == 'qM' and not support.is_sparse(m):
-          value = value[dof_i, dof_j]
+        if field.name == 'M' and not support.is_sparse(m):
+          M_csr = np.zeros(m.nC)
+          for i in range(m.nv):
+            adr = m.M_rowadr[i]
+            for k in range(m.M_rownnz[i]):
+              col = m.M_colind[adr + k]
+              M_csr[adr + k] = value[i, col]
+          value = M_csr
         elif field.name == 'qLD':
           value = np.zeros(m.nC)
         elif field.name == 'qLDiagInv' and not support.is_sparse(m):
@@ -1469,10 +1485,6 @@ def _get_data_into(
         result_field[:] = value
       else:
         setattr(result_i, field.name, value)
-
-    # TODO(taylorhowell): remove mapping once qM is deprecated
-    # map inertia (sparse) to reduced inertia (compressed sparse) representation
-    result_i.M[:] = result_i.qM[m.mapM2M]
 
     # recalculate qLD and qLDiagInv as MJX and MuJoCo have different
     # representations of the Cholesky decomposition.

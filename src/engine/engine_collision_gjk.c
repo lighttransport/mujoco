@@ -19,15 +19,36 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <mujoco/mjtnum.h>
+#include <mujoco/mjtype.h>
 #include <mujoco/mjmodel.h>
 #include "engine/engine_collision_convex.h"
-#include "engine/engine_macro.h"
 #include "engine/engine_util_blas.h"
 #include "engine/engine_util_errmem.h"
 
 #define mjMINVAL2 (mjMINVAL * mjMINVAL)
 #define mjMAXVAL2 (mjMAXVAL * mjMAXVAL)
+
+// numerical limits for single and double precision
+#ifdef mjUSESINGLE
+  // minimal distance squared for origin inside tetrahedron in polytope2
+  #define mjMINDIST2 1e-10f
+  // minimal distance squared for origin inside tetrahedron in polytope3
+  #define mjMINDIST3 1e-10f
+  // minimal distance squared for origin inside tetrahedron in polytope4
+  #define mjMINDIST4 1e-17f
+  // minimal tolerance for EPA
+  #define mjMINEPATOL 1e-7f
+#else
+  #define mjMINDIST2 mjMINVAL2
+  #define mjMINDIST3 mjMINVAL2
+  #define mjMINDIST4 mjMINVAL2
+  #define mjMINEPATOL mjMINVAL
+#endif
+
+// align memory size on 8-byte boundary; needed for single precision
+static inline size_t align8(size_t size) {
+  return ((size + 7) / 8) * 8;
+}
 
 // subdistance algorithm for GJK that computes the barycentric coordinates of the point in a
 // simplex closest to the origin
@@ -45,7 +66,7 @@ static void S1D(mjtNum lambda[2], const mjtNum s1[3], const mjtNum s2[3]);
 static void gjkSupport(Vertex* v, mjCCDObj* obj1, mjCCDObj* obj2,
                        const mjtNum x_k[3], mjtNum x_norm);
 
-// compute the linear combination of 1 - 4 3D vectors
+// compute the linear combination of up to 4 3D vectors
 static inline void lincomb(mjtNum res[3], const mjtNum* coef, int n, const mjtNum v1[3],
                            const mjtNum v2[3], const mjtNum v3[3], const mjtNum v4[3]);
 
@@ -72,6 +93,7 @@ typedef struct {
   Face* faces;        // list of faces that make up the polytope
   int nfaces;         // number of faces
   int maxfaces;       // max number of faces that can be stored in polytope
+  mjtNum center[3];   // center of the polytope
   Face** map;         // linear map storing faces
   int nmap;           // number of faces in map
   struct Horizon {    // polytope boundary edges that can be seen from w
@@ -185,7 +207,7 @@ static void gjk(mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj* obj2) {
   mjtNum* x1_k = status->x1;               // the kth approximation point for obj1
   mjtNum* x2_k = status->x2;               // the kth approximation point for obj2
   mjtNum x_k[3];                           // the kth approximation point in Minkowski difference
-  mjtNum lambda[4] = {1, 0, 0, 0};         // barycentric coordinates for x_k
+  mjtNum lambda[4];                        // barycentric coordinates for x_k
   mjtNum cutoff2 = status->dist_cutoff * status->dist_cutoff;
   mjtNum tol2 = status->tolerance * status->tolerance;
 
@@ -215,7 +237,6 @@ static void gjk(mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj* obj2) {
     mjtNum diff[3];
     sub3(diff, x_k, s_k);
     if (dot3(x_k, diff) < epsilon) {
-      if (!k) n = 1;
       break;
     }
 
@@ -296,10 +317,12 @@ static void gjk(mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj* obj2) {
   }
 
   // compute the approximate witness points
-  lincomb(x1_k, lambda, n, simplex[0].vert1, simplex[1].vert1, simplex[2].vert1,
-          simplex[3].vert1);
-  lincomb(x2_k, lambda, n, simplex[0].vert2, simplex[1].vert2, simplex[2].vert2,
-          simplex[3].vert2);
+  if (n > 0) {
+    lincomb(x1_k, lambda, n, simplex[0].vert1, simplex[1].vert1, simplex[2].vert1,
+            simplex[3].vert1);
+    lincomb(x2_k, lambda, n, simplex[0].vert2, simplex[1].vert2, simplex[2].vert2,
+            simplex[3].vert2);
+  }
 
   status->nx = 1;
   status->gjk_iterations = k;
@@ -453,10 +476,13 @@ static int gjkIntersect(mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj* obj2) {
 }
 
 
-// linear combination of n 3D vectors
+// compute the linear combination of up to 4 3D vectors
 static inline void lincomb(mjtNum res[3], const mjtNum* coef, int n, const mjtNum v1[3],
                            const mjtNum v2[3], const mjtNum v3[3], const mjtNum v4[3]) {
   switch (n) {
+    case 0:
+      res[0] = res[1] = res[2] = 0;
+      break;
     case 1:
       res[0] = coef[0]*v1[0];
       res[1] = coef[0]*v1[1];
@@ -543,7 +569,7 @@ static inline int sameSign2(mjtNum a, mjtNum b) {
 // simplex closest to the origin
 // implementation adapted from Montanari et al, ToG 2017
 static inline void subdistance(mjtNum lambda[4], int n, const Vertex simplex[4]) {
-  memset(lambda, 0, 4 * sizeof(mjtNum));
+  lambda[0] = lambda[1] = lambda[2] = lambda[3] = 0;
   const mjtNum* s1 = simplex[0].vert;
   const mjtNum* s2 = simplex[1].vert;
   const mjtNum* s3 = simplex[2].vert;
@@ -909,6 +935,10 @@ static inline int rayTriangle(const mjtNum v1[3], const mjtNum v2[3], const mjtN
 static int polytope2(Polytope* pt, mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj* obj2) {
   mjtNum *v1 = status->simplex[0].vert, *v2 = status->simplex[1].vert;
 
+  // set the polytope center
+  add3(pt->center, v1, v2);
+  scl3(pt->center, pt->center, 0.5);
+
   mjtNum diff[3];
   sub3(diff, v2, v1);
 
@@ -947,27 +977,27 @@ static int polytope2(Polytope* pt, mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj
   mjtNum* v5 = pt->verts[v5i].vert;
 
   // build hexahedron
-  if (attachFace(pt, v1i, v3i, v4i, 1, 3, 2) < mjMINVAL2) {
+  if (attachFace(pt, v1i, v3i, v4i, 1, 3, 2) < mjMINDIST2) {
     replaceSimplex3(pt, status, v1i, v3i, v4i);
     return polytope3(pt, status, obj1, obj2);
   }
-  if (attachFace(pt, v1i, v5i, v3i, 2, 4, 0) < mjMINVAL2) {
+  if (attachFace(pt, v1i, v5i, v3i, 2, 4, 0) < mjMINDIST2) {
     replaceSimplex3(pt, status, v1i, v5i, v3i);
     return polytope3(pt, status, obj1, obj2);
   }
-  if (attachFace(pt, v1i, v4i, v5i, 0, 5, 1) < mjMINVAL2) {
+  if (attachFace(pt, v1i, v4i, v5i, 0, 5, 1) < mjMINDIST2) {
     replaceSimplex3(pt, status, v1i, v4i, v5i);
     return polytope3(pt, status, obj1, obj2);
   }
-  if (attachFace(pt, v2i, v4i, v3i, 5, 0, 4) < mjMINVAL2) {
+  if (attachFace(pt, v2i, v4i, v3i, 5, 0, 4) < mjMINDIST2) {
     replaceSimplex3(pt, status, v2i, v4i, v3i);
     return polytope3(pt, status, obj1, obj2);
   }
-  if (attachFace(pt, v2i, v3i, v5i, 3, 1, 5) < mjMINVAL2) {
+  if (attachFace(pt, v2i, v3i, v5i, 3, 1, 5) < mjMINDIST2) {
     replaceSimplex3(pt, status, v2i, v3i, v5i);
     return polytope3(pt, status, obj1, obj2);
   }
-  if (attachFace(pt, v2i, v5i, v4i, 4, 2, 3) < mjMINVAL2) {
+  if (attachFace(pt, v2i, v5i, v4i, 4, 2, 3) < mjMINDIST2) {
     replaceSimplex3(pt, status, v2i, v5i, v4i);
     return polytope3(pt, status, obj1, obj2);
   }
@@ -977,13 +1007,12 @@ static int polytope2(Polytope* pt, mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj
     return mjEPA_P2_NONCONVEX;
   }
 
+  // populate face map
   for (int i = 0; i < 6; i++) {
     pt->map[i] = pt->faces + i;
     pt->faces[i].index = i;
   }
   pt->nmap = 6;
-
-  // valid hexahedron for EPA
   return 0;
 }
 
@@ -1065,6 +1094,11 @@ static int polytope3(Polytope* pt, mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj
                *v2 = status->simplex[1].vert,
                *v3 = status->simplex[2].vert;
 
+  // set the polytope center
+  add3(pt->center, v1, v2);
+  add3(pt->center, pt->center, v3);
+  scl3(pt->center, pt->center, 1.0 / 3.0);
+
   // get normals in both directions
   mjtNum diff1[3], diff2[3], n[3], n_neg[3];
   sub3(diff1, v2, v1);
@@ -1108,22 +1142,22 @@ static int polytope3(Polytope* pt, mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj
   }
 
   // create hexahedron for EPA
-  if (attachFace(pt, v4i, v1i, v2i, 1, 3, 2) < mjMINVAL2) {
+  if (attachFace(pt, v4i, v1i, v2i, 1, 3, 2) < mjMINDIST3) {
     return mjEPA_P3_ORIGIN_ON_FACE;
   }
-  if (attachFace(pt, v4i, v3i, v1i, 2, 4, 0) < mjMINVAL2) {
+  if (attachFace(pt, v4i, v3i, v1i, 2, 4, 0) < mjMINDIST3) {
     return mjEPA_P3_ORIGIN_ON_FACE;
   }
-  if (attachFace(pt, v4i, v2i, v3i, 0, 5, 1) < mjMINVAL2) {
+  if (attachFace(pt, v4i, v2i, v3i, 0, 5, 1) < mjMINDIST3) {
     return mjEPA_P3_ORIGIN_ON_FACE;
   }
-  if (attachFace(pt, v5i, v2i, v1i, 5, 0, 4) < mjMINVAL2) {
+  if (attachFace(pt, v5i, v2i, v1i, 5, 0, 4) < mjMINDIST3) {
     return mjEPA_P3_ORIGIN_ON_FACE;
   }
-  if (attachFace(pt, v5i, v1i, v3i, 3, 1, 5) < mjMINVAL2) {
+  if (attachFace(pt, v5i, v1i, v3i, 3, 1, 5) < mjMINDIST3) {
     return mjEPA_P3_ORIGIN_ON_FACE;
   }
-  if (attachFace(pt, v5i, v3i, v2i, 4, 2, 3) < mjMINVAL2) {
+  if (attachFace(pt, v5i, v3i, v2i, 4, 2, 3) < mjMINDIST3) {
     return mjEPA_P3_ORIGIN_ON_FACE;
   }
 
@@ -1144,24 +1178,31 @@ static int polytope4(Polytope* pt, mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj
   int v3 = insertVertex(pt, status->simplex + 2);
   int v4 = insertVertex(pt, status->simplex + 3);
 
+  // set the polytope center
+  add3(pt->center, pt->verts[v1].vert, pt->verts[v2].vert);
+  add3(pt->center, pt->center, pt->verts[v3].vert);
+  add3(pt->center, pt->center, pt->verts[v4].vert);
+  scl3(pt->center, pt->center, 0.25);
+
   // if the origin is on a face, replace the 3-simplex with a 2-simplex
-  if (attachFace(pt, v1, v2, v3, 1, 3, 2) < mjMINVAL2) {
+  if (attachFace(pt, v1, v2, v3, 1, 3, 2) < mjMINDIST4) {
     replaceSimplex3(pt, status, v1, v2, v3);
     return polytope3(pt, status, obj1, obj2);
   }
-  if (attachFace(pt, v1, v4, v2, 2, 3, 0) < mjMINVAL2) {
+  if (attachFace(pt, v1, v4, v2, 2, 3, 0) < mjMINDIST4) {
     replaceSimplex3(pt, status, v1, v4, v2);
     return polytope3(pt, status, obj1, obj2);
   }
-  if (attachFace(pt, v1, v3, v4, 0, 3, 1) < mjMINVAL2) {
+  if (attachFace(pt, v1, v3, v4, 0, 3, 1) < mjMINDIST4) {
     replaceSimplex3(pt, status, v1, v3, v4);
     return polytope3(pt, status, obj1, obj2);
   }
-  if (attachFace(pt, v4, v3, v2, 2, 0, 1) < mjMINVAL2) {
+  if (attachFace(pt, v4, v3, v2, 2, 0, 1) < mjMINDIST4) {
     replaceSimplex3(pt, status, v4, v3, v2);
     return polytope3(pt, status, obj1, obj2);
   }
 
+  // numerically verify that the origin lies in the tetrahedron interior
   if (!testTetra(pt->verts[v1].vert, pt->verts[v2].vert, pt->verts[v3].vert, pt->verts[v4].vert)) {
     return mjEPA_P4_MISSING_ORIGIN;
   }
@@ -1216,6 +1257,14 @@ static inline mjtNum attachFace(Polytope* pt, int v1, int v2, int v3,
   if (ret) {
     return 0;
   }
+
+  // ensure projection points outward from the polytope
+  mjtNum outward[3];
+  sub3(outward, pt->verts[v1].vert, pt->center);
+  if (dot3(face->v, outward) < 0) {
+    scl3(face->v, face->v, -1);
+  }
+
   face->dist2 = dot3(face->v, face->v);
   face->index = -1;
 
@@ -1316,13 +1365,11 @@ static mjtNum epaWitness(const Polytope* pt, const Face* face, mjtNum x1[3], mjt
 static Face* epa(mjCCDStatus* status, Polytope* pt, mjCCDObj* obj1, mjCCDObj* obj2) {
   mjtNum upper = mjMAX_LIMIT, upper2 = mjMAX_LIMIT, lower2;
   Face* face = NULL, *pface = NULL;  // face closest to origin
-  mjtNum tolerance = status->tolerance;
   int discrete = discreteGeoms(obj1, obj2);
 
-  // tolerance is not used for discrete geoms
-  if (discrete && sizeof(mjtNum) == sizeof(double)) {
-    tolerance = mjMINVAL;
-  }
+  // discrete geoms return in a finite number of iterations, a non-zero tolerance avoids
+  // absurdly small lower and upper bounds
+  mjtNum tolerance = discrete ? mjMINEPATOL : status->tolerance;
 
   int k, kmax = status->max_iterations < 1000 ? status->max_iterations : 1000;
   for (k = 0; k < kmax; k++) {
@@ -1359,6 +1406,10 @@ static Face* epa(mjCCDStatus* status, Polytope* pt, mjCCDObj* obj1, mjCCDObj* ob
       upper2 = upper * upper;
     }
     if (upper - lower < tolerance) {
+      // terminate without contact when upper < lower on first iteration
+      if (k == 0 && upper < lower - 1e-10) {
+        face = NULL;
+      }
       break;
     }
 
@@ -1543,6 +1594,9 @@ static mjtNum planeNormal(mjtNum res[3], const mjtNum v1[3], const mjtNum v2[3],
   sub3(diff1, v2, v1);
   sub3(diff2, v3, v1);
   cross3(res, diff1, diff2);
+
+  // normalize isn't needed (cancelled out), but done to avoid asymmetric rounding later on
+  mju_normalize3(res);
   return dot3(res, v1);
 }
 
@@ -1665,24 +1719,37 @@ static void polygonClip(mjCCDStatus* status, const mjtNum* face1, int nface1,
     return;
   }
 
-  // no pruning needed
-  int k = 0;
-  for (int i = 0; i < 3*npolygon; i += 3) {
-    int skip = 0;
-
-    // find possible duplicate vertices
-    for (int j = 0; j < k; j += 3) {
-      if (equal3(status->x2 + j, polygon + i)) {
-        skip = 1;
-        break;
+  // if the face is an edge, remove potential duplicates
+  if (nface2 == 2 && npolygon > 2) {
+    // find the two most distant vertices in the polygon
+    int best1 = 0, best2 = 1;
+    mjtNum d = 0;
+    for (int i = 0; i < npolygon; i++) {
+      for (int j = i + 1; j < npolygon; j++) {
+        mjtNum diff[3];
+        sub3(diff, polygon + 3*j, polygon + 3*i);
+        mjtNum d2 = dot3(diff, diff);
+        if (d2 > d) {
+          d = d2;
+          best1 = i;
+          best2 = j;
+        }
       }
     }
-    if (skip) continue;
-    copy3(status->x2 + k, polygon + i);
-    sub3(status->x1 + k, status->x2 + k, dir);
-    k += 3;
+    copy3(status->x2, polygon + 3*best1);
+    sub3(status->x1, status->x2, dir);
+    copy3(status->x2 + 3, polygon + 3*best2);
+    sub3(status->x1 + 3, status->x2 + 3, dir);
+    status->nx = 2;
+    return;
   }
-  status->nx = k/3;
+
+  // no pruning needed
+  for (int i = 0; i < 3*npolygon; i += 3) {
+    copy3(status->x2 + i, polygon + i);
+    sub3(status->x1 + i, status->x2 + i, dir);
+  }
+  status->nx = npolygon;
 }
 
 
@@ -2179,8 +2246,16 @@ static void multicontact(Polytope* pt, Face* face, mjCCDStatus* status,
 
   // face1 is an edge; clip face1 against face2
   if (edgecon1) {
-    scl3(approx_dir, n2 + 3*j, norm3(dir));
+    scl3(approx_dir, n2 + 3*j, -norm3(dir));
     polygonClip(status, face2, nface2, face1, nface1, n2 + 3*j, approx_dir);
+    // x1 and x2 must be flipped as we flipped the faces in polygonClip
+    int nx = status->nx;
+    for (int k = 0; k < nx; k++) {
+      mjtNum tmp[3];
+      copy3(tmp, status->x1 + 3*k);
+      copy3(status->x1 + 3*k, status->x2 + 3*k);
+      copy3(status->x2 + 3*k, tmp);
+    }
     return;
   }
 
@@ -2217,16 +2292,18 @@ static inline void inflate(mjCCDStatus* status, mjtNum margin1, mjtNum margin2) 
 }
 
 
+// return size in bytes of the buffer needed for mjc_ccd for a given number of iterations
+size_t mjc_ccdSize(int iterations) {
+  return align8(sizeof(Vertex) * (5 + iterations))     // vertices in polytope
+         + align8(sizeof(Face) * 6 * iterations)       // faces in polytope
+         + align8(sizeof(Face*) * 6 * iterations)      // map in polytope
+         + align8(sizeof(int) * 24)                    // horizon indices
+         + align8(sizeof(int) * 24);                   // horizon edges
+}
+
+
 // general convex collision detection
 mjtNum mjc_ccd(const mjCCDConfig* config, mjCCDStatus* status, mjCCDObj* obj1, mjCCDObj* obj2) {
-  // pre-allocate static memory for low iterations
-  void* buffer = NULL;
-  static mjTHREADLOCAL Vertex vert_data[5 + mjMAX_EPA_ITERATIONS];
-  static mjTHREADLOCAL Face face_data[6 * mjMAX_EPA_ITERATIONS];
-  static mjTHREADLOCAL Face* map_data[6 * mjMAX_EPA_ITERATIONS];
-  static mjTHREADLOCAL int index_data[6 + mjMAX_EPA_ITERATIONS];
-  static mjTHREADLOCAL int edge_data[6 + mjMAX_EPA_ITERATIONS];
-
   // setup
   obj1->center(status->x1, obj1);
   obj2->center(status->x2, obj2);
@@ -2304,42 +2381,24 @@ mjtNum mjc_ccd(const mjCCDConfig* config, mjCCDStatus* status, mjCCDObj* obj1, m
     return status->dist;
   }
 
-  if (status->dist <= config->tolerance && status->nsimplex > 1) {
+  if (status->dist <= config->tolerance && status->nsimplex > 1 && config->buffer) {
     status->dist = 0;  // assume touching
     Polytope pt;
     pt.nfaces = pt.nmap = pt.nverts = pt.horizon.nedges = 0;
 
-    // allocate memory via static thread-local storage
+    // allocate memory for polytope
     int N = config->max_iterations;
-    if (N <= mjMAX_EPA_ITERATIONS) {
-      pt.maxfaces = 6 * mjMAX_EPA_ITERATIONS;
-      pt.verts = vert_data;
-      pt.faces = face_data;
-      pt.map = map_data;
-      pt.horizon.indices = index_data;
-      pt.horizon.edges = edge_data;
-    }
-
-    // static storage insufficient, allocate with callback
-    else {
-      size_t nbytes = (sizeof(Face) * 6 * N)      // faces in polytope
-                    + (sizeof(Face*) * 6 * N)     // map in polytope
-                    + (sizeof(Vertex) * (5 + N))  // vertices in polytope
-                    + 2*(sizeof(int) * (6 + N));  // horizon data
-
-      pt.maxfaces = 6 * N;
-      buffer = config->alloc(config->context, nbytes);
-      uint8_t* bbuffer = (uint8_t*)buffer;
-      pt.verts = (Vertex*)bbuffer;
-      bbuffer += sizeof(Vertex) * (5 + N);
-      pt.faces = (Face*)bbuffer;
-      bbuffer += sizeof(Face) * (6 * N);
-      pt.map = (Face**)bbuffer;
-      bbuffer += sizeof(Face*) * (6 * N);
-      pt.horizon.indices = (int*)bbuffer;
-      bbuffer += sizeof(int) * (6 + N);
-      pt.horizon.edges = (int*)bbuffer;
-    }
+    pt.maxfaces = 6 * N;
+    uint8_t* buffer = config->buffer;
+    pt.verts = (Vertex*)buffer;
+    buffer += align8(sizeof(Vertex) * (5 + N));
+    pt.faces = (Face*)buffer;
+    buffer += align8(sizeof(Face) * (6 * N));
+    pt.map = (Face**)buffer;
+    buffer += align8(sizeof(Face*) * (6 * N));
+    pt.horizon.indices = (int*)buffer;
+    buffer += align8(sizeof(int) * 24);
+    pt.horizon.edges = (int*)buffer;
 
     int ret;
     if (status->nsimplex == 2) {
@@ -2358,9 +2417,6 @@ mjtNum mjc_ccd(const mjCCDConfig* config, mjCCDStatus* status, mjCCDObj* obj1, m
         multicontact(&pt, face, status, obj1, obj2);
       }
     }
-  }
-  if (buffer) {
-    config->free(config->context, buffer);
   }
   return status->dist;
 }

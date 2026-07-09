@@ -26,18 +26,18 @@
 #include <vector>
 
 #include <mujoco/mujoco.h>
-#include "experimental/platform/graphics_mode.h"
-#include "experimental/platform/gui.h"
-#include "experimental/platform/gui_spec.h"
-#include "experimental/platform/interaction.h"
-#include "experimental/platform/model_holder.h"
-#include "experimental/platform/picture_gui.h"
-#include "experimental/platform/renderer.h"
-#include "experimental/platform/sim_history.h"
-#include "experimental/platform/sim_profiler.h"
-#include "experimental/platform/spec_editor.h"
-#include "experimental/platform/step_control.h"
-#include "experimental/platform/window.h"
+#include "experimental/platform/hal/graphics_mode.h"
+#include "experimental/platform/hal/renderer.h"
+#include "experimental/platform/hal/window.h"
+#include "experimental/platform/sim/model_holder.h"
+#include "experimental/platform/sim/sim_history.h"
+#include "experimental/platform/sim/sim_profiler.h"
+#include "experimental/platform/sim/step_control.h"
+#include "experimental/platform/ux/gui.h"
+#include "experimental/platform/ux/gui_spec.h"
+#include "experimental/platform/ux/interaction.h"
+#include "experimental/platform/ux/picture_gui.h"
+#include "experimental/platform/ux/spec_editor.h"
 
 namespace mujoco::studio {
 
@@ -55,9 +55,16 @@ class App {
 
     // The graphics configuration used for initializing the window.
     platform::GraphicsMode gfx_mode = platform::GraphicsMode::FilamentVulkan;
+
+    // The initial GUI theme. If set, overrides the default (kLight).
+    std::optional<platform::GuiTheme> initial_theme;
+
+    // The application title shown in the window title bar.
+    std::string title = "MuJoCo Studio";
   };
 
   explicit App(Config config);
+  ~App();
 
   // Loads an empty mjModel.
   void InitEmptyModel();
@@ -104,7 +111,11 @@ class App {
     int watch_index = 0;
     int camera_idx = platform::kTumbleCameraIdx;
     int key_idx = 0;
-    platform::GuiTheme theme = platform::GuiTheme::kLight;
+    platform::GuiTheme theme = platform::GuiTheme::kDark;
+    float font_scale = 1.0f;
+    int window_width = 0;
+    int window_height = 0;
+    int nthread = 0;
 
     using Dict = std::unordered_map<std::string, std::string>;
     Dict ToDict() const;
@@ -115,15 +126,19 @@ class App {
   struct UiTempState {
     bool should_exit = false;
     bool first_frame = true;
+    bool update_threadpool = false;
 
     // Windows.
     bool help = false;
-    bool stats = false;
-    bool chart_solver = false;
-    bool chart_performance = false;
+    bool info = false;
+    bool profiler = false;
+    bool profiler_show_iter = false;
     bool picture_in_picture = false;
     bool options_panel = true;
+    bool toolbar = false;
+    bool status_bar = false;
     bool inspector_panel = true;
+    bool editor_panel = false;
     bool full_screen = false;
     bool style_editor = false;
     bool imgui_demo = false;
@@ -133,9 +148,6 @@ class App {
 
     // Controls.
     bool perturb_active = false;
-    // Time at which viscous pause was activated, for the green→yellow button
-    // color animation.
-    double viscous_pause_time = 0;
     int speed_index = 0;
     float cam_speed = 0.0f;
 
@@ -151,6 +163,13 @@ class App {
     // State.
     int state_sig = 0;
     std::vector<mjtNum> state;
+
+    // Timeline: simulation time recorded at history index 0 (the head).
+    double sim_head_time_ = 0.0;
+    float timeline_lh_width = 0.0f;
+    float timeline_rh_width = 0.0f;
+    bool scrubber_active = false;
+    float scrubber_grab_offset = 0.0f;
 
     // Picture-in-Picture.
     std::vector<platform::PipState> pips;
@@ -177,9 +196,6 @@ class App {
   // Requests that the currently loaded model be reloaded at the next update.
   void RequestModelReload();
 
-  // Clears the currently loaded model and all associated state.
-  void ClearModel();
-
   // Recompiles the spec, updating the model and data.
   void Recompile();
 
@@ -194,6 +210,8 @@ class App {
 
   void ResetPhysics();
   void UpdatePhysics();
+  void PreStep(const mjModel* m, mjData* d);
+  void PostStep(const mjModel* m, mjData* d);
 
   void LoadSettings();
   void SaveSettings();
@@ -222,8 +240,6 @@ class App {
   void SpecExplorerGui();
   void SpecEditorGui();
 
-  float GetExpectedLabelWidth();
-
   mjSpec* spec() { return model_holder_->spec(); }
   mjModel* model() { return model_holder_->model(); }
   mjData* data() { return model_holder_->data(); }
@@ -231,12 +247,15 @@ class App {
   bool has_model() const { return model_holder_ && model_holder_->model(); }
   bool has_data() const { return model_holder_ && model_holder_->data(); }
 
+  std::string app_title_;
   std::string ini_path_;
   std::string model_name_;  // Used if model_kind_ is kModelFromBuffer.
   std::string model_path_;
   std::string load_error_;
   std::string step_error_;
   std::string edit_error_;
+  platform::StepControl::PauseState last_pause_state_ =
+      platform::StepControl::PauseState::kNormalPaused;
 
   std::optional<std::string> pending_load_;
   std::function<void()> pending_op_;
@@ -258,6 +277,7 @@ class App {
   mjvCamera camera_;
   mjvPerturb perturb_;
   mjvOption vis_options_;
+  mjvScene plugin_scene_;
 
   UiState ui_;
   UiTempState tmp_;

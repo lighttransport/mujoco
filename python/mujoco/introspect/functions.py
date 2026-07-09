@@ -162,6 +162,52 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Delete file from VFS; return 0: success, -1: not found in VFS.',
      )),
+    ('mj_containsBufferVFS',
+     FunctionDecl(
+         name='mj_containsBufferVFS',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='vfs',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjVFS'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='name',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Check if buffer exists in VFS; return 1: exists, 0: not found.',
+     )),
+    ('mj_containsFileVFS',
+     FunctionDecl(
+         name='mj_containsFileVFS',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='vfs',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjVFS'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='directory',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='filename',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Check if file exists in VFS; return 1: exists, 0: not found.',
+     )),
     ('mj_deleteVFS',
      FunctionDecl(
          name='mj_deleteVFS',
@@ -386,6 +432,57 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Parse spec from a file.',
+     )),
+    ('mj_encode',
+     FunctionDecl(
+         name='mj_encode',
+         return_type=ValueType(name='mjtSize'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='s',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjSpec', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='m',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjModel', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='filename',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='content_type',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='vfs',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjVFS', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='error',
+                 type=PointerType(
+                     inner_type=ValueType(name='char'),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='error_sz',
+                 type=ValueType(name='int'),
+             ),
+         ),
+         doc='Encode spec/model to a file using a registered encoder. Returns the number of bytes written on success, -1 on failure.',  # pylint: disable=line-too-long
      )),
     ('mj_compile',
      FunctionDecl(
@@ -2356,6 +2453,32 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='RNE with complete data: compute cacc, cfrc_ext, cfrc_int.',
      )),
+    ('mj_maxContact',
+     FunctionDecl(
+         name='mj_maxContact',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='m',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjModel', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='g1',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='g2',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='has_margin',
+                 type=ValueType(name='int'),
+             ),
+         ),
+         doc='Return the maximum number of contacts that can be generated between two geoms. If has_margin is -1, then the margin is pulled from the model, otherwise if has_margin > 0 indicates that the geoms have a positive margin.',  # pylint: disable=line-too-long
+     )),
     ('mj_collision',
      FunctionDecl(
          name='mj_collision',
@@ -3356,19 +3479,19 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
              FunctionParameterDecl(
+                 name='d',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjData', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
                  name='dst',
                  type=PointerType(
                      inner_type=ValueType(name='mjtNum'),
                  ),
              ),
-             FunctionParameterDecl(
-                 name='M',
-                 type=PointerType(
-                     inner_type=ValueType(name='mjtNum', is_const=True),
-                 ),
-             ),
          ),
-         doc='Convert sparse inertia matrix M into full (i.e. dense) matrix.',
+         doc='Convert sparse inertia matrix into full (i.e. dense) matrix.',
      )),
     ('mj_mulM',
      FunctionDecl(
@@ -3965,7 +4088,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='flg_static',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
              FunctionParameterDecl(
                  name='bodyexclude',
@@ -4029,7 +4152,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='flg_static',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
              FunctionParameterDecl(
                  name='bodyexclude',
@@ -4236,19 +4359,19 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='flg_vert',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
              FunctionParameterDecl(
                  name='flg_edge',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
              FunctionParameterDecl(
                  name='flg_face',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
              FunctionParameterDecl(
                  name='flg_skin',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
              FunctionParameterDecl(
                  name='flexid',
@@ -6165,44 +6288,6 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Main error function; does not return to caller.',
      )),
-    ('mju_error_i',
-     FunctionDecl(
-         name='mju_error_i',
-         return_type=ValueType(name='void'),
-         parameters=(
-             FunctionParameterDecl(
-                 name='msg',
-                 type=PointerType(
-                     inner_type=ValueType(name='char', is_const=True),
-                 ),
-             ),
-             FunctionParameterDecl(
-                 name='i',
-                 type=ValueType(name='int'),
-             ),
-         ),
-         doc='Deprecated: use mju_error.',
-     )),
-    ('mju_error_s',
-     FunctionDecl(
-         name='mju_error_s',
-         return_type=ValueType(name='void'),
-         parameters=(
-             FunctionParameterDecl(
-                 name='msg',
-                 type=PointerType(
-                     inner_type=ValueType(name='char', is_const=True),
-                 ),
-             ),
-             FunctionParameterDecl(
-                 name='text',
-                 type=PointerType(
-                     inner_type=ValueType(name='char', is_const=True),
-                 ),
-             ),
-         ),
-         doc='Deprecated: use mju_error.',
-     )),
     ('mju_warning',
      FunctionDecl(
          name='mju_warning',
@@ -6217,50 +6302,75 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Main warning function; returns to caller.',
      )),
-    ('mju_warning_i',
-     FunctionDecl(
-         name='mju_warning_i',
-         return_type=ValueType(name='void'),
-         parameters=(
-             FunctionParameterDecl(
-                 name='msg',
-                 type=PointerType(
-                     inner_type=ValueType(name='char', is_const=True),
-                 ),
-             ),
-             FunctionParameterDecl(
-                 name='i',
-                 type=ValueType(name='int'),
-             ),
-         ),
-         doc='Deprecated: use mju_warning.',
-     )),
-    ('mju_warning_s',
-     FunctionDecl(
-         name='mju_warning_s',
-         return_type=ValueType(name='void'),
-         parameters=(
-             FunctionParameterDecl(
-                 name='msg',
-                 type=PointerType(
-                     inner_type=ValueType(name='char', is_const=True),
-                 ),
-             ),
-             FunctionParameterDecl(
-                 name='text',
-                 type=PointerType(
-                     inner_type=ValueType(name='char', is_const=True),
-                 ),
-             ),
-         ),
-         doc='Deprecated: use mju_warning.',
-     )),
     ('mju_clearHandlers',
      FunctionDecl(
          name='mju_clearHandlers',
          return_type=ValueType(name='void'),
          parameters=(),
          doc='Clear user error and memory handlers.',
+     )),
+    ('mju_setLogHandler',
+     FunctionDecl(
+         name='mju_setLogHandler',
+         return_type=ValueType(name='mjfLogHandler'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='handler',
+                 type=ValueType(name='mjfLogHandler'),
+             ),
+         ),
+         doc='Set the active log handler; return the previous handler. If handler is NULL, restore the default handler.',  # pylint: disable=line-too-long
+     )),
+    ('mju_getLogConfig',
+     FunctionDecl(
+         name='mju_getLogConfig',
+         return_type=ValueType(name='mjLogConfig'),
+         parameters=(),
+         doc='Get default handler configuration.',
+     )),
+    ('mju_setLogConfig',
+     FunctionDecl(
+         name='mju_setLogConfig',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='config',
+                 type=ValueType(name='mjLogConfig'),
+             ),
+         ),
+         doc='Set default handler configuration.',
+     )),
+    ('mju_info',
+     FunctionDecl(
+         name='mju_info',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='topic',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='msg',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Log an info message with optional topic filtering.',
+     )),
+    ('mju_message',
+     FunctionDecl(
+         name='mju_message',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='msg',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjLogMessage', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Dispatch a structured log message to the active handler.',
      )),
     ('mju_malloc',
      FunctionDecl(
@@ -6348,6 +6458,22 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Get compiler error message from spec.',
      )),
+    ('mjs_getTimer',
+     FunctionDecl(
+         name='mjs_getTimer',
+         return_type=PointerType(
+             inner_type=ValueType(name='double', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='s',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjSpec'),
+                 ),
+             ),
+         ),
+         doc='Get compiler timing diagnostics from spec, returns pointer to array of size mjNCTIMER.',  # pylint: disable=line-too-long
+     )),
     ('mjs_isWarning',
      FunctionDecl(
          name='mjs_isWarning',
@@ -6360,7 +6486,41 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
          ),
-         doc='Return 1 if compiler error is a warning.',
+         doc='Return 1 if compiler error is a warning. Deprecated: use mjs_numWarnings(s) > 0.',  # pylint: disable=line-too-long
+     )),
+    ('mjs_numWarnings',
+     FunctionDecl(
+         name='mjs_numWarnings',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='spec',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjSpec', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Get number of warnings accumulated in the spec.',
+     )),
+    ('mjs_getWarning',
+     FunctionDecl(
+         name='mjs_getWarning',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='spec',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjSpec', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='index',
+                 type=ValueType(name='int'),
+             ),
+         ),
+         doc='Get the i-th warning message (returns nullptr if index out of bounds).',  # pylint: disable=line-too-long
      )),
     ('mju_zero3',
      FunctionDecl(
@@ -7632,6 +7792,48 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Convert matrix from sparse to dense.',
      )),
+    ('mju_sym2dense',
+     FunctionDecl(
+         name='mju_sym2dense',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='res',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjtNum'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='mat',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjtNum', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='n',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='rownnz',
+                 type=PointerType(
+                     inner_type=ValueType(name='int', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='rowadr',
+                 type=PointerType(
+                     inner_type=ValueType(name='int', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='colind',
+                 type=PointerType(
+                     inner_type=ValueType(name='int', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Convert lower-triangular symmetric CSR matrix to full dense matrix.',  # pylint: disable=line-too-long
+     )),
     ('mju_rotVecQuat',
      FunctionDecl(
          name='mju_rotVecQuat',
@@ -8298,7 +8500,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='flg_sym',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
          ),
          doc='Convert banded matrix to dense matrix, fill upper triangle if flg_sym>0.',  # pylint: disable=line-too-long
@@ -8376,7 +8578,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='flg_sym',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
          ),
          doc='Multiply band-diagonal matrix with nvec vectors, include upper triangle if flg_sym>0.',  # pylint: disable=line-too-long
@@ -9223,7 +9425,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='flg_centered',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
              FunctionParameterDecl(
                  name='A',
@@ -9279,7 +9481,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='flg_actuation',
-                 type=ValueType(name='mjtByte'),
+                 type=ValueType(name='mjtBool'),
              ),
              FunctionParameterDecl(
                  name='DfDq',
@@ -9331,7 +9533,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  nullable=True,
              ),
          ),
-         doc='Finite differenced Jacobians of (force, sensors) = mj_inverse(state, acceleration)   All outputs are optional. Output dimensions (transposed w.r.t Control Theory convention):     DfDq: (nv x nv)     DfDv: (nv x nv)     DfDa: (nv x nv)     DsDq: (nv x nsensordata)     DsDv: (nv x nsensordata)     DsDa: (nv x nsensordata)     DmDq: (nv x nM)   single-letter shortcuts:     inputs: q=qpos, v=qvel, a=qacc     outputs: f=qfrc_inverse, s=sensordata, m=qM   notes:     optionally computes mass matrix Jacobian DmDq     flg_actuation specifies whether to subtract qfrc_actuator from qfrc_inverse',  # pylint: disable=line-too-long
+         doc='Finite differenced Jacobians of (force, sensors) = mj_inverse(state, acceleration)   All outputs are optional. Output dimensions (transposed w.r.t Control Theory convention):     DfDq: (nv x nv)     DfDv: (nv x nv)     DfDa: (nv x nv)     DsDq: (nv x nsensordata)     DsDv: (nv x nsensordata)     DsDa: (nv x nsensordata)     DmDq: (nv x nC)   single-letter shortcuts:     inputs: q=qpos, v=qvel, a=qacc     outputs: f=qfrc_inverse, s=sensordata, m=M   notes:     optionally computes mass matrix Jacobian DmDq     flg_actuation specifies whether to subtract qfrc_actuator from qfrc_inverse',  # pylint: disable=line-too-long
      )),
     ('mjd_subQuat',
      FunctionDecl(
@@ -9600,6 +9802,56 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Return the resource provider with the prefix that matches against the resource name. If no match, return NULL.',  # pylint: disable=line-too-long
      )),
+    ('mjp_registerEncoder',
+     FunctionDecl(
+         name='mjp_registerEncoder',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='encoder',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjpEncoder', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Globally register an encoder. This function is thread-safe. If an identical mjpEncoder is already registered, this function does nothing. If a non-identical mjpEncoder with the same name is already registered, an mju_error is raised.',  # pylint: disable=line-too-long
+     )),
+    ('mjp_defaultEncoder',
+     FunctionDecl(
+         name='mjp_defaultEncoder',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='encoder',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjpEncoder'),
+                 ),
+             ),
+         ),
+         doc='Set default resource encoder definition.',
+     )),
+    ('mjp_findEncoder',
+     FunctionDecl(
+         name='mjp_findEncoder',
+         return_type=PointerType(
+             inner_type=ValueType(name='mjpEncoder', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='filename',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='content_type',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Return the encoder that matches against the content type or filename extension. If no match, return NULL.',  # pylint: disable=line-too-long
+     )),
     ('mju_openResource',
      FunctionDecl(
          name='mju_openResource',
@@ -9676,6 +9928,48 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Set buffer to bytes read from the resource and return number of bytes in buffer; return negative value if error.',  # pylint: disable=line-too-long
+     )),
+    ('mju_writeResource',
+     FunctionDecl(
+         name='mju_writeResource',
+         return_type=ValueType(name='mjtSize'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='name',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='buffer',
+                 type=PointerType(
+                     inner_type=ValueType(name='void', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='nbytes',
+                 type=ValueType(name='mjtSize'),
+             ),
+             FunctionParameterDecl(
+                 name='vfs',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjVFS', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='error',
+                 type=PointerType(
+                     inner_type=ValueType(name='char'),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='nerror',
+                 type=ValueType(name='size_t'),
+             ),
+         ),
+         doc='Write resource data via its resource provider, return bytes written or -1 on error.',  # pylint: disable=line-too-long
      )),
     ('mju_getResourceDir',
      FunctionDecl(
@@ -9754,23 +10048,9 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Find the decoder for a resource and return the decoded spec. The caller takes ownership of the spec and is responsible for cleaning it up.',  # pylint: disable=line-too-long
      )),
-    ('mju_threadPoolCreate',
+    ('mju_threadpool',
      FunctionDecl(
-         name='mju_threadPoolCreate',
-         return_type=PointerType(
-             inner_type=ValueType(name='mjThreadPool'),
-         ),
-         parameters=(
-             FunctionParameterDecl(
-                 name='number_of_threads',
-                 type=ValueType(name='size_t'),
-             ),
-         ),
-         doc='Create a thread pool with the specified number of threads running.',  # pylint: disable=line-too-long
-     )),
-    ('mju_bindThreadPool',
-     FunctionDecl(
-         name='mju_bindThreadPool',
+         name='mju_threadpool',
          return_type=ValueType(name='void'),
          parameters=(
              FunctionParameterDecl(
@@ -9780,75 +10060,11 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
              FunctionParameterDecl(
-                 name='thread_pool',
-                 type=PointerType(
-                     inner_type=ValueType(name='void'),
-                 ),
+                 name='nthread',
+                 type=ValueType(name='int'),
              ),
          ),
-         doc='Adds a thread pool to mjData and configures it for multi-threaded use.',  # pylint: disable=line-too-long
-     )),
-    ('mju_threadPoolEnqueue',
-     FunctionDecl(
-         name='mju_threadPoolEnqueue',
-         return_type=ValueType(name='void'),
-         parameters=(
-             FunctionParameterDecl(
-                 name='thread_pool',
-                 type=PointerType(
-                     inner_type=ValueType(name='mjThreadPool'),
-                 ),
-             ),
-             FunctionParameterDecl(
-                 name='task',
-                 type=PointerType(
-                     inner_type=ValueType(name='mjTask'),
-                 ),
-             ),
-         ),
-         doc='Enqueue a task in a thread pool.',
-     )),
-    ('mju_threadPoolDestroy',
-     FunctionDecl(
-         name='mju_threadPoolDestroy',
-         return_type=ValueType(name='void'),
-         parameters=(
-             FunctionParameterDecl(
-                 name='thread_pool',
-                 type=PointerType(
-                     inner_type=ValueType(name='mjThreadPool'),
-                 ),
-             ),
-         ),
-         doc='Destroy a thread pool.',
-     )),
-    ('mju_defaultTask',
-     FunctionDecl(
-         name='mju_defaultTask',
-         return_type=ValueType(name='void'),
-         parameters=(
-             FunctionParameterDecl(
-                 name='task',
-                 type=PointerType(
-                     inner_type=ValueType(name='mjTask'),
-                 ),
-             ),
-         ),
-         doc='Initialize an mjTask.',
-     )),
-    ('mju_taskJoin',
-     FunctionDecl(
-         name='mju_taskJoin',
-         return_type=ValueType(name='void'),
-         parameters=(
-             FunctionParameterDecl(
-                 name='task',
-                 type=PointerType(
-                     inner_type=ValueType(name='mjTask'),
-                 ),
-             ),
-         ),
-         doc='Wait for a task to complete.',
+         doc='Create a thread pool with nthread worker threads.',
      )),
     ('mjs_attach',
      FunctionDecl(
@@ -10134,6 +10350,144 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Add flex.',
+     )),
+    ('mjs_makeFlex',
+     FunctionDecl(
+         name='mjs_makeFlex',
+         return_type=PointerType(
+             inner_type=ValueType(name='mjsFlex'),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='body',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsBody'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='name',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='type',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='dim',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='dof',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='count',
+                 type=ArrayType(
+                     inner_type=ValueType(name='int', is_const=True),
+                     extents=(3,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='cellcount',
+                 type=ArrayType(
+                     inner_type=ValueType(name='int', is_const=True),
+                     extents=(3,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='spacing',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double', is_const=True),
+                     extents=(3,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='scale',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double', is_const=True),
+                     extents=(3,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='radius',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='mass',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='inertiabox',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='equality',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='rigid',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='flatskin',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='elastic2d',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='pos',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double', is_const=True),
+                     extents=(3,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='quat',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double', is_const=True),
+                     extents=(4,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='origin',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double', is_const=True),
+                     extents=(3,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='file',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='vfs',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjVFS', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+         ),
+         doc='Add flexcomp: create flex with auto-generated bodies/joints, return flex spec.',  # pylint: disable=line-too-long
      )),
     ('mjs_addPair',
      FunctionDecl(
@@ -10685,6 +11039,94 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Set actuator to active adhesion; return error if any.',
      )),
+    ('mjs_setToDCMotor',
+     FunctionDecl(
+         name='mjs_setToDCMotor',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='actuator',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsActuator'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='motorconst',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(2,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='resistance',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='nominal',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(3,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='saturation',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(3,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='inductance',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(2,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='cogging',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(3,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='controller',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(6,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='thermal',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(6,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='lugre',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(5,),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='input_mode',
+                 type=ValueType(name='int'),
+             ),
+         ),
+         doc='Set actuator to DC motor; return error if any.',
+     )),
     ('mjs_addMesh',
      FunctionDecl(
          name='mjs_addMesh',
@@ -10817,11 +11259,27 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='element',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsElement'),
+                     inner_type=ValueType(name='mjsElement', is_const=True),
                  ),
              ),
          ),
          doc='Get spec from body.',
+     )),
+    ('mjs_getOriginSpec',
+     FunctionDecl(
+         name='mjs_getOriginSpec',
+         return_type=PointerType(
+             inner_type=ValueType(name='mjSpec'),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='element',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsElement', is_const=True),
+                 ),
+             ),
+         ),
+         doc='get spec that originally defined an element contrary to mjs_getSpec, this does not change after attachment',  # pylint: disable=line-too-long
      )),
     ('mjs_getCompiler',
      FunctionDecl(
@@ -10833,7 +11291,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='element',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsElement'),
+                     inner_type=ValueType(name='mjsElement', is_const=True),
                  ),
              ),
          ),
@@ -10849,7 +11307,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='spec',
                  type=PointerType(
-                     inner_type=ValueType(name='mjSpec'),
+                     inner_type=ValueType(name='mjSpec', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
@@ -10871,7 +11329,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='s',
                  type=PointerType(
-                     inner_type=ValueType(name='mjSpec'),
+                     inner_type=ValueType(name='mjSpec', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
@@ -10893,7 +11351,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='s',
                  type=PointerType(
-                     inner_type=ValueType(name='mjSpec'),
+                     inner_type=ValueType(name='mjSpec', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
@@ -10919,7 +11377,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='body',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsBody'),
+                     inner_type=ValueType(name='mjsBody', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
@@ -10941,7 +11399,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='element',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsElement'),
+                     inner_type=ValueType(name='mjsElement', is_const=True),
                  ),
              ),
          ),
@@ -10957,7 +11415,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='element',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsElement'),
+                     inner_type=ValueType(name='mjsElement', is_const=True),
                  ),
              ),
          ),
@@ -10973,7 +11431,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='s',
                  type=PointerType(
-                     inner_type=ValueType(name='mjSpec'),
+                     inner_type=ValueType(name='mjSpec', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
@@ -10995,7 +11453,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='element',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsElement'),
+                     inner_type=ValueType(name='mjsElement', is_const=True),
                  ),
              ),
          ),
@@ -11011,7 +11469,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='s',
                  type=PointerType(
-                     inner_type=ValueType(name='mjSpec'),
+                     inner_type=ValueType(name='mjSpec', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
@@ -11033,7 +11491,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='s',
                  type=PointerType(
-                     inner_type=ValueType(name='mjSpec'),
+                     inner_type=ValueType(name='mjSpec', is_const=True),
                  ),
              ),
          ),
@@ -11047,7 +11505,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='element',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsElement'),
+                     inner_type=ValueType(name='mjsElement', is_const=True),
                  ),
              ),
          ),
@@ -11063,7 +11521,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='body',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsBody'),
+                     inner_type=ValueType(name='mjsBody', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
@@ -11087,13 +11545,13 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='body',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsBody'),
+                     inner_type=ValueType(name='mjsBody', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
                  name='child',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsElement'),
+                     inner_type=ValueType(name='mjsElement', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
@@ -11113,7 +11571,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='s',
                  type=PointerType(
-                     inner_type=ValueType(name='mjSpec'),
+                     inner_type=ValueType(name='mjSpec', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
@@ -11133,13 +11591,13 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='s',
                  type=PointerType(
-                     inner_type=ValueType(name='mjSpec'),
+                     inner_type=ValueType(name='mjSpec', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
                  name='element',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsElement'),
+                     inner_type=ValueType(name='mjsElement', is_const=True),
                  ),
              ),
          ),
@@ -11155,7 +11613,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='wrap',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsWrap'),
+                     inner_type=ValueType(name='mjsWrap', is_const=True),
                  ),
              ),
          ),
@@ -11171,7 +11629,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='wrap',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsWrap'),
+                     inner_type=ValueType(name='mjsWrap', is_const=True),
                  ),
              ),
          ),
@@ -11185,7 +11643,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='wrap',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsWrap'),
+                     inner_type=ValueType(name='mjsWrap', is_const=True),
                  ),
              ),
          ),
@@ -11199,7 +11657,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              FunctionParameterDecl(
                  name='wrap',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsWrap'),
+                     inner_type=ValueType(name='mjsWrap', is_const=True),
                  ),
              ),
          ),
@@ -11292,7 +11750,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
     ('mjs_setInStringVec',
      FunctionDecl(
          name='mjs_setInStringVec',
-         return_type=ValueType(name='mjtByte'),
+         return_type=ValueType(name='mjtBool'),
          parameters=(
              FunctionParameterDecl(
                  name='dest',

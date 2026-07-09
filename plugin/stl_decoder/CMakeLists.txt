@@ -12,44 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-if(EMSCRIPTEN)
-  add_library(stl_decoder OBJECT stl_decoder.cc)
-else()
-  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
-  set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_LIBDIR}")
-
-  add_library(stl_decoder SHARED stl_decoder.cc)
-endif()
-
-target_include_directories(stl_decoder PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../..
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
-)
-
-if(EMSCRIPTEN)
-  target_link_libraries(stl_decoder PRIVATE)
-else()
-  target_link_libraries(stl_decoder PRIVATE
-    mujoco
-  )
-endif()
-
-target_compile_options(stl_decoder PRIVATE
-  ${AVX_COMPILE_OPTIONS}
-  ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS}
-  ${MUJOCO_MACOS_COMPILE_OPTIONS}
-  ${EXTRA_COMPILE_OPTIONS}
-  ${MUJOCO_CXX_FLAGS}
-)
-
-if(NOT EMSCRIPTEN)
-  target_link_options(stl_decoder PRIVATE
-    ${MUJOCO_MACOS_LINK_OPTIONS}
-    ${EXTRA_LINK_OPTIONS}
-  )
-
-  install(
-    TARGETS stl_decoder
-    LIBRARY DESTINATION "${CMAKE_INSTALL_BINDIR}/mujoco_plugin"
-  )
-endif()
+foreach(_target IN LISTS MUJOCO_CORE_TARGETS)
+  target_sources(${_target} PRIVATE stl_decoder.cc)
+endforeach()

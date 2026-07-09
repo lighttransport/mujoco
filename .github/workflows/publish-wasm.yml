@@ -35,10 +35,10 @@ jobs:
       PUBLISH_TO_NPM: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Setup Node.js for npm trusted publishing
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v6
       with:
         node-version: '24'
         registry-url: 'https://registry.npmjs.org'

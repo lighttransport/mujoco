@@ -255,7 +255,7 @@ class PhysicsData {
   }
 
   // Diagonal of the joint-space inertia (mass) matrix, nv entries, from the
-  // last forward pass. qM is stored sparse; model->dof_Madr[i] addresses the
+  // last forward pass. M is stored sparse; model->dof_Madr[i] addresses the
   // diagonal element of DOF i. Lets callers scale PD gains by per-joint
   // inertia so impedance control is uniformly stable across heavy and
   // light joints (gains become natural-frequency units, inertia-independent).
@@ -263,7 +263,7 @@ class PhysicsData {
     const int nv = model_->nv;
     qm_diag_buf_.resize(static_cast<std::size_t>(nv));
     for (int i = 0; i < nv; ++i) {
-      qm_diag_buf_[i] = data_->qM[model_->dof_Madr[i]];
+      qm_diag_buf_[i] = data_->M[model_->dof_Madr[i]];
     }
     return val(typed_memory_view(qm_diag_buf_.size(), qm_diag_buf_.data()));
   }
@@ -721,7 +721,7 @@ void setJointAxis(mjsJoint* j, double x, double y, double z) {
 }
 
 void setJointRange(mjsJoint* j, double lo, double hi) {
-  j->limited = 1;
+  j->limited = mjLIMITED_TRUE;
   j->range[0] = lo;
   j->range[1] = hi;
 }

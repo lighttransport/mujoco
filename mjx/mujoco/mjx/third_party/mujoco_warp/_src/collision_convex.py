@@ -15,34 +15,38 @@
 
 from typing import Tuple
 
+import warp as wp
+
 from mujoco.mjx.third_party.mujoco_warp._src.collision_core import CollisionContext
-from mujoco.mjx.third_party.mujoco_warp._src.collision_core import contact_params
 from mujoco.mjx.third_party.mujoco_warp._src.collision_core import Geom
+from mujoco.mjx.third_party.mujoco_warp._src.collision_core import contact_params
 from mujoco.mjx.third_party.mujoco_warp._src.collision_core import geom_collision_pair
 from mujoco.mjx.third_party.mujoco_warp._src.collision_core import write_contact
 from mujoco.mjx.third_party.mujoco_warp._src.collision_gjk import ccd
+from mujoco.mjx.third_party.mujoco_warp._src.collision_gjk import epa_phase
+from mujoco.mjx.third_party.mujoco_warp._src.collision_gjk import gjk_phase
 from mujoco.mjx.third_party.mujoco_warp._src.collision_gjk import multicontact
 from mujoco.mjx.third_party.mujoco_warp._src.collision_gjk import support
-from mujoco.mjx.third_party.mujoco_warp._src.collision_primitive import contact_params
 from mujoco.mjx.third_party.mujoco_warp._src.collision_primitive import Geom
+from mujoco.mjx.third_party.mujoco_warp._src.collision_primitive import contact_params
 from mujoco.mjx.third_party.mujoco_warp._src.collision_primitive import geom_collision_pair
 from mujoco.mjx.third_party.mujoco_warp._src.collision_primitive import write_contact
 from mujoco.mjx.third_party.mujoco_warp._src.math import make_frame
 from mujoco.mjx.third_party.mujoco_warp._src.math import upper_trid_index
-from mujoco.mjx.third_party.mujoco_warp._src.types import Data
-from mujoco.mjx.third_party.mujoco_warp._src.types import EnableBit
-from mujoco.mjx.third_party.mujoco_warp._src.types import GeomType
-from mujoco.mjx.third_party.mujoco_warp._src.types import mat43
-from mujoco.mjx.third_party.mujoco_warp._src.types import mat63
 from mujoco.mjx.third_party.mujoco_warp._src.types import MJ_MAX_EPAFACES
 from mujoco.mjx.third_party.mujoco_warp._src.types import MJ_MAX_EPAHORIZON
 from mujoco.mjx.third_party.mujoco_warp._src.types import MJ_MAXCONPAIR
 from mujoco.mjx.third_party.mujoco_warp._src.types import MJ_MAXVAL
+from mujoco.mjx.third_party.mujoco_warp._src.types import Data
+from mujoco.mjx.third_party.mujoco_warp._src.types import DisableBit
+from mujoco.mjx.third_party.mujoco_warp._src.types import GeomType
 from mujoco.mjx.third_party.mujoco_warp._src.types import Model
+from mujoco.mjx.third_party.mujoco_warp._src.types import OverflowType
+from mujoco.mjx.third_party.mujoco_warp._src.types import mat43
+from mujoco.mjx.third_party.mujoco_warp._src.types import mat63
 from mujoco.mjx.third_party.mujoco_warp._src.types import vec5
 from mujoco.mjx.third_party.mujoco_warp._src.warp_util import cache_kernel
 from mujoco.mjx.third_party.mujoco_warp._src.warp_util import event_scope
-import warp as wp
 
 # TODO(team): improve compile time to enable backward pass
 wp.set_module_options({"enable_backward": False})
@@ -54,20 +58,20 @@ mat_maxconpair = wp.types.matrix(shape=(MJ_MAXCONPAIR, 3), dtype=float)
 @wp.func
 def _hfield_filter(
   # Model:
-  geom_type: wp.array(dtype=int),
-  geom_dataid: wp.array(dtype=int),
-  geom_size: wp.array2d(dtype=wp.vec3),
-  geom_rbound: wp.array2d(dtype=float),
-  geom_margin: wp.array2d(dtype=float),
-  mesh_vertadr: wp.array(dtype=int),
-  mesh_vertnum: wp.array(dtype=int),
-  mesh_graphadr: wp.array(dtype=int),
-  mesh_vert: wp.array(dtype=wp.vec3),
-  mesh_graph: wp.array(dtype=int),
-  hfield_size: wp.array(dtype=wp.vec4),
+  geom_type: wp.array[int],
+  geom_dataid: wp.array2d[int],
+  geom_size: wp.array2d[wp.vec3],
+  geom_rbound: wp.array2d[float],
+  geom_margin: wp.array2d[float],
+  mesh_vertadr: wp.array[int],
+  mesh_vertnum: wp.array[int],
+  mesh_graphadr: wp.array[int],
+  mesh_vert: wp.array[wp.vec3],
+  mesh_graph: wp.array[int],
+  hfield_size: wp.array[wp.vec4],
   # Data in:
-  geom_xpos_in: wp.array2d(dtype=wp.vec3),
-  geom_xmat_in: wp.array2d(dtype=wp.mat33),
+  geom_xpos_in: wp.array2d[wp.vec3],
+  geom_xmat_in: wp.array2d[wp.mat33],
   # In:
   worldid: int,
   g1: int,
@@ -78,7 +82,8 @@ def _hfield_filter(
   See MuJoCo mjc_ConvexHField.
   """
   # height field info
-  hfdataid = geom_dataid[g1]
+  dataid_setid = worldid % geom_dataid.shape[0]
+  hfdataid = geom_dataid[dataid_setid, g1]
   size1 = hfield_size[hfdataid]
 
   # geom info
@@ -123,7 +128,7 @@ def _hfield_filter(
 
   # load mesh vertex data for support function queries
   if geomtype2 == GeomType.MESH:
-    dataid = geom_dataid[g2]
+    dataid = geom_dataid[dataid_setid, g2]
     geom2.vertadr = wp.where(dataid >= 0, mesh_vertadr[dataid], -1)
     geom2.vertnum = wp.where(dataid >= 0, mesh_vertnum[dataid], -1)
     geom2.graphadr = wp.where(dataid >= 0, mesh_graphadr[dataid], -1)
@@ -159,6 +164,7 @@ def ccd_hfield_kernel_builder(
   gjk_iterations: int,
   epa_iterations: int,
   geomgeomid: int,
+  warn_overflow: bool,
 ):
   """Kernel builder for heightfield CCD collisions (no multiccd args)."""
 
@@ -166,77 +172,80 @@ def ccd_hfield_kernel_builder(
   @wp.kernel(module="unique", enable_backward=False)
   def ccd_hfield_kernel(
     # Model:
-    opt_ccd_tolerance: wp.array(dtype=float),
-    geom_type: wp.array(dtype=int),
-    geom_condim: wp.array(dtype=int),
-    geom_dataid: wp.array(dtype=int),
-    geom_priority: wp.array(dtype=int),
-    geom_solmix: wp.array2d(dtype=float),
-    geom_solref: wp.array2d(dtype=wp.vec2),
-    geom_solimp: wp.array2d(dtype=vec5),
-    geom_size: wp.array2d(dtype=wp.vec3),
-    geom_rbound: wp.array2d(dtype=float),
-    geom_friction: wp.array2d(dtype=wp.vec3),
-    geom_margin: wp.array2d(dtype=float),
-    geom_gap: wp.array2d(dtype=float),
-    mesh_vertadr: wp.array(dtype=int),
-    mesh_vertnum: wp.array(dtype=int),
-    mesh_graphadr: wp.array(dtype=int),
-    mesh_vert: wp.array(dtype=wp.vec3),
-    mesh_graph: wp.array(dtype=int),
-    mesh_polynum: wp.array(dtype=int),
-    mesh_polyadr: wp.array(dtype=int),
-    mesh_polynormal: wp.array(dtype=wp.vec3),
-    mesh_polyvertadr: wp.array(dtype=int),
-    mesh_polyvertnum: wp.array(dtype=int),
-    mesh_polyvert: wp.array(dtype=int),
-    mesh_polymapadr: wp.array(dtype=int),
-    mesh_polymapnum: wp.array(dtype=int),
-    mesh_polymap: wp.array(dtype=int),
-    hfield_size: wp.array(dtype=wp.vec4),
-    hfield_nrow: wp.array(dtype=int),
-    hfield_ncol: wp.array(dtype=int),
-    hfield_adr: wp.array(dtype=int),
-    hfield_data: wp.array(dtype=float),
-    pair_dim: wp.array(dtype=int),
-    pair_solref: wp.array2d(dtype=wp.vec2),
-    pair_solreffriction: wp.array2d(dtype=wp.vec2),
-    pair_solimp: wp.array2d(dtype=vec5),
-    pair_margin: wp.array2d(dtype=float),
-    pair_gap: wp.array2d(dtype=float),
-    pair_friction: wp.array2d(dtype=vec5),
+    opt_ccd_tolerance: wp.array[float],
+    geom_type: wp.array[int],
+    geom_condim: wp.array[int],
+    geom_dataid: wp.array2d[int],
+    geom_priority: wp.array[int],
+    geom_solmix: wp.array2d[float],
+    geom_solref: wp.array2d[wp.vec2],
+    geom_solimp: wp.array2d[vec5],
+    geom_size: wp.array2d[wp.vec3],
+    geom_rbound: wp.array2d[float],
+    geom_friction: wp.array2d[wp.vec3],
+    geom_margin: wp.array2d[float],
+    geom_gap: wp.array2d[float],
+    mesh_vertadr: wp.array[int],
+    mesh_vertnum: wp.array[int],
+    mesh_graphadr: wp.array[int],
+    mesh_vert: wp.array[wp.vec3],
+    mesh_graph: wp.array[int],
+    mesh_polynum: wp.array[int],
+    mesh_polyadr: wp.array[int],
+    mesh_polynormal: wp.array[wp.vec3],
+    mesh_polyvertadr: wp.array[int],
+    mesh_polyvertnum: wp.array[int],
+    mesh_polyvert: wp.array[int],
+    mesh_polymapadr: wp.array[int],
+    mesh_polymapnum: wp.array[int],
+    mesh_polymap: wp.array[int],
+    hfield_size: wp.array[wp.vec4],
+    hfield_nrow: wp.array[int],
+    hfield_ncol: wp.array[int],
+    hfield_adr: wp.array[int],
+    hfield_data: wp.array[float],
+    pair_dim: wp.array[int],
+    pair_solref: wp.array2d[wp.vec2],
+    pair_solreffriction: wp.array2d[wp.vec2],
+    pair_solimp: wp.array2d[vec5],
+    pair_margin: wp.array2d[float],
+    pair_gap: wp.array2d[float],
+    pair_friction: wp.array2d[vec5],
     # Data in:
-    geom_xpos_in: wp.array2d(dtype=wp.vec3),
-    geom_xmat_in: wp.array2d(dtype=wp.mat33),
+    geom_xpos_in: wp.array2d[wp.vec3],
+    geom_xmat_in: wp.array2d[wp.mat33],
     naconmax_in: int,
     naccdmax_in: int,
-    ncollision_in: wp.array(dtype=int),
+    ncollision_in: wp.array[int],
     # In:
-    collision_pair_in: wp.array(dtype=wp.vec2i),
-    collision_pairid_in: wp.array(dtype=wp.vec2i),
-    collision_worldid_in: wp.array(dtype=int),
-    epa_vert_in: wp.array2d(dtype=wp.vec3),
-    epa_vert_index_in: wp.array2d(dtype=int),
-    epa_face_in: wp.array2d(dtype=int),
-    epa_pr_in: wp.array2d(dtype=wp.vec3),
-    epa_norm2_in: wp.array2d(dtype=float),
-    epa_horizon_in: wp.array2d(dtype=int),
-    nccd_in: wp.array(dtype=int),
+    collision_pair_in: wp.array[wp.vec2i],
+    collision_pairid_in: wp.array[wp.vec2i],
+    collision_worldid_in: wp.array[int],
+    epa_vert_in: wp.array2d[wp.vec3],
+    epa_vert_index_in: wp.array2d[int],
+    epa_face_in: wp.array2d[int],
+    epa_pr_in: wp.array2d[wp.vec3],
+    epa_norm2_in: wp.array2d[float],
+    epa_horizon_in: wp.array2d[int],
+    nccd_in: wp.array[int],
     # Data out:
-    contact_dist_out: wp.array(dtype=float),
-    contact_pos_out: wp.array(dtype=wp.vec3),
-    contact_frame_out: wp.array(dtype=wp.mat33),
-    contact_includemargin_out: wp.array(dtype=float),
-    contact_friction_out: wp.array(dtype=vec5),
-    contact_solref_out: wp.array(dtype=wp.vec2),
-    contact_solreffriction_out: wp.array(dtype=wp.vec2),
-    contact_solimp_out: wp.array(dtype=vec5),
-    contact_dim_out: wp.array(dtype=int),
-    contact_geom_out: wp.array(dtype=wp.vec2i),
-    contact_worldid_out: wp.array(dtype=int),
-    contact_type_out: wp.array(dtype=int),
-    contact_geomcollisionid_out: wp.array(dtype=int),
-    nacon_out: wp.array(dtype=int),
+    contact_dist_out: wp.array[float],
+    contact_pos_out: wp.array[wp.vec3],
+    contact_frame_out: wp.array[wp.mat33],
+    contact_includemargin_out: wp.array[float],
+    contact_friction_out: wp.array[vec5],
+    contact_solref_out: wp.array[wp.vec2],
+    contact_solreffriction_out: wp.array[wp.vec2],
+    contact_solimp_out: wp.array[vec5],
+    contact_dim_out: wp.array[int],
+    contact_geom_out: wp.array[wp.vec2i],
+    contact_efc_address_out: wp.array2d[int],
+    contact_worldid_out: wp.array[int],
+    contact_type_out: wp.array[int],
+    contact_geomcollisionid_out: wp.array[int],
+    nacon_out: wp.array[int],
+    # Data out:
+    overflow_out: wp.array[int],
   ):
     collisionid = wp.tid()
     if collisionid >= ncollision_in[0]:
@@ -275,7 +284,9 @@ def ccd_hfield_kernel_builder(
 
     ccdid = wp.atomic_add(nccd_in, wp.static(geomgeomid), 1)
     if ccdid >= naccdmax_in:
-      wp.printf("CCD overflow - please increase naccdmax to %u\n", ccdid)
+      if wp.static(warn_overflow):
+        wp.printf("CCD overflow - please increase naccdmax to %u\n", ccdid)
+      wp.atomic_or(overflow_out, worldid, wp.static(OverflowType.CCD))
       return
 
     _, margin, gap, condim, friction, solref, solreffriction, solimp = contact_params(
@@ -337,7 +348,7 @@ def ccd_hfield_kernel_builder(
     geom1.rot = wp.identity(n=3, dtype=float)
 
     # see MuJoCo mjc_ConvexHField
-    geom1_dataid = geom_dataid[g1]
+    geom1_dataid = geom_dataid[worldid % geom_dataid.shape[0], g1]
 
     # height field subgrid
     nrow = hfield_nrow[geom1_dataid]
@@ -410,10 +421,12 @@ def ccd_hfield_kernel_builder(
         # add both triangles from this cell
         for i in range(2):
           if count >= MJ_MAXCONPAIR:
-            wp.printf(
-              "height field collision overflow, number of collisions >= %u - please adjust resolution: \n decrease the number of hfield rows/cols or modify size of colliding geom\n",
-              MJ_MAXCONPAIR,
-            )
+            if wp.static(warn_overflow):
+              wp.printf(
+                "height field collision overflow, number of collisions >= %u - please adjust resolution: \n decrease the number of hfield rows/cols or modify size of colliding geom\n",
+                MJ_MAXCONPAIR,
+              )
+            wp.atomic_or(overflow_out, worldid, OverflowType.HFIELD)
             continue
 
           # add vert
@@ -516,6 +529,7 @@ def ccd_hfield_kernel_builder(
       contact_solimp_out,
       contact_dim_out,
       contact_geom_out,
+      contact_efc_address_out,
       contact_worldid_out,
       contact_type_out,
       contact_geomcollisionid_out,
@@ -572,6 +586,7 @@ def ccd_hfield_kernel_builder(
         contact_solimp_out,
         contact_dim_out,
         contact_geom_out,
+        contact_efc_address_out,
         contact_worldid_out,
         contact_type_out,
         contact_geomcollisionid_out,
@@ -626,6 +641,7 @@ def ccd_hfield_kernel_builder(
         contact_solimp_out,
         contact_dim_out,
         contact_geom_out,
+        contact_efc_address_out,
         contact_worldid_out,
         contact_type_out,
         contact_geomcollisionid_out,
@@ -681,6 +697,7 @@ def ccd_hfield_kernel_builder(
         contact_solimp_out,
         contact_dim_out,
         contact_geom_out,
+        contact_efc_address_out,
         contact_worldid_out,
         contact_type_out,
         contact_geomcollisionid_out,
@@ -688,6 +705,10 @@ def ccd_hfield_kernel_builder(
       )
 
   return ccd_hfield_kernel
+
+
+_CCD_OVERSUBSCRIBE_WAVES = 4
+_CCD_MIN_BLOCKS = 2
 
 
 @cache_kernel
@@ -698,38 +719,41 @@ def ccd_kernel_builder(
   epa_iterations: int,
   use_multiccd: bool,
   geomgeomid: int,
+  block_dim: int,
+  warn_overflow: bool,
 ):
   """Kernel builder for non-heightfield CCD collisions (no hfield args)."""
 
   @wp.func
   def eval_ccd_write_contact(
     # Model:
-    opt_ccd_tolerance: wp.array(dtype=float),
+    opt_ccd_tolerance: wp.array[float],
     # Data in:
     naconmax_in: int,
+    naccdmax_in: int,
     # In:
-    epa_vert_in: wp.array2d(dtype=wp.vec3),
-    epa_vert_index_in: wp.array2d(dtype=int),
-    epa_face_in: wp.array2d(dtype=int),
-    epa_pr_in: wp.array2d(dtype=wp.vec3),
-    epa_norm2_in: wp.array2d(dtype=float),
-    epa_horizon_in: wp.array2d(dtype=int),
-    multiccd_polygon_in: wp.array2d(dtype=wp.vec3),
-    multiccd_clipped_in: wp.array2d(dtype=wp.vec3),
-    multiccd_pnormal_in: wp.array2d(dtype=wp.vec3),
-    multiccd_pdist_in: wp.array2d(dtype=float),
-    multiccd_idx1_in: wp.array2d(dtype=int),
-    multiccd_idx2_in: wp.array2d(dtype=int),
-    multiccd_n1_in: wp.array2d(dtype=wp.vec3),
-    multiccd_n2_in: wp.array2d(dtype=wp.vec3),
-    multiccd_endvert_in: wp.array2d(dtype=wp.vec3),
-    multiccd_face1_in: wp.array2d(dtype=wp.vec3),
-    multiccd_face2_in: wp.array2d(dtype=wp.vec3),
+    epa_vert_in: wp.array2d[wp.vec3],
+    epa_vert_index_in: wp.array2d[int],
+    epa_face_in: wp.array2d[int],
+    epa_pr_in: wp.array2d[wp.vec3],
+    epa_norm2_in: wp.array2d[float],
+    epa_horizon_in: wp.array2d[int],
+    multiccd_polygon_in: wp.array2d[wp.vec3],
+    multiccd_clipped_in: wp.array2d[wp.vec3],
+    multiccd_pnormal_in: wp.array2d[wp.vec3],
+    multiccd_pdist_in: wp.array2d[float],
+    multiccd_idx1_in: wp.array2d[int],
+    multiccd_idx2_in: wp.array2d[int],
+    multiccd_n1_in: wp.array2d[wp.vec3],
+    multiccd_n2_in: wp.array2d[wp.vec3],
+    multiccd_endvert_in: wp.array2d[wp.vec3],
+    multiccd_face1_in: wp.array2d[wp.vec3],
+    multiccd_face2_in: wp.array2d[wp.vec3],
     geom1: Geom,
     geom2: Geom,
     geoms: wp.vec2i,
     worldid: int,
-    ccdid: int,
+    nccd_in: wp.array[int],
     margin: float,
     gap: float,
     condim: int,
@@ -741,20 +765,23 @@ def ccd_kernel_builder(
     x2: wp.vec3,
     pairid: wp.vec2i,
     # Data out:
-    contact_dist_out: wp.array(dtype=float),
-    contact_pos_out: wp.array(dtype=wp.vec3),
-    contact_frame_out: wp.array(dtype=wp.mat33),
-    contact_includemargin_out: wp.array(dtype=float),
-    contact_friction_out: wp.array(dtype=vec5),
-    contact_solref_out: wp.array(dtype=wp.vec2),
-    contact_solreffriction_out: wp.array(dtype=wp.vec2),
-    contact_solimp_out: wp.array(dtype=vec5),
-    contact_dim_out: wp.array(dtype=int),
-    contact_geom_out: wp.array(dtype=wp.vec2i),
-    contact_worldid_out: wp.array(dtype=int),
-    contact_type_out: wp.array(dtype=int),
-    contact_geomcollisionid_out: wp.array(dtype=int),
-    nacon_out: wp.array(dtype=int),
+    contact_dist_out: wp.array[float],
+    contact_pos_out: wp.array[wp.vec3],
+    contact_frame_out: wp.array[wp.mat33],
+    contact_includemargin_out: wp.array[float],
+    contact_friction_out: wp.array[vec5],
+    contact_solref_out: wp.array[wp.vec2],
+    contact_solreffriction_out: wp.array[wp.vec2],
+    contact_solimp_out: wp.array[vec5],
+    contact_dim_out: wp.array[int],
+    contact_geom_out: wp.array[wp.vec2i],
+    contact_efc_address_out: wp.array2d[int],
+    contact_worldid_out: wp.array[int],
+    contact_type_out: wp.array[int],
+    contact_geomcollisionid_out: wp.array[int],
+    nacon_out: wp.array[int],
+    # Data out:
+    overflow_out: wp.array[int],
   ) -> int:
     points = mat43()
     witness1 = mat43()
@@ -765,27 +792,46 @@ def ccd_kernel_builder(
     if is_collision_sensor:
       cutoff = 1.0e32
     else:
-      cutoff = 0.0
-    dist, ncollision, w1, w2, multiccd_idx = ccd(
+      cutoff = gap
+    needs_epa, dist, ncollision, w1, w2, gjk_result, geom1, geom2 = gjk_phase(
       opt_ccd_tolerance[worldid % opt_ccd_tolerance.shape[0]],
       cutoff,
       gjk_iterations,
-      epa_iterations,
       geom1,
       geom2,
       geomtype1,
       geomtype2,
       x1,
       x2,
-      epa_vert_in[ccdid],
-      epa_vert_index_in[ccdid],
-      epa_face_in[ccdid],
-      epa_pr_in[ccdid],
-      epa_norm2_in[ccdid],
-      epa_horizon_in[ccdid],
     )
 
-    if dist >= 0.0 and pairid[1] == -1:
+    ccdid = int(-1)
+    multiccd_idx = int(-1)
+
+    if needs_epa:
+      ccdid = wp.atomic_add(nccd_in, geomgeomid, 1)
+      if ccdid >= naccdmax_in:
+        if wp.static(warn_overflow):
+          wp.printf("CCD overflow - please increase naccdmax to %u\n", ccdid)
+        wp.atomic_or(overflow_out, worldid, OverflowType.CCD)
+        return 0
+      dist, ncollision, w1, w2, multiccd_idx = epa_phase(
+        opt_ccd_tolerance[worldid % opt_ccd_tolerance.shape[0]],
+        epa_iterations,
+        gjk_result,
+        geom1,
+        geom2,
+        geomtype1,
+        geomtype2,
+        epa_vert_in[ccdid],
+        epa_vert_index_in[ccdid],
+        epa_face_in[ccdid],
+        epa_pr_in[ccdid],
+        epa_norm2_in[ccdid],
+        epa_horizon_in[ccdid],
+      )
+
+    if dist >= gap and pairid[1] == -1:
       return 0
 
     # CCD operates on margin-inflated shapes (support() inflates each geom by
@@ -871,6 +917,7 @@ def ccd_kernel_builder(
         contact_solimp_out,
         contact_dim_out,
         contact_geom_out,
+        contact_efc_address_out,
         contact_worldid_out,
         contact_type_out,
         contact_geomcollisionid_out,
@@ -881,202 +928,210 @@ def ccd_kernel_builder(
     return nactive
 
   # runs convex collision on a set of geom pairs to recover contact info (non-heightfield)
-  @wp.kernel(module="unique", enable_backward=False)
+  @wp.kernel(module="unique", enable_backward=False, launch_bounds=(block_dim, _CCD_MIN_BLOCKS))
   def ccd_kernel(
     # Model:
-    opt_ccd_tolerance: wp.array(dtype=float),
-    geom_type: wp.array(dtype=int),
-    geom_condim: wp.array(dtype=int),
-    geom_dataid: wp.array(dtype=int),
-    geom_priority: wp.array(dtype=int),
-    geom_solmix: wp.array2d(dtype=float),
-    geom_solref: wp.array2d(dtype=wp.vec2),
-    geom_solimp: wp.array2d(dtype=vec5),
-    geom_size: wp.array2d(dtype=wp.vec3),
-    geom_friction: wp.array2d(dtype=wp.vec3),
-    geom_margin: wp.array2d(dtype=float),
-    geom_gap: wp.array2d(dtype=float),
-    mesh_vertadr: wp.array(dtype=int),
-    mesh_vertnum: wp.array(dtype=int),
-    mesh_graphadr: wp.array(dtype=int),
-    mesh_vert: wp.array(dtype=wp.vec3),
-    mesh_graph: wp.array(dtype=int),
-    mesh_polynum: wp.array(dtype=int),
-    mesh_polyadr: wp.array(dtype=int),
-    mesh_polynormal: wp.array(dtype=wp.vec3),
-    mesh_polyvertadr: wp.array(dtype=int),
-    mesh_polyvertnum: wp.array(dtype=int),
-    mesh_polyvert: wp.array(dtype=int),
-    mesh_polymapadr: wp.array(dtype=int),
-    mesh_polymapnum: wp.array(dtype=int),
-    mesh_polymap: wp.array(dtype=int),
-    pair_dim: wp.array(dtype=int),
-    pair_solref: wp.array2d(dtype=wp.vec2),
-    pair_solreffriction: wp.array2d(dtype=wp.vec2),
-    pair_solimp: wp.array2d(dtype=vec5),
-    pair_margin: wp.array2d(dtype=float),
-    pair_gap: wp.array2d(dtype=float),
-    pair_friction: wp.array2d(dtype=vec5),
+    opt_ccd_tolerance: wp.array[float],
+    geom_type: wp.array[int],
+    geom_condim: wp.array[int],
+    geom_dataid: wp.array2d[int],
+    geom_priority: wp.array[int],
+    geom_solmix: wp.array2d[float],
+    geom_solref: wp.array2d[wp.vec2],
+    geom_solimp: wp.array2d[vec5],
+    geom_size: wp.array2d[wp.vec3],
+    geom_friction: wp.array2d[wp.vec3],
+    geom_margin: wp.array2d[float],
+    geom_gap: wp.array2d[float],
+    mesh_vertadr: wp.array[int],
+    mesh_vertnum: wp.array[int],
+    mesh_graphadr: wp.array[int],
+    mesh_vert: wp.array[wp.vec3],
+    mesh_graph: wp.array[int],
+    mesh_polynum: wp.array[int],
+    mesh_polyadr: wp.array[int],
+    mesh_polynormal: wp.array[wp.vec3],
+    mesh_polyvertadr: wp.array[int],
+    mesh_polyvertnum: wp.array[int],
+    mesh_polyvert: wp.array[int],
+    mesh_polymapadr: wp.array[int],
+    mesh_polymapnum: wp.array[int],
+    mesh_polymap: wp.array[int],
+    pair_dim: wp.array[int],
+    pair_solref: wp.array2d[wp.vec2],
+    pair_solreffriction: wp.array2d[wp.vec2],
+    pair_solimp: wp.array2d[vec5],
+    pair_margin: wp.array2d[float],
+    pair_gap: wp.array2d[float],
+    pair_friction: wp.array2d[vec5],
     # Data in:
-    geom_xpos_in: wp.array2d(dtype=wp.vec3),
-    geom_xmat_in: wp.array2d(dtype=wp.mat33),
+    geom_xpos_in: wp.array2d[wp.vec3],
+    geom_xmat_in: wp.array2d[wp.mat33],
     naconmax_in: int,
     naccdmax_in: int,
-    ncollision_in: wp.array(dtype=int),
+    ncollision_in: wp.array[int],
     # In:
-    collision_pair_in: wp.array(dtype=wp.vec2i),
-    collision_pairid_in: wp.array(dtype=wp.vec2i),
-    collision_worldid_in: wp.array(dtype=int),
-    epa_vert_in: wp.array2d(dtype=wp.vec3),
-    epa_vert_index_in: wp.array2d(dtype=int),
-    epa_face_in: wp.array2d(dtype=int),
-    epa_pr_in: wp.array2d(dtype=wp.vec3),
-    epa_norm2_in: wp.array2d(dtype=float),
-    epa_horizon_in: wp.array2d(dtype=int),
-    multiccd_polygon_in: wp.array2d(dtype=wp.vec3),
-    multiccd_clipped_in: wp.array2d(dtype=wp.vec3),
-    multiccd_pnormal_in: wp.array2d(dtype=wp.vec3),
-    multiccd_pdist_in: wp.array2d(dtype=float),
-    multiccd_idx1_in: wp.array2d(dtype=int),
-    multiccd_idx2_in: wp.array2d(dtype=int),
-    multiccd_n1_in: wp.array2d(dtype=wp.vec3),
-    multiccd_n2_in: wp.array2d(dtype=wp.vec3),
-    multiccd_endvert_in: wp.array2d(dtype=wp.vec3),
-    multiccd_face1_in: wp.array2d(dtype=wp.vec3),
-    multiccd_face2_in: wp.array2d(dtype=wp.vec3),
-    nccd_in: wp.array(dtype=int),
+    grid_stride_in: int,
+    collision_pair_in: wp.array[wp.vec2i],
+    collision_pairid_in: wp.array[wp.vec2i],
+    collision_worldid_in: wp.array[int],
+    epa_vert_in: wp.array2d[wp.vec3],
+    epa_vert_index_in: wp.array2d[int],
+    epa_face_in: wp.array2d[int],
+    epa_pr_in: wp.array2d[wp.vec3],
+    epa_norm2_in: wp.array2d[float],
+    epa_horizon_in: wp.array2d[int],
+    multiccd_polygon_in: wp.array2d[wp.vec3],
+    multiccd_clipped_in: wp.array2d[wp.vec3],
+    multiccd_pnormal_in: wp.array2d[wp.vec3],
+    multiccd_pdist_in: wp.array2d[float],
+    multiccd_idx1_in: wp.array2d[int],
+    multiccd_idx2_in: wp.array2d[int],
+    multiccd_n1_in: wp.array2d[wp.vec3],
+    multiccd_n2_in: wp.array2d[wp.vec3],
+    multiccd_endvert_in: wp.array2d[wp.vec3],
+    multiccd_face1_in: wp.array2d[wp.vec3],
+    multiccd_face2_in: wp.array2d[wp.vec3],
+    nccd_in: wp.array[int],
     # Data out:
-    contact_dist_out: wp.array(dtype=float),
-    contact_pos_out: wp.array(dtype=wp.vec3),
-    contact_frame_out: wp.array(dtype=wp.mat33),
-    contact_includemargin_out: wp.array(dtype=float),
-    contact_friction_out: wp.array(dtype=vec5),
-    contact_solref_out: wp.array(dtype=wp.vec2),
-    contact_solreffriction_out: wp.array(dtype=wp.vec2),
-    contact_solimp_out: wp.array(dtype=vec5),
-    contact_dim_out: wp.array(dtype=int),
-    contact_geom_out: wp.array(dtype=wp.vec2i),
-    contact_worldid_out: wp.array(dtype=int),
-    contact_type_out: wp.array(dtype=int),
-    contact_geomcollisionid_out: wp.array(dtype=int),
-    nacon_out: wp.array(dtype=int),
+    contact_dist_out: wp.array[float],
+    contact_pos_out: wp.array[wp.vec3],
+    contact_frame_out: wp.array[wp.mat33],
+    contact_includemargin_out: wp.array[float],
+    contact_friction_out: wp.array[vec5],
+    contact_solref_out: wp.array[wp.vec2],
+    contact_solreffriction_out: wp.array[wp.vec2],
+    contact_solimp_out: wp.array[vec5],
+    contact_dim_out: wp.array[int],
+    contact_geom_out: wp.array[wp.vec2i],
+    contact_efc_address_out: wp.array2d[int],
+    contact_worldid_out: wp.array[int],
+    contact_type_out: wp.array[int],
+    contact_geomcollisionid_out: wp.array[int],
+    nacon_out: wp.array[int],
+    # Data out:
+    overflow_out: wp.array[int],
   ):
-    collisionid = wp.tid()
-    if collisionid >= ncollision_in[0]:
-      return
+    tid = wp.tid()
+    for collisionid in range(tid, ncollision_in[0], grid_stride_in):
+      geoms = collision_pair_in[collisionid]
+      g1 = geoms[0]
+      g2 = geoms[1]
 
-    geoms = collision_pair_in[collisionid]
-    g1 = geoms[0]
-    g2 = geoms[1]
+      if geom_type[g1] != geomtype1 or geom_type[g2] != geomtype2:
+        continue
 
-    if geom_type[g1] != geomtype1 or geom_type[g2] != geomtype2:
-      return
+      worldid = collision_worldid_in[collisionid]
 
-    ccdid = wp.atomic_add(nccd_in, wp.static(geomgeomid), 1)
-    if ccdid >= naccdmax_in:
-      wp.printf("CCD overflow - please increase naccdmax to %u\n", ccdid)
-      return
+      _, margin, gap, condim, friction, solref, solreffriction, solimp = contact_params(
+        geom_condim,
+        geom_priority,
+        geom_solmix,
+        geom_solref,
+        geom_solimp,
+        geom_friction,
+        geom_margin,
+        geom_gap,
+        pair_dim,
+        pair_solref,
+        pair_solreffriction,
+        pair_solimp,
+        pair_margin,
+        pair_gap,
+        pair_friction,
+        collision_pair_in,
+        collision_pairid_in,
+        collisionid,
+        worldid,
+      )
 
-    worldid = collision_worldid_in[collisionid]
+      geom1, geom2 = geom_collision_pair(
+        geom_type,
+        geom_dataid,
+        geom_size,
+        mesh_vertadr,
+        mesh_vertnum,
+        mesh_graphadr,
+        mesh_vert,
+        mesh_graph,
+        mesh_polynum,
+        mesh_polyadr,
+        mesh_polynormal,
+        mesh_polyvertadr,
+        mesh_polyvertnum,
+        mesh_polyvert,
+        mesh_polymapadr,
+        mesh_polymapnum,
+        mesh_polymap,
+        geom_xpos_in,
+        geom_xmat_in,
+        geoms,
+        worldid,
+      )
 
-    _, margin, gap, condim, friction, solref, solreffriction, solimp = contact_params(
-      geom_condim,
-      geom_priority,
-      geom_solmix,
-      geom_solref,
-      geom_solimp,
-      geom_friction,
-      geom_margin,
-      geom_gap,
-      pair_dim,
-      pair_solref,
-      pair_solreffriction,
-      pair_solimp,
-      pair_margin,
-      pair_gap,
-      pair_friction,
-      collision_pair_in,
-      collision_pairid_in,
-      collisionid,
-      worldid,
-    )
-
-    geom1, geom2 = geom_collision_pair(
-      geom_type,
-      geom_dataid,
-      geom_size,
-      mesh_vertadr,
-      mesh_vertnum,
-      mesh_graphadr,
-      mesh_vert,
-      mesh_graph,
-      mesh_polynum,
-      mesh_polyadr,
-      mesh_polynormal,
-      mesh_polyvertadr,
-      mesh_polyvertnum,
-      mesh_polyvert,
-      mesh_polymapadr,
-      mesh_polymapnum,
-      mesh_polymap,
-      geom_xpos_in,
-      geom_xmat_in,
-      geoms,
-      worldid,
-    )
-
-    eval_ccd_write_contact(
-      opt_ccd_tolerance,
-      naconmax_in,
-      epa_vert_in,
-      epa_vert_index_in,
-      epa_face_in,
-      epa_pr_in,
-      epa_norm2_in,
-      epa_horizon_in,
-      multiccd_polygon_in,
-      multiccd_clipped_in,
-      multiccd_pnormal_in,
-      multiccd_pdist_in,
-      multiccd_idx1_in,
-      multiccd_idx2_in,
-      multiccd_n1_in,
-      multiccd_n2_in,
-      multiccd_endvert_in,
-      multiccd_face1_in,
-      multiccd_face2_in,
-      geom1,
-      geom2,
-      geoms,
-      worldid,
-      ccdid,
-      margin,
-      gap,
-      condim,
-      friction,
-      solref,
-      solreffriction,
-      solimp,
-      geom1.pos,
-      geom2.pos,
-      collision_pairid_in[collisionid],
-      contact_dist_out,
-      contact_pos_out,
-      contact_frame_out,
-      contact_includemargin_out,
-      contact_friction_out,
-      contact_solref_out,
-      contact_solreffriction_out,
-      contact_solimp_out,
-      contact_dim_out,
-      contact_geom_out,
-      contact_worldid_out,
-      contact_type_out,
-      contact_geomcollisionid_out,
-      nacon_out,
-    )
+      eval_ccd_write_contact(
+        opt_ccd_tolerance,
+        naconmax_in,
+        naccdmax_in,
+        epa_vert_in,
+        epa_vert_index_in,
+        epa_face_in,
+        epa_pr_in,
+        epa_norm2_in,
+        epa_horizon_in,
+        multiccd_polygon_in,
+        multiccd_clipped_in,
+        multiccd_pnormal_in,
+        multiccd_pdist_in,
+        multiccd_idx1_in,
+        multiccd_idx2_in,
+        multiccd_n1_in,
+        multiccd_n2_in,
+        multiccd_endvert_in,
+        multiccd_face1_in,
+        multiccd_face2_in,
+        geom1,
+        geom2,
+        geoms,
+        worldid,
+        nccd_in,
+        margin,
+        gap,
+        condim,
+        friction,
+        solref,
+        solreffriction,
+        solimp,
+        geom1.pos,
+        geom2.pos,
+        collision_pairid_in[collisionid],
+        contact_dist_out,
+        contact_pos_out,
+        contact_frame_out,
+        contact_includemargin_out,
+        contact_friction_out,
+        contact_solref_out,
+        contact_solreffriction_out,
+        contact_solimp_out,
+        contact_dim_out,
+        contact_geom_out,
+        contact_efc_address_out,
+        contact_worldid_out,
+        contact_type_out,
+        contact_geomcollisionid_out,
+        nacon_out,
+        overflow_out,
+      )
 
   return ccd_kernel
+
+
+def _ccd_grid_size(kernel, naconmax: int) -> int:
+  # Grid-stride launch width for the CCD kernel: a few device waves, capped at the contact
+  # capacity. The kernel strides over the actual candidate count, so we avoid launching one
+  # (mostly idle) thread per naconmax slot.
+  block_size, min_grid_size = wp.get_suggested_block_size(kernel)
+  return max(1, min(naconmax, _CCD_OVERSUBSCRIBE_WAVES * block_size * min_grid_size))
 
 
 @event_scope
@@ -1116,7 +1171,7 @@ def convex_narrowphase(m: Model, d: Data, ctx: CollisionContext, collision_table
   epa_iterations = 16 if nboxbox == ncollision else m.opt.ccd_iterations
 
   # set to true to enable multiccd
-  use_multiccd = m.opt.enableflags & EnableBit.MULTICCD
+  use_multiccd = m.opt.disableflags & DisableBit.MULTICCD == 0
 
   # need at least 4 (square sides) if there's a box collision needing multiccd
   nmaxpolygon = 4 if nboxbox > 0 else 0
@@ -1156,6 +1211,7 @@ def convex_narrowphase(m: Model, d: Data, ctx: CollisionContext, collision_table
     d.contact.solimp,
     d.contact.dim,
     d.contact.geom,
+    d.contact.efc_address,
     d.contact.worldid,
     d.contact.type,
     d.contact.geomcollisionid,
@@ -1169,7 +1225,7 @@ def convex_narrowphase(m: Model, d: Data, ctx: CollisionContext, collision_table
     count, geomgeomid = _pair_count(g1, g2)
     if (g1 == GeomType.HFIELD or g2 == GeomType.HFIELD) and count:
       wp.launch(
-        ccd_hfield_kernel_builder(g1, g2, m.opt.ccd_iterations, epa_iterations, geomgeomid),
+        ccd_hfield_kernel_builder(g1, g2, m.opt.ccd_iterations, epa_iterations, geomgeomid, bool(m.opt.warn_overflow)),
         dim=d.naconmax,
         inputs=[
           m.opt.ccd_tolerance,
@@ -1227,7 +1283,7 @@ def convex_narrowphase(m: Model, d: Data, ctx: CollisionContext, collision_table
           epa_horizon,
           nccd,
         ],
-        outputs=contact_outputs,
+        outputs=contact_outputs + [d.overflow],
       )
 
   # Allocate multiccd arrays only for non-heightfield collisions
@@ -1260,9 +1316,21 @@ def convex_narrowphase(m: Model, d: Data, ctx: CollisionContext, collision_table
     g2 = geom_pair[1].value
     count, geomgeomid = _pair_count(g1, g2)
     if g1 != GeomType.HFIELD and g2 != GeomType.HFIELD and count:
+      ccd_k = ccd_kernel_builder(
+        g1,
+        g2,
+        m.opt.ccd_iterations,
+        epa_iterations,
+        use_multiccd,
+        geomgeomid,
+        m.block_dim.convex_ccd,
+        bool(m.opt.warn_overflow),
+      )
+      ccd_grid = _ccd_grid_size(ccd_k, d.naconmax)
       wp.launch(
-        ccd_kernel_builder(g1, g2, m.opt.ccd_iterations, epa_iterations, use_multiccd, geomgeomid),
-        dim=d.naconmax,
+        ccd_k,
+        dim=ccd_grid,
+        block_dim=m.block_dim.convex_ccd,
         inputs=[
           m.opt.ccd_tolerance,
           m.geom_type,
@@ -1302,6 +1370,7 @@ def convex_narrowphase(m: Model, d: Data, ctx: CollisionContext, collision_table
           d.naconmax,
           d.naccdmax,
           d.ncollision,
+          ccd_grid,
           ctx.collision_pair,
           ctx.collision_pairid,
           ctx.collision_worldid,
@@ -1324,5 +1393,5 @@ def convex_narrowphase(m: Model, d: Data, ctx: CollisionContext, collision_table
           multiccd_face2,
           nccd,
         ],
-        outputs=contact_outputs,
+        outputs=contact_outputs + [d.overflow],
       )

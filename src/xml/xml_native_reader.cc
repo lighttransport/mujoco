@@ -25,17 +25,14 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <mujoco/mujoco.h>
 #include <mujoco/mjmodel.h>
-#include <mujoco/mjplugin.h>
-#include <mujoco/mjtnum.h>
+#include <mujoco/mjtype.h>
 #include <mujoco/mjvisualize.h>
-#include "engine/engine_plugin.h"
-#include "engine/engine_support.h"
-#include "engine/engine_util_errmem.h"
 #include "engine/engine_util_misc.h"
 #include <mujoco/mjspec.h>
 #include "user/user_api.h"
@@ -52,6 +49,81 @@ using std::string_view;
 using std::vector;
 using mujoco::user::FilePath;
 using tinyxml2::XMLElement;
+
+
+
+//---------------------------------- helper utilities ----------------------------------------------
+
+// GetAttrPtr: overload for scalar and pointer fields
+template <typename T>
+inline auto GetAttrPtr(T& val) -> std::enable_if_t<!std::is_array_v<T>, decltype(&val)> {
+  if constexpr (std::is_pointer_v<T>) {
+    return val;
+  } else {
+    return &val;
+  }
+}
+
+// GetAttrPtr: overload for array fields
+template <typename T, size_t N>
+inline T* GetAttrPtr(T (&arr)[N]) { return arr; }
+
+
+// helper class for reading attributes while recording authored bits
+struct Reader {
+  Reader(XMLElement* xml_node, const void* elem) : xml_node_(xml_node), elem_(elem) {}
+
+  template <typename T>
+  int operator()(const char* attr, int len, T& data, bool required = false, bool exact = true) {
+    int res = mjXReader::ReadAttr(xml_node_, attr, len, GetAttrPtr(data), text_, required, exact);
+    if (res) mjs_setAuthored(elem_, &data, 1);
+    return res;
+  }
+
+  template <typename T>
+  bool operator()(const char* attr, T& data, const mjMap* map, int mapsz, bool required = false) {
+    int map_val_temp;
+    bool res = mjXReader::MapValue(xml_node_, attr, &map_val_temp, map, mapsz, required);
+    if (res) {
+      data = static_cast<T>(map_val_temp);
+      mjs_setAuthored(elem_, &data, 1);
+    }
+    return res;
+  }
+
+  bool operator()(const char* attr, int& data, bool required = false) {
+    bool res = mjXUtil::ReadAttrInt(xml_node_, attr, &data, required);
+    if (res) mjs_setAuthored(elem_, &data, 1);
+    return res;
+  }
+
+  bool operator()(const char* attr, mjString* target) {
+    std::string txt_temp;
+    bool res = mjXUtil::ReadAttrTxt(xml_node_, attr, txt_temp);
+    if (res) {
+      mjs_setString(target, txt_temp.c_str());
+      mjs_setAuthored(elem_, target, 1);
+    }
+    return res;
+  }
+
+  template <typename T>
+  bool txt(const char* attr, T& target, void (&set_func)(T&, const char*)) {
+    std::string txt_temp;
+    bool res = mjXUtil::ReadAttrTxt(xml_node_, attr, txt_temp);
+    if (res) {
+      set_func(target, txt_temp.c_str());
+      mjs_setAuthored(elem_, &target, 1);
+    }
+    return res;
+  }
+
+  void set_node(XMLElement* node) { xml_node_ = node; }
+
+  XMLElement* xml_node_;
+  const void* elem_;
+  std::string text_;
+};
 
 void ReadPluginConfigs(tinyxml2::XMLElement* elem, mjsPlugin* p) {
   std::map<string, string, std::less<> > config_attribs;
@@ -94,13 +166,14 @@ static void UpdateString(string& psuffix, int count, int i) {
 
 //---------------------------------- MJCF schema ---------------------------------------------------
 
+// clang-format off
 std::vector<const char*> MJCF[nMJCF] = {
 {"mujoco", "!", "model"},
 {"<"},
     {"compiler", "*", "autolimits", "boundmass", "boundinertia", "settotalmass",
         "balanceinertia", "strippath", "coordinate", "angle", "fitaabb", "eulerseq",
         "meshdir", "texturedir", "discardvisual", "usethread", "fusestatic", "inertiafromgeom",
-        "inertiagrouprange", "saveinertial", "assetdir", "alignfree"},
+        "inertiagrouprange", "saveinertial", "assetdir", "alignfree", "conflict"},
     {"<"},
         {"lengthrange", "?", "mode", "useexisting", "uselimit",
             "accel", "maxforce", "timeconst", "timestep",
@@ -118,7 +191,8 @@ std::vector<const char*> MJCF[nMJCF] = {
         {"flag", "?", "constraint", "equality", "frictionloss", "limit", "contact",
             "spring", "damper", "gravity", "clampctrl", "warmstart", "filterparent", "actuation",
             "refsafe", "sensor", "midphase", "eulerdamp", "autoreset", "nativeccd", "island",
-            "override", "energy", "fwdinv", "invdiscrete", "multiccd", "sleep"},
+            "override", "energy", "fwdinv", "invdiscrete", "multiccd", "sleep",
+            "diagexact"},
     {">"},
 
     {"size", "*", "memory", "njmax", "nconmax", "nstack", "nuserdata", "nkey",
@@ -206,6 +280,10 @@ std::vector<const char*> MJCF[nMJCF] = {
             "lmin", "lmax", "vmax", "fpmax", "fvmax"},
         {"adhesion", "?", "forcelimited", "ctrlrange", "forcerange",
             "gain", "user", "group", "nsample", "interp", "delay"},
+        {"dcmotor", "?", "ctrllimited", "ctrlrange",
+            "gear", "damping", "armature", "cranklength", "user", "group", "nsample", "interp", "delay",
+            "motorconst", "resistance", "nominal", "saturation",
+            "inductance", "cogging", "controller", "input", "thermal", "lugre"},
     {">"},
 
     {"extension", "*"},
@@ -257,9 +335,8 @@ std::vector<const char*> MJCF[nMJCF] = {
         {">"},
         {"model", "*", "name", "file", "content_type"},
     {">"},
-
-    {"body", "R", "name", "childclass", "pos", "quat", "mocap",
-        "axisangle", "xyaxes", "zaxis", "euler", "gravcomp", "sleep", "user"},
+    {"body", "R", "name", "childclass", "pos", "quat", "mocap", "axisangle",
+        "xyaxes", "zaxis", "euler", "gravcomp", "sleep", "simple", "user"},
     {"<"},
         {"inertial", "?", "pos", "quat", "mass", "diaginertia",
             "axisangle", "xyaxes", "zaxis", "euler", "fullinertia"},
@@ -280,7 +357,7 @@ std::vector<const char*> MJCF[nMJCF] = {
               {"config", "*", "key", "value"},
             {">"},
         {">"},
-        {"attach", "*", "model", "body", "prefix"},
+        {"attach", "*", "model", "body", "frame", "prefix"},
         {"site", "*",  "name", "class", "type", "group", "pos", "quat",
             "material", "size", "fromto", "axisangle", "xyaxes", "zaxis", "euler", "rgba", "user"},
         {"camera", "*", "name", "class", "projection", "fovy", "ipd", "resolution", "output", "pos",
@@ -311,7 +388,7 @@ std::vector<const char*> MJCF[nMJCF] = {
             {">"},
         {">"},
         {"flexcomp", "*", "name", "type", "group", "dim", "dof",
-            "count", "spacing", "radius", "rigid", "mass", "inertiabox",
+            "count", "cellcount", "spacing", "radius", "rigid", "mass", "inertiabox",
             "scale", "file", "point", "element", "texcoord", "material", "rgba",
             "flatskin", "pos", "quat", "axisangle", "xyaxes", "zaxis", "euler", "origin"},
         {"<"},
@@ -330,8 +407,8 @@ std::vector<const char*> MJCF[nMJCF] = {
 
     {"deformable", "*"},
     {"<"},
-        {"flex", "*", "name", "group", "dim", "radius", "material",
-            "rgba", "flatskin", "body", "vertex", "element", "texcoord", "elemtexcoord", "node"},
+        {"flex", "*", "name", "group", "dim", "radius", "material", "rgba", "flatskin", "body",
+            "vertex", "element", "texcoord", "elemtexcoord", "node", "cellcount", "dof"},
         {"<"},
             {"contact", "?",  "contype", "conaffinity", "condim", "priority",
                 "friction", "solmix", "solref", "solimp", "margin", "gap",
@@ -367,7 +444,7 @@ std::vector<const char*> MJCF[nMJCF] = {
             "active", "solref", "solimp"},
         {"flexvert", "*", "name", "class", "flex",
             "active", "solref", "solimp"},
-        {"flexstrain", "*", "name", "class", "flex",
+        {"flexstrain", "*", "name", "class", "flex", "cell",
             "active", "solref", "solimp"},
     {">"},
 
@@ -436,6 +513,12 @@ std::vector<const char*> MJCF[nMJCF] = {
             "lmin", "lmax", "vmax", "fpmax", "fvmax"},
         {"adhesion", "*", "name", "class", "group", "nsample", "interp", "delay",
             "forcelimited", "ctrlrange", "forcerange", "user", "body", "gain"},
+        {"dcmotor", "*", "name", "class", "group", "nsample", "interp", "delay",
+            "ctrllimited", "ctrlrange",
+            "lengthrange", "gear", "damping", "armature", "cranklength", "user",
+            "joint", "jointinparent", "tendon", "slidersite", "cranksite", "site", "refsite",
+            "motorconst", "resistance", "nominal", "saturation",
+            "inductance", "cogging", "controller", "thermal", "lugre", "input"},
         {"plugin", "*", "name", "class",  "plugin", "instance", "group", "nsample", "interp", "delay",
             "ctrllimited", "forcelimited", "actlimited", "ctrlrange", "forcerange", "actrange",
             "lengthrange", "gear", "damping", "armature", "cranklength", "joint", "jointinparent",
@@ -511,6 +594,7 @@ std::vector<const char*> MJCF[nMJCF] = {
     {">"},
 {">"}
 };
+// clang-format on
 
 
 
@@ -556,6 +640,13 @@ const mjMap TFAuto_map[3] = {
   {"false",   0},
   {"true",    1},
   {"auto",    2}
+};
+
+
+// FAuto type
+const mjMap FAuto_map[2] = {
+  {"false",   0},
+  {"auto",    1}
 };
 
 
@@ -724,33 +815,45 @@ const mjMap mark_map[mark_sz] = {
 
 
 // dyn type
-const int dyn_sz = 6;
+const int dyn_sz = 7;
 const mjMap dyn_map[dyn_sz] = {
   {"none",          mjDYN_NONE},
   {"integrator",    mjDYN_INTEGRATOR},
   {"filter",        mjDYN_FILTER},
   {"filterexact",   mjDYN_FILTEREXACT},
   {"muscle",        mjDYN_MUSCLE},
+  {"dcmotor",       mjDYN_DCMOTOR},
   {"user",          mjDYN_USER}
 };
 
 
+// dcmotor controller input mode
+const int dcmotorinput_sz = 3;
+const mjMap dcmotorinput_map[dcmotorinput_sz] = {
+  {"voltage",       0},
+  {"position",      1},
+  {"velocity",      2}
+};
+
+
 // gain type
-const int gain_sz = 4;
+const int gain_sz = 5;
 const mjMap gain_map[gain_sz] = {
   {"fixed",         mjGAIN_FIXED},
   {"affine",        mjGAIN_AFFINE},
   {"muscle",        mjGAIN_MUSCLE},
+  {"dcmotor",       mjGAIN_DCMOTOR},
   {"user",          mjGAIN_USER}
 };
 
 
 // bias type
-const int bias_sz = 4;
+const int bias_sz = 5;
 const mjMap bias_map[bias_sz] = {
   {"none",          mjBIAS_NONE},
   {"affine",        mjBIAS_AFFINE},
   {"muscle",        mjBIAS_MUSCLE},
+  {"dcmotor",       mjBIAS_DCMOTOR},
   {"user",          mjBIAS_USER}
 };
 
@@ -823,6 +926,11 @@ const mjMap reduce_map[reduce_sz] = {
   {"netforce",      3}
 };
 
+// conflict resolution type
+const int conflict_sz = 3;
+const mjMap conflict_map[conflict_sz] = {{"warning", mjCONFLICT_WARNING},
+                                         {"merge", mjCONFLICT_MERGE},
+                                         {"error", mjCONFLICT_ERROR}};
 
 // LR mode
 const int lrmode_sz = 4;
@@ -910,7 +1018,8 @@ const mjMap fdof_map[mjNFCOMPDOFS] = {
   {"full",          mjFCOMPDOF_FULL},
   {"radial",        mjFCOMPDOF_RADIAL},
   {"trilinear",     mjFCOMPDOF_TRILINEAR},
-  {"quadratic",     mjFCOMPDOF_QUADRATIC}
+  {"quadratic",     mjFCOMPDOF_QUADRATIC},
+  {"2d",            mjFCOMPDOF_2D}
 };
 
 
@@ -999,7 +1108,7 @@ void mjXReader::Parse(XMLElement* root, const mjVFS* vfs) {
 
   for (XMLElement* section = FirstChildElement(root, "option"); section;
        section = NextSiblingElement(section, "option")) {
-    Option(section, &spec->option);
+    Option(section, spec, &spec->option);
   }
 
   for (XMLElement* section = FirstChildElement(root, "size"); section;
@@ -1092,73 +1201,51 @@ void mjXReader::Parse(XMLElement* root, const mjVFS* vfs) {
 
 // compiler section parser
 void mjXReader::Compiler(XMLElement* section, mjSpec* s) {
-  string text;
-  int n;
+  Reader read(section, s);
 
   // top-level attributes
-  if (MapValue(section, "autolimits", &n, bool_map, 2)) {
-    s->compiler.autolimits = (n == 1);
-  }
-  ReadAttr(section, "boundmass", 1, &s->compiler.boundmass, text);
-  ReadAttr(section, "boundinertia", 1, &s->compiler.boundinertia, text);
-  ReadAttr(section, "settotalmass", 1, &s->compiler.settotalmass, text);
-  if (MapValue(section, "balanceinertia", &n, bool_map, 2)) {
-    s->compiler.balanceinertia = (n == 1);
-  }
-  if (MapValue(section, "strippath", &n, bool_map, 2)) {
-    s->strippath = (n == 1);
-  }
-  if (MapValue(section, "fitaabb", &n, bool_map, 2)) {
-    s->compiler.fitaabb = (n == 1);
-  }
-  if (MapValue(section, "coordinate", &n, coordinate_map, 2)) {
+  read("autolimits", s->compiler.autolimits, bool_map, 2);
+  read("boundmass", 1, s->compiler.boundmass);
+  read("boundinertia", 1, s->compiler.boundinertia);
+  read("settotalmass", 1, s->compiler.settotalmass);
+  read("balanceinertia", s->compiler.balanceinertia, bool_map, 2);
+  read("strippath", s->strippath, bool_map, 2);
+  read("fitaabb", s->compiler.fitaabb, bool_map, 2);
+  if (int n = 0; MapValue(section, "coordinate", &n, coordinate_map, 2)) {
     if (n == 1) {
       throw mjXError(section, "global coordinates no longer supported. To convert existing models, "
                      "load and save them in MuJoCo 2.3.3 or older");
     }
   }
-  if (MapValue(section, "angle", &n, angle_map, 2)) {
-    s->compiler.degree = (n == 1);
-  }
-  if (ReadAttrTxt(section, "eulerseq", text)) {
-    if (text.size() != 3) {
+  read("angle", s->compiler.degree, angle_map, 2);
+  if (ReadAttrTxt(section, "eulerseq", read.text_)) {
+    if (read.text_.size() != 3) {
       throw mjXError(section, "euler format must have length 3");
     }
-    memcpy(s->compiler.eulerseq, text.c_str(), 3);
+    memcpy(s->compiler.eulerseq, read.text_.c_str(), 3);
+    mjs_setAuthored(s, &s->compiler.eulerseq, 1);
   }
-  if (ReadAttrTxt(section, "assetdir", text)) {
-    mjs_setString(s->compiler.meshdir, text.c_str());
-    mjs_setString(s->compiler.texturedir, text.c_str());
+  if (ReadAttrTxt(section, "assetdir", read.text_)) {
+    mjs_setString(s->compiler.meshdir, read.text_.c_str());
+    mjs_setString(s->compiler.texturedir, read.text_.c_str());
   }
   // meshdir and texturedir take precedence over assetdir
-  string meshdir, texturedir;
-  if (ReadAttrTxt(section, "meshdir", meshdir)) {
-    mjs_setString(s->compiler.meshdir, meshdir.c_str());
-  };
-  if (ReadAttrTxt(section, "texturedir", texturedir)) {
-    mjs_setString(s->compiler.texturedir, texturedir.c_str());
-  }
-  if (MapValue(section, "discardvisual", &n, bool_map, 2)) {
-    s->compiler.discardvisual = (n == 1);
-  }
-  if (MapValue(section, "usethread", &n, bool_map, 2)) {
-    s->compiler.usethread = (n == 1);
-  }
-  if (MapValue(section, "fusestatic", &n, bool_map, 2)) {
-    s->compiler.fusestatic = (n == 1);
-  }
-  MapValue(section, "inertiafromgeom", &s->compiler.inertiafromgeom, TFAuto_map, 3);
-  ReadAttr(section, "inertiagrouprange", 2, s->compiler.inertiagrouprange, text);
-  if (MapValue(section, "alignfree", &n, bool_map, 2)) {
-    s->compiler.alignfree = (n == 1);
-  }
-  if (MapValue(section, "saveinertial", &n, bool_map, 2)) {
-    s->compiler.saveinertial = (n == 1);
-  }
+  read("meshdir", s->compiler.meshdir);
+  read("texturedir", s->compiler.texturedir);
+  read("discardvisual", s->compiler.discardvisual, bool_map, 2);
+  read("usethread", s->compiler.usethread, bool_map, 2);
+  read("fusestatic", s->compiler.fusestatic, bool_map, 2);
+  read("inertiafromgeom", s->compiler.inertiafromgeom, TFAuto_map, 3);
+  read("inertiagrouprange", 2, s->compiler.inertiagrouprange);
+  read("alignfree", s->compiler.alignfree, bool_map, 2);
+  read("saveinertial", s->compiler.saveinertial, bool_map, 2);
+  MapValue(section, "conflict", &s->compiler.conflict, conflict_map,
+           conflict_sz);
 
   // lengthrange subelement
   XMLElement* elem = FindSubElem(section, "lengthrange");
   if (elem) {
+    int n;
     mjLROpt* opt = &(s->compiler.LRopt);
 
     // flags
@@ -1171,6 +1258,7 @@ void mjXReader::Compiler(XMLElement* section, mjSpec* s) {
     }
 
     // algorithm parameters
+    string text;
     ReadAttr(elem, "accel", 1, &opt->accel, text);
     ReadAttr(elem, "maxforce", 1, &opt->maxforce, text);
     ReadAttr(elem, "timeconst", 1, &opt->timeconst, text);
@@ -1184,45 +1272,44 @@ void mjXReader::Compiler(XMLElement* section, mjSpec* s) {
 
 
 // option section parser
-void mjXReader::Option(XMLElement* section, mjOption* opt) {
-  string text;
-  int n;
+void mjXReader::Option(XMLElement* section, mjSpec* s, mjOption* opt) {
+  Reader read(section, s);
 
   // read options
-  ReadAttr(section, "timestep", 1, &opt->timestep, text);
-  ReadAttr(section, "impratio", 1, &opt->impratio, text);
-  ReadAttr(section, "tolerance", 1, &opt->tolerance, text);
-  ReadAttr(section, "ls_tolerance", 1, &opt->ls_tolerance, text);
-  ReadAttr(section, "noslip_tolerance", 1, &opt->noslip_tolerance, text);
-  ReadAttr(section, "ccd_tolerance", 1, &opt->ccd_tolerance, text);
-  ReadAttr(section, "sleep_tolerance", 1, &opt->sleep_tolerance, text);
-  ReadAttr(section, "gravity", 3, opt->gravity, text);
-  ReadAttr(section, "wind", 3, opt->wind, text);
-  ReadAttr(section, "magnetic", 3, opt->magnetic, text);
-  ReadAttr(section, "density", 1, &opt->density, text);
-  ReadAttr(section, "viscosity", 1, &opt->viscosity, text);
+  read("timestep", 1, opt->timestep);
+  read("impratio", 1, opt->impratio);
+  read("tolerance", 1, opt->tolerance);
+  read("ls_tolerance", 1, opt->ls_tolerance);
+  read("noslip_tolerance", 1, opt->noslip_tolerance);
+  read("ccd_tolerance", 1, opt->ccd_tolerance);
+  read("sleep_tolerance", 1, opt->sleep_tolerance);
+  read("gravity", 3, opt->gravity);
+  read("wind", 3, opt->wind);
+  read("magnetic", 3, opt->magnetic);
+  read("density", 1, opt->density);
+  read("viscosity", 1, opt->viscosity);
 
-  ReadAttr(section, "o_margin", 1, &opt->o_margin, text);
-  ReadAttr(section, "o_solref", mjNREF, opt->o_solref, text, false, false);
-  ReadAttr(section, "o_solimp", mjNIMP, opt->o_solimp, text, false, false);
-  ReadAttr(section, "o_friction", 5, opt->o_friction, text, false, false);
+  read("o_margin", 1, opt->o_margin);
+  read("o_solref", mjNREF, opt->o_solref, false, false);
+  read("o_solimp", mjNIMP, opt->o_solimp, false, false);
+  read("o_friction", 5, opt->o_friction, false, false);
 
-  MapValue(section, "integrator", &opt->integrator, integrator_map, integrator_sz);
-  MapValue(section, "cone", &opt->cone, cone_map, cone_sz);
-  MapValue(section, "jacobian", &opt->jacobian, jac_map, jac_sz);
-  MapValue(section, "solver", &opt->solver, solver_map, solver_sz);
-  ReadAttrInt(section, "iterations", &opt->iterations);
-  ReadAttrInt(section, "ls_iterations", &opt->ls_iterations);
-  ReadAttrInt(section, "noslip_iterations", &opt->noslip_iterations);
-  ReadAttrInt(section, "ccd_iterations", &opt->ccd_iterations);
-  ReadAttrInt(section, "sdf_iterations", &opt->sdf_iterations);
-  ReadAttrInt(section, "sdf_initpoints", &opt->sdf_initpoints);
+  read("integrator", opt->integrator, integrator_map, integrator_sz);
+  read("cone", opt->cone, cone_map, cone_sz);
+  read("jacobian", opt->jacobian, jac_map, jac_sz);
+  read("solver", opt->solver, solver_map, solver_sz);
+  read("iterations", opt->iterations);
+  read("ls_iterations", opt->ls_iterations);
+  read("noslip_iterations", opt->noslip_iterations);
+  read("ccd_iterations", opt->ccd_iterations);
+  read("sdf_iterations", opt->sdf_iterations);
+  read("sdf_initpoints", opt->sdf_initpoints);
 
   // actuatorgroupdisable
   constexpr int num_bitflags = 31;
   int disabled_act_groups[num_bitflags];
-  int num_found = ReadAttr(section, "actuatorgroupdisable", num_bitflags, disabled_act_groups,
-                           text, false, false);
+  int num_found = read("actuatorgroupdisable", num_bitflags,
+                            disabled_act_groups, false, false);
   for (int i=0; i < num_found; i++) {
     int group = disabled_act_groups[i];
     if (group < 0) {
@@ -1232,15 +1319,19 @@ void mjXReader::Option(XMLElement* section, mjOption* opt) {
       throw mjXError(section, "disabled actuator group value cannot exceed 30");
     }
     opt->disableactuator |= (1 << group);
+    s->authored.disableactuator |= (1 << group);
   }
 
   // read disable sub-element
   XMLElement* elem = FindSubElem(section, "flag");
   if (elem) {
-#define READDSBL(NAME, MASK) \
-        if (MapValue(elem, NAME, &n, enable_map, 2)) { \
-            opt->disableflags ^= (opt->disableflags & MASK); \
-            opt->disableflags |= (n ? 0 : MASK); }
+    int n = 0;
+#define READDSBL(NAME, MASK)                         \
+  if (MapValue(elem, NAME, &n, enable_map, 2)) {     \
+    opt->disableflags ^= (opt->disableflags & MASK); \
+    opt->disableflags |= (n ? 0 : MASK);             \
+    s->authored.disableflags |= MASK;                \
+  }
 
     READDSBL("constraint",   mjDSBL_CONSTRAINT)
     READDSBL("equality",     mjDSBL_EQUALITY)
@@ -1261,19 +1352,22 @@ void mjXReader::Option(XMLElement* section, mjOption* opt) {
     READDSBL("autoreset",    mjDSBL_AUTORESET)
     READDSBL("nativeccd",    mjDSBL_NATIVECCD)
     READDSBL("island",       mjDSBL_ISLAND)
+    READDSBL("multiccd",     mjDSBL_MULTICCD)
 #undef READDSBL
 
-#define READENBL(NAME, MASK) \
-        if (MapValue(elem, NAME, &n, enable_map, 2)) { \
-            opt->enableflags ^= (opt->enableflags & MASK); \
-            opt->enableflags |= (n ? MASK : 0); }
+#define READENBL(NAME, MASK)                       \
+  if (MapValue(elem, NAME, &n, enable_map, 2)) {   \
+    opt->enableflags ^= (opt->enableflags & MASK); \
+    opt->enableflags |= (n ? MASK : 0);            \
+    s->authored.enableflags |= MASK;               \
+  }
 
     READENBL("override",    mjENBL_OVERRIDE)
     READENBL("energy",      mjENBL_ENERGY)
     READENBL("fwdinv",      mjENBL_FWDINV)
     READENBL("invdiscrete", mjENBL_INVDISCRETE)
-    READENBL("multiccd",    mjENBL_MULTICCD)
     READENBL("sleep",       mjENBL_SLEEP)
+    READENBL("diagexact",   mjENBL_DIAGEXACT)
 #undef READENBL
   }
 }
@@ -1479,6 +1573,16 @@ void mjXReader::OneFlex(XMLElement* elem, mjsFlex* flex) {
   ReadAttrInt(elem, "dim", &flex->dim);
   ReadAttrInt(elem, "group", &flex->group);
 
+  flex->cellcount[0] = 1;
+  flex->cellcount[1] = 1;
+  flex->cellcount[2] = 1;
+  ReadAttr(elem, "cellcount", 3, flex->cellcount, text);
+
+  flex->order = 0;
+  if (MapValue(elem, "dof", &n, fdof_map, mjNFCOMPDOFS)) {
+    flex->order = (n == mjFCOMPDOF_QUADRATIC) ? 2 : (n == mjFCOMPDOF_TRILINEAR ? 1 : 0);
+  }
+
   // read data vectors
   if (ReadAttrTxt(elem, "body", text, true)) {
     mjs_setStringVec(flex->vertbody, text.c_str());
@@ -1520,7 +1624,7 @@ void mjXReader::OneFlex(XMLElement* elem, mjsFlex* flex) {
       flex->internal = (n == 1);
     }
     MapValue(cont, "selfcollide", &flex->selfcollide, flexself_map, 5);
-    if (MapValue(cont, "passive", &flex->passive, bool_map, 2)) {
+    if (MapValue(cont, "passive", &n, bool_map, 2)) {
       flex->passive = (n == 1);
     }
     ReadAttrInt(cont, "activelayers", &flex->activelayers);
@@ -2213,8 +2317,12 @@ void mjXReader::OneEquality(XMLElement* elem, mjsEquality* equality) {
 
       case mjEQ_FLEX:
       case mjEQ_FLEXVERT:
+        ReadAttrTxt(elem, "flex", name1, true);
+        break;
+
       case mjEQ_FLEXSTRAIN:
         ReadAttrTxt(elem, "flex", name1, true);
+        ReadAttr(elem, "cell", 3, equality->data, text);
         break;
 
       case mjEQ_DISTANCE:
@@ -2453,7 +2561,8 @@ void mjXReader::OneActuator(XMLElement* elem, mjsActuator* actuator) {
 
   // damper
   else if (type == "damper") {
-    double kv = 0;
+    bool inherited = (actuator->gaintype == mjGAIN_AFFINE);
+    double kv = inherited ? -actuator->gainprm[2] : 0;
     ReadAttr(elem, "kv", 1, &kv, text);
     err = mjs_setToDamper(actuator, kv);
   }
@@ -2496,6 +2605,53 @@ void mjXReader::OneActuator(XMLElement* elem, mjsActuator* actuator) {
     ReadAttr(elem, "gain", 1, &gain, text);
     ReadAttr(elem, "ctrlrange", 2, actuator->ctrlrange, text);
     err = mjs_setToAdhesion(actuator, gain);
+  }
+
+  // DC motor
+  else if (type == "dcmotor") {
+    bool inherited = (actuator->gaintype == mjGAIN_DCMOTOR);
+    double motorconst[2] = {inherited ? actuator->gainprm[1] : 0, 0};
+    double resistance = inherited ? actuator->gainprm[0] : 0;
+    double nominal[3] = {0, 0, 0};
+    double saturation[3] = {0, 0,
+                            inherited ? actuator->dynprm[1] : 0};
+    double controller[6] = {inherited ? actuator->gainprm[4] : 0,
+                            inherited ? actuator->gainprm[5] : 0,
+                            inherited ? actuator->gainprm[6] : 0,
+                            inherited ? actuator->dynprm[7] : 0,
+                            inherited ? actuator->dynprm[8] : 0,
+                            inherited ? actuator->gainprm[7] : 0};
+    double inductance[2] = {0, inherited ? actuator->dynprm[0] : 0};
+    double cogging[3] = {inherited ? actuator->biasprm[0] : 0,
+                         inherited ? actuator->biasprm[1] : 0,
+                         inherited ? actuator->biasprm[2] : 0};
+    double thermal[6] = {inherited ? actuator->dynprm[2] : 0,
+                         inherited ? actuator->dynprm[3] : 0,
+                         0,
+                         inherited ? actuator->gainprm[2] : 0,
+                         inherited ? actuator->gainprm[3] : 0,
+                         inherited ? actuator->dynprm[4] : 0};
+    double lugre[5] = {inherited ? actuator->dynprm[5] : 0,
+                       inherited ? actuator->dynprm[6] : 0,
+                       inherited ? actuator->biasprm[3] : 0,
+                       inherited ? actuator->biasprm[4] : 0,
+                       inherited ? actuator->biasprm[5] : 0};
+    int input_mode = inherited ? (int)actuator->gainprm[8] : 0;
+    ReadAttr(elem, "motorconst", 2, motorconst, text, false, false);
+    ReadAttr(elem, "resistance", 1, &resistance, text);
+    ReadAttr(elem, "nominal", 3, nominal, text, false, false);
+    ReadAttr(elem, "saturation", 3, saturation, text, false, false);
+    ReadAttr(elem, "inductance", 2, inductance, text, false, false);
+    ReadAttr(elem, "cogging", 3, cogging, text, false, false);
+    ReadAttr(elem, "controller", 6, controller, text, false, false);
+    ReadAttr(elem, "thermal", 6, thermal, text, false, false);
+    ReadAttr(elem, "lugre", 5, lugre, text, false, false);
+    if (MapValue(elem, "input", &input_mode, dcmotorinput_map, dcmotorinput_sz)) {
+      // successfully parsed
+    }
+    err = mjs_setToDCMotor(actuator, motorconst, resistance,
+                           nominal, saturation, inductance,
+                           cogging, controller, thermal, lugre, input_mode);
   }
 
   else if (type == "plugin") {
@@ -2725,6 +2881,7 @@ void mjXReader::OneFlexcomp(XMLElement* elem, mjsBody* body, const mjVFS* vfs) {
     fcomp.type = (mjtFcompType)n;
   }
   ReadAttr(elem, "count", 3, fcomp.count, text);
+  ReadAttr(elem, "cellcount", 3, fcomp.cellcount, text);
   ReadAttr(elem, "spacing", 3, fcomp.spacing, text);
   ReadAttr(elem, "scale", 3, fcomp.scale, text);
   ReadAttr(elem, "mass", 1, &fcomp.mass, text);
@@ -2798,11 +2955,8 @@ void mjXReader::OneFlexcomp(XMLElement* elem, mjsBody* body, const mjVFS* vfs) {
   }
 
   // check errors
-  if (dflex.elastic2d >= 2 && fcomp.equality) {
-    throw mjXError(elem, "elasticity and edge constraints cannot both be present");
-  }
-  if (fcomp.equality == 3 && dflex.young > 0) {
-    throw mjXError(elem, "strain constraint and elasticity (young) cannot both be present");
+  if (dflex.elastic2d != 1 && fcomp.equality && dflex.young > 0) {
+    throw mjXError(elem, "flex constraints and elasticity (young) cannot both be present");
   }
 
   // contact
@@ -2962,7 +3116,8 @@ void mjXReader::Default(XMLElement* section, const mjsDefault* def, const mjVFS*
              name == "intvelocity" ||
              name == "cylinder"    ||
              name == "muscle"      ||
-             name == "adhesion") {
+             name == "adhesion"    ||
+             name == "dcmotor") {
       OneActuator(elem, def->actuator);
     }
 
@@ -3162,129 +3317,125 @@ void mjXReader::Custom(XMLElement* section) {
 
 // visual section parser
 void mjXReader::Visual(XMLElement* section) {
-  string text, name;
+  string name;
   XMLElement* elem;
   mjVisual* vis = &spec->visual;
-  int n;
+  Reader read(section, spec);
 
   // iterate over child elements
   elem = FirstChildElement(section);
   while (elem) {
     // get sub-element name
     name = elem->Value();
+    read.set_node(elem);
 
     // global sub-element
     if (name == "global") {
-      ReadAttrInt(elem, "cameraid",     &vis->global.cameraid);
-      if (MapValue(elem, "orthographic", &n, bool_map, 2)) {
-        vis->global.orthographic = (n == 1);
-      }
-      ReadAttr(elem,    "fovy",      1, &vis->global.fovy,      text);
-      ReadAttr(elem,    "ipd",       1, &vis->global.ipd,       text);
-      ReadAttr(elem,    "azimuth",   1, &vis->global.azimuth,   text);
-      ReadAttr(elem,    "elevation", 1, &vis->global.elevation, text);
-      ReadAttr(elem,    "linewidth", 1, &vis->global.linewidth, text);
-      ReadAttr(elem,    "glow",      1, &vis->global.glow,      text);
-      ReadAttrInt(elem, "offwidth",     &vis->global.offwidth);
-      ReadAttrInt(elem, "offheight",    &vis->global.offheight);
-      if (ReadAttr(elem, "realtime", 1, &vis->global.realtime, text)) {
+      read("cameraid",     vis->global.cameraid);
+      read("orthographic", vis->global.orthographic, bool_map, 2);
+      read("fovy",      1, vis->global.fovy);
+      read("ipd",       1, vis->global.ipd);
+      read("azimuth",   1, vis->global.azimuth);
+      read("elevation", 1, vis->global.elevation);
+      read("linewidth", 1, vis->global.linewidth);
+      read("glow",      1, vis->global.glow);
+      read("offwidth",     vis->global.offwidth);
+      read("offheight",    vis->global.offheight);
+      if (read("realtime", 1, vis->global.realtime)) {
         if (vis->global.realtime <= 0) {
           throw mjXError(elem, "realtime must be greater than 0");
         }
       }
-      if (MapValue(elem, "ellipsoidinertia", &n, bool_map, 2)) {
-        vis->global.ellipsoidinertia = (n == 1);
-      }
-      if (MapValue(elem, "bvactive", &n, bool_map, 2)) {
-        vis->global.bvactive = (n == 1);
-      }
+      read("ellipsoidinertia", vis->global.ellipsoidinertia, bool_map, 2);
+      read("bvactive", vis->global.bvactive, bool_map, 2);
     }
 
     // quality sub-element
     else if (name == "quality") {
-      ReadAttrInt(elem, "shadowsize", &vis->quality.shadowsize);
-      ReadAttrInt(elem, "offsamples", &vis->quality.offsamples);
-      ReadAttrInt(elem, "numslices",  &vis->quality.numslices);
-      ReadAttrInt(elem, "numstacks",  &vis->quality.numstacks);
-      ReadAttrInt(elem, "numquads",   &vis->quality.numquads);
+      read("shadowsize", vis->quality.shadowsize);
+      read("offsamples", vis->quality.offsamples);
+      read("numslices",  vis->quality.numslices);
+      read("numstacks",  vis->quality.numstacks);
+      read("numquads",   vis->quality.numquads);
     }
 
     // headlight sub-element
     else if (name == "headlight") {
-      ReadAttr(elem, "ambient",  3, vis->headlight.ambient,  text);
-      ReadAttr(elem, "diffuse",  3, vis->headlight.diffuse,  text);
-      ReadAttr(elem, "specular", 3, vis->headlight.specular, text);
-      ReadAttrInt(elem, "active",  &vis->headlight.active);
+      read("ambient",  3, vis->headlight.ambient);
+      read("diffuse",  3, vis->headlight.diffuse);
+      read("specular", 3, vis->headlight.specular);
+      read("active",  vis->headlight.active);
     }
 
     // map sub-element
     else if (name == "map") {
-      ReadAttr(elem, "stiffness",      1, &vis->map.stiffness, text);
-      ReadAttr(elem, "stiffnessrot",   1, &vis->map.stiffnessrot, text);
-      ReadAttr(elem, "force",          1, &vis->map.force,     text);
-      ReadAttr(elem, "torque",         1, &vis->map.torque,    text);
-      ReadAttr(elem, "alpha",          1, &vis->map.alpha,     text);
-      ReadAttr(elem, "fogstart",       1, &vis->map.fogstart,  text);
-      ReadAttr(elem, "fogend",         1, &vis->map.fogend,    text);
-      ReadAttr(elem, "znear",          1, &vis->map.znear,     text);
-      if (vis->map.znear <= 0) {
-        throw mjXError(elem, "znear must be strictly positive");
+      read("stiffness",      1, vis->map.stiffness);
+      read("stiffnessrot",   1, vis->map.stiffnessrot);
+      read("force",          1, vis->map.force);
+      read("torque",         1, vis->map.torque);
+      read("alpha",          1, vis->map.alpha);
+      read("fogstart",       1, vis->map.fogstart);
+      read("fogend",         1, vis->map.fogend);
+      if (read("znear",      1, vis->map.znear)) {
+        if (vis->map.znear <= 0) {
+          throw mjXError(elem, "znear must be strictly positive");
+        }
       }
-      ReadAttr(elem, "zfar",           1, &vis->map.zfar,      text);
-      ReadAttr(elem, "haze",           1, &vis->map.haze,      text);
-      ReadAttr(elem, "shadowclip",     1, &vis->map.shadowclip, text);
-      ReadAttr(elem, "shadowscale",    1, &vis->map.shadowscale, text);
-      ReadAttr(elem, "actuatortendon", 1, &vis->map.actuatortendon, text);
+      read("zfar",           1, vis->map.zfar);
+      read("haze",           1, vis->map.haze);
+      read("shadowclip",     1, vis->map.shadowclip);
+      read("shadowscale",    1, vis->map.shadowscale);
+      read("actuatortendon", 1, vis->map.actuatortendon);
     }
 
     // scale sub-element
     else if (name == "scale") {
-      ReadAttr(elem, "forcewidth",     1, &vis->scale.forcewidth,     text);
-      ReadAttr(elem, "contactwidth",   1, &vis->scale.contactwidth,   text);
-      ReadAttr(elem, "contactheight",  1, &vis->scale.contactheight,  text);
-      ReadAttr(elem, "connect",        1, &vis->scale.connect,        text);
-      ReadAttr(elem, "com",            1, &vis->scale.com,            text);
-      ReadAttr(elem, "camera",         1, &vis->scale.camera,         text);
-      ReadAttr(elem, "light",          1, &vis->scale.light,          text);
-      ReadAttr(elem, "selectpoint",    1, &vis->scale.selectpoint,    text);
-      ReadAttr(elem, "jointlength",    1, &vis->scale.jointlength,    text);
-      ReadAttr(elem, "jointwidth",     1, &vis->scale.jointwidth,     text);
-      ReadAttr(elem, "actuatorlength", 1, &vis->scale.actuatorlength, text);
-      ReadAttr(elem, "actuatorwidth",  1, &vis->scale.actuatorwidth,  text);
-      ReadAttr(elem, "framelength",    1, &vis->scale.framelength,    text);
-      ReadAttr(elem, "framewidth",     1, &vis->scale.framewidth,     text);
-      ReadAttr(elem, "constraint",     1, &vis->scale.constraint,     text);
-      ReadAttr(elem, "slidercrank",    1, &vis->scale.slidercrank,    text);
-      ReadAttr(elem, "frustum",        1, &vis->scale.frustum,        text);
+      read("forcewidth",     1, vis->scale.forcewidth);
+      read("contactwidth",   1, vis->scale.contactwidth);
+      read("contactheight",  1, vis->scale.contactheight);
+      read("connect",        1, vis->scale.connect);
+      read("com",            1, vis->scale.com);
+      read("camera",         1, vis->scale.camera);
+      read("light",          1, vis->scale.light);
+      read("selectpoint",    1, vis->scale.selectpoint);
+      read("jointlength",    1, vis->scale.jointlength);
+      read("jointwidth",     1, vis->scale.jointwidth);
+      read("actuatorlength", 1, vis->scale.actuatorlength);
+      read("actuatorwidth",  1, vis->scale.actuatorwidth);
+      read("framelength",    1, vis->scale.framelength);
+      read("framewidth",     1, vis->scale.framewidth);
+      read("constraint",     1, vis->scale.constraint);
+      read("slidercrank",    1, vis->scale.slidercrank);
+      read("frustum",        1, vis->scale.frustum);
     }
 
     // rgba sub-element
     else if (name == "rgba") {
-      ReadAttr(elem, "fog",              4, vis->rgba.fog,             text);
-      ReadAttr(elem, "haze",             4, vis->rgba.haze,            text);
-      ReadAttr(elem, "force",            4, vis->rgba.force,           text);
-      ReadAttr(elem, "inertia",          4, vis->rgba.inertia,         text);
-      ReadAttr(elem, "joint",            4, vis->rgba.joint,           text);
-      ReadAttr(elem, "actuator",         4, vis->rgba.actuator,        text);
-      ReadAttr(elem, "actuatornegative", 4, vis->rgba.actuatornegative, text);
-      ReadAttr(elem, "actuatorpositive", 4, vis->rgba.actuatorpositive, text);
-      ReadAttr(elem, "com",              4, vis->rgba.com,             text);
-      ReadAttr(elem, "camera",           4, vis->rgba.camera,          text);
-      ReadAttr(elem, "light",            4, vis->rgba.light,           text);
-      ReadAttr(elem, "selectpoint",      4, vis->rgba.selectpoint,     text);
-      ReadAttr(elem, "connect",          4, vis->rgba.connect,         text);
-      ReadAttr(elem, "contactpoint",     4, vis->rgba.contactpoint,    text);
-      ReadAttr(elem, "contactforce",     4, vis->rgba.contactforce,    text);
-      ReadAttr(elem, "contactfriction",  4, vis->rgba.contactfriction, text);
-      ReadAttr(elem, "contacttorque",    4, vis->rgba.contacttorque,   text);
-      ReadAttr(elem, "contactgap",       4, vis->rgba.contactgap,      text);
-      ReadAttr(elem, "rangefinder",      4, vis->rgba.rangefinder,     text);
-      ReadAttr(elem, "constraint",       4, vis->rgba.constraint,      text);
-      ReadAttr(elem, "slidercrank",      4, vis->rgba.slidercrank,     text);
-      ReadAttr(elem, "crankbroken",      4, vis->rgba.crankbroken,     text);
-      ReadAttr(elem, "frustum",          4, vis->rgba.frustum,         text);
-      ReadAttr(elem, "bv",               4, vis->rgba.bv,              text);
-      ReadAttr(elem, "bvactive",         4, vis->rgba.bvactive,        text);
+      read("fog",              4, vis->rgba.fog);
+      read("haze",             4, vis->rgba.haze);
+      read("force",            4, vis->rgba.force);
+      read("inertia",          4, vis->rgba.inertia);
+      read("joint",            4, vis->rgba.joint);
+      read("actuator",         4, vis->rgba.actuator);
+      read("actuatornegative", 4, vis->rgba.actuatornegative);
+      read("actuatorpositive", 4, vis->rgba.actuatorpositive);
+      read("com",              4, vis->rgba.com);
+      read("camera",           4, vis->rgba.camera);
+      read("light",            4, vis->rgba.light);
+      read("selectpoint",      4, vis->rgba.selectpoint);
+      read("connect",          4, vis->rgba.connect);
+      read("contactpoint",     4, vis->rgba.contactpoint);
+      read("contactforce",     4, vis->rgba.contactforce);
+      read("contactfriction",  4, vis->rgba.contactfriction);
+      read("contacttorque",    4, vis->rgba.contacttorque);
+      read("contactgap",       4, vis->rgba.contactgap);
+      read("rangefinder",      4, vis->rgba.rangefinder);
+      read("constraint",       4, vis->rgba.constraint);
+      read("slidercrank",      4, vis->rgba.slidercrank);
+      read("crankbroken",      4, vis->rgba.crankbroken);
+      read("frustum",          4, vis->rgba.frustum);
+      read("bv",               4, vis->rgba.bv);
+      read("bvactive",         4, vis->rgba.bvactive);
     }
 
     // advance to next element
@@ -3501,7 +3652,13 @@ void mjXReader::Asset(XMLElement* section, const mjVFS* vfs) {
   }
 }
 
-
+// strip the "Error: " prefix from compiler/spec error messages
+static const char* stripError(const char* err) {
+  if (err && std::strncmp(err, "Error: ", 7) == 0) {
+    return err + 7;
+  }
+  return err;
+}
 
 // body/world section parser; recursive
 void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame,
@@ -3728,13 +3885,13 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame,
 
         // attach to parent
         if (!mjs_attach(body->element, pframe->element, /*prefix=*/"", suffix.c_str())) {
-          throw mjXError(elem, "%s", mjs_getError(spec));
+          throw mjXError(elem, "%s", stripError(mjs_getError(spec)));
         }
       }
 
       // delete subtree
       if (mjs_delete(spec, subtree->element)) {
-        throw mjXError(elem, "%s", mjs_getError(spec));
+        throw mjXError(elem, "%s", stripError(mjs_getError(spec)));
       }
     }
 
@@ -3776,6 +3933,9 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame,
       if (MapValue(elem, "sleep", &n, bodysleep_map, bodysleep_sz)) {
         child->sleep = (mjtSleepPolicy) n;
       }
+      if (MapValue(elem, "simple", &n, FAuto_map, 2)) {
+        child->simple = (mjtByte) n;
+      }
 
       // read userdata
       std::vector<double> userdata;
@@ -3791,37 +3951,71 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame,
 
     // attachment
     else if (name == "attach") {
-      string model_name, body_name, prefix;
-      ReadAttrTxt(elem, "model", model_name, /*required=*/true);
-      ReadAttrTxt(elem, "body", body_name, /*required=*/false);
+      string model_name, child_name, prefix;
+      bool has_model = ReadAttrTxt(elem, "model", model_name, /*required=*/false);
+      bool has_body = ReadAttrTxt(elem, "body", child_name, /*required=*/false);
+      bool has_frame = ReadAttrTxt(elem, "frame", child_name, /*required=*/false);
       ReadAttrTxt(elem, "prefix", prefix, /*required=*/true);
 
-      mjsBody* child_body = mjs_findBody(spec, (prefix+body_name).c_str());
-      mjsFrame* pframe = frame ? frame : mjs_addFrame(body, nullptr);
+      if (has_body && has_frame) {
+        throw mjXError(elem, "only one of body or frame can be specified in attach");
+      }
+      mjtObj type = mjOBJ_UNKNOWN;
+      if (has_body) type = mjOBJ_BODY;
+      else if (has_frame) type = mjOBJ_FRAME;
 
-      if (!child_body) {
+      mjsElement* source_elem = nullptr;
+      if (!has_model) { // Self-attach
+        if (type == mjOBJ_UNKNOWN) {
+          throw mjXError(elem, "either 'body' or 'frame' attribute must be specified for self-attach");
+        }
+
+        // check for name collision in the current spec
+        string full_name = prefix + child_name;
+        if (mjs_findElement(spec, type, full_name.c_str())) {
+          throw mjXError(elem, "cannot self-attach: element %s already exists", full_name.c_str());
+        }
+        source_elem = mjs_findElement(spec, type, child_name.c_str());
+        if (!source_elem) {
+          throw mjXError(elem, "%s",
+                         (string("could not find ") + mju_type2Str(type) + " '" + child_name +
+                          "' in the current model for self-attachment").c_str());
+        }
+      } else { // Attach from external model asset
+        // Check for name collision in the current spec
+        if (!child_name.empty()) {
+            string full_name = prefix + child_name;
+            if (mjs_findElement(spec, type, full_name.c_str())) {
+                throw mjXError(elem, "%s",
+                               (string("cannot attach: element ") + child_name +
+                                " already exists with prefix " + prefix).c_str());
+            }
+        }
+
         mjSpec* asset = mjs_findSpec(spec, model_name.c_str());
         if (!asset) {
           throw mjXError(elem, "could not find model '%s'", model_name.c_str());
         }
-        mjsElement* child;
-        if (body_name.empty()) {
-          child = asset->element;
-        } else {
-          child_body = mjs_findBody(asset, body_name.c_str());
-          if (!child_body) {
-            throw mjXError(elem, "could not find body '%s''%s'", body_name.c_str());
+
+        if (type == mjOBJ_UNKNOWN) { // Attach world body contents
+          source_elem = asset->element;
+        } else { // Attach specific body or frame
+          source_elem = mjs_findElement(asset, type, child_name.c_str());
+          if (!source_elem) {
+            throw mjXError(elem, "%s",
+                           (string("could not find ") + mju_type2Str(type) + " '" + child_name +
+                            "' in model asset '" + model_name + "'").c_str());
           }
-          child = child_body->element;
         }
-        if (!mjs_attach(pframe->element, child, prefix.c_str(), "")) {
-          throw mjXError(elem, "%s", mjs_getError(spec));
-        }
-      } else {
-        // only set frame to existing body
-        if (mjs_setFrame(child_body->element, pframe)) {
-          throw mjXError(elem, "%s", mjs_getError(spec));
-        }
+      }
+
+      mjsFrame* pframe = frame ? frame : mjs_addFrame(body, nullptr);
+      // Set default for the new frame from the current context
+      mjs_setDefault(pframe->element, mjs_getDefault(frame ? frame->element : body->element));
+      mjs_setString(pframe->info, ("line = " + std::to_string(elem->GetLineNum())).c_str());
+
+      if (!mjs_attach(pframe->element, source_elem, prefix.c_str(), "")) {
+        throw mjXError(elem, "%s", stripError(mjs_getError(spec)));
       }
     }
 

@@ -33,6 +33,7 @@
 #include "engine/engine_memory.h"
 #include "engine/engine_plugin.h"
 #include "engine/engine_sleep.h"
+#include "engine/engine_thread.h"
 #include "engine/engine_util_blas.h"
 #include "engine/engine_util_errmem.h"
 #include "engine/engine_util_misc.h"
@@ -184,9 +185,32 @@ static mjtSize safeAddToBufferSize(intptr_t* offset, mjtSize* nbuffer,
   if (__builtin_add_overflow(*nbuffer, to_add, nbuffer)) return 0;
   if (__builtin_add_overflow(*offset, to_add, offset)) return 0;
 #else
-  // TODO: offer a safe implementation for MSVC or other compilers that don't have the builtins
-  *nbuffer += SKIP(*offset) + type_size*nr*nc;
-  *offset += SKIP(*offset) + type_size*nr*nc;
+  // safe overflow checks for MSVC and other compilers without __builtin_*_overflow
+  {
+    size_t product;
+    size_t to_add;
+    size_t skip = SKIP(*offset);
+
+    // nc * nr
+    if (nr > 0 && (size_t)nc > SIZE_MAX / (size_t)nr) return 0;
+    product = (size_t)nc * (size_t)nr;
+
+    // product * type_size
+    if (type_size > 0 && product > SIZE_MAX / type_size) return 0;
+    product *= type_size;
+
+    // product + SKIP(*offset)
+    if (product > SIZE_MAX - skip) return 0;
+    to_add = product + skip;
+
+    // *nbuffer + to_add
+    if ((size_t)*nbuffer > SIZE_MAX - to_add) return 0;
+    *nbuffer += to_add;
+
+    // *offset + to_add
+    if (*offset > 0 && to_add > (size_t)(INTPTR_MAX - *offset)) return 0;
+    *offset += to_add;
+  }
 #endif
 
   return 1;
@@ -205,11 +229,11 @@ void mj_makeModel(mjModel** dest,
     mjtSize nbvhdynamic, mjtSize noct, mjtSize njnt, mjtSize ntree, mjtSize nM, mjtSize nB,
     mjtSize nC, mjtSize nD, mjtSize ngeom, mjtSize nsite, mjtSize ncam, mjtSize nlight,
     mjtSize nflex, mjtSize nflexnode, mjtSize nflexvert, mjtSize nflexedge, mjtSize nflexelem,
-    mjtSize nflexelemdata, mjtSize nflexelemedge, mjtSize nflexshelldata, mjtSize nflexevpair,
-    mjtSize nflextexcoord, mjtSize nJfe, mjtSize nJfv, mjtSize nmesh, mjtSize nmeshvert,
-    mjtSize nmeshnormal, mjtSize nmeshtexcoord, mjtSize nmeshface, mjtSize nmeshgraph,
-    mjtSize nmeshpoly, mjtSize nmeshpolyvert, mjtSize nmeshpolymap, mjtSize nskin,
-    mjtSize nskinvert, mjtSize nskintexvert, mjtSize nskinface, mjtSize nskinbone,
+    mjtSize nflexelemdata, mjtSize nflexstiffness, mjtSize nflexbending, mjtSize nflexelemedge,
+    mjtSize nflexshelldata, mjtSize nflexevpair, mjtSize nflextexcoord, mjtSize nJfe, mjtSize nJfv,
+    mjtSize nmesh, mjtSize nmeshvert, mjtSize nmeshnormal, mjtSize nmeshtexcoord, mjtSize nmeshface,
+    mjtSize nmeshgraph, mjtSize nmeshpoly, mjtSize nmeshpolyvert, mjtSize nmeshpolymap,
+    mjtSize nskin, mjtSize nskinvert, mjtSize nskintexvert, mjtSize nskinface, mjtSize nskinbone,
     mjtSize nskinbonevert, mjtSize nhfield, mjtSize nhfielddata, mjtSize ntex, mjtSize ntexdata,
     mjtSize nmat, mjtSize npair, mjtSize nexclude, mjtSize neq, mjtSize ntendon, mjtSize nJten,
     mjtSize nwrap, mjtSize nsensor, mjtSize nnumeric, mjtSize nnumericdata, mjtSize ntext,
@@ -293,6 +317,8 @@ void mj_makeModel(mjModel** dest,
   m->nflexedge = nflexedge;
   m->nflexelem = nflexelem;
   m->nflexelemdata = nflexelemdata;
+  m->nflexstiffness = nflexstiffness;
+  m->nflexbending = nflexbending;
   m->nflexelemedge = nflexelemedge;
   m->nflexshelldata = nflexshelldata;
   m->nflexevpair = nflexevpair;
@@ -400,23 +426,20 @@ mjModel* mj_copyModel(mjModel* dest, const mjModel* src) {
   // allocate new model if needed
   if (!dest) {
     mj_makeModel(
-        &dest, src->nq, src->nv, src->nu, src->na, src->nbody, src->nbvh,
-        src->nbvhstatic, src->nbvhdynamic, src->noct, src->njnt, src->ntree,
-        src->nM, src->nB, src->nC, src->nD, src->ngeom, src->nsite, src->ncam,
-        src->nlight, src->nflex, src->nflexnode, src->nflexvert, src->nflexedge,
-        src->nflexelem, src->nflexelemdata, src->nflexelemedge, src->nflexshelldata,
-        src->nflexevpair, src->nflextexcoord, src->nJfe, src->nJfv, src->nmesh,
-        src->nmeshvert, src->nmeshnormal, src->nmeshtexcoord, src->nmeshface,
-        src->nmeshgraph, src->nmeshpoly, src->nmeshpolyvert, src->nmeshpolymap,
-        src->nskin, src->nskinvert, src->nskintexvert, src->nskinface,
-        src->nskinbone, src->nskinbonevert, src->nhfield, src->nhfielddata,
-        src->ntex, src->ntexdata, src->nmat, src->npair, src->nexclude,
-        src->neq, src->ntendon, src->nJten, src->nwrap, src->nsensor,
-        src->nnumeric, src->nnumericdata, src->ntext, src->ntextdata,
-        src->ntuple, src->ntupledata, src->nkey, src->nmocap, src->nplugin,
-        src->npluginattr, src->nuser_body, src->nuser_jnt, src->nuser_geom,
-        src->nuser_site, src->nuser_cam, src->nuser_tendon, src->nuser_actuator,
-        src->nuser_sensor, src->nnames, src->npaths);
+        &dest, src->nq, src->nv, src->nu, src->na, src->nbody, src->nbvh, src->nbvhstatic,
+        src->nbvhdynamic, src->noct, src->njnt, src->ntree, src->nM, src->nB, src->nC, src->nD,
+        src->ngeom, src->nsite, src->ncam, src->nlight, src->nflex, src->nflexnode, src->nflexvert,
+        src->nflexedge, src->nflexelem, src->nflexelemdata, src->nflexstiffness,
+        src->nflexbending, src->nflexelemedge, src->nflexshelldata, src->nflexevpair,
+        src->nflextexcoord, src->nJfe, src->nJfv, src->nmesh, src->nmeshvert, src->nmeshnormal,
+        src->nmeshtexcoord, src->nmeshface, src->nmeshgraph, src->nmeshpoly, src->nmeshpolyvert,
+        src->nmeshpolymap, src->nskin, src->nskinvert, src->nskintexvert, src->nskinface,
+        src->nskinbone, src->nskinbonevert, src->nhfield, src->nhfielddata, src->ntex,
+        src->ntexdata, src->nmat, src->npair, src->nexclude, src->neq, src->ntendon, src->nJten,
+        src->nwrap, src->nsensor, src->nnumeric, src->nnumericdata, src->ntext, src->ntextdata,
+        src->ntuple, src->ntupledata, src->nkey, src->nmocap, src->nplugin, src->npluginattr,
+        src->nuser_body, src->nuser_jnt, src->nuser_geom, src->nuser_site, src->nuser_cam,
+        src->nuser_tendon, src->nuser_actuator, src->nuser_sensor, src->nnames, src->npaths);
   }
   if (!dest) {
     mjERROR("failed to make mjModel. Invalid sizes.");
@@ -480,56 +503,43 @@ void mjv_copyModel(mjModel* dest, const mjModel* src) {
 
 // save model to binary file, or memory buffer of szbuf>0
 void mj_saveModel(const mjModel* m, const char* filename, void* buffer, int buffer_sz) {
-  FILE* fp = 0;
   mjtSize ptrbuf = 0;
 
   // standard header
   int header[NHEADER] = {ID, sizeof(mjtNum), getnsize(), mj_version(), getnptr()};
 
-  // open file for writing if no buffer
+  // no buffer: serialize to temporary buffer, then write via resource provider
   if (!buffer) {
-    fp = fopen(filename, "wb");
-    if (!fp) {
-      mju_warning("Could not open file '%s'", filename);
+    mjtSize sz = mj_sizeModel(m);
+    void* tmpbuf = mju_malloc(sz);
+    if (!tmpbuf) {
+      mju_warning("Could not allocate buffer for saving model");
       return;
     }
+    mj_saveModel(m, NULL, tmpbuf, (int)sz);
+
+    mjtSize written = mju_writeResource(filename, tmpbuf, sz, NULL, NULL, 0);
+    if (written != sz) {
+      mju_warning("Could not save model to '%s'", filename);
+    }
+    mju_free(tmpbuf);
+    return;
   }
 
   // write standard header, info, options, buffer (omit pointers)
-  if (fp) {
-    fwrite(header, sizeof(int), NHEADER, fp);
-    #define X(name) fwrite(&m->name, sizeof(m->name), 1, fp);
-    MJMODEL_SIZES
+  bufwrite(header, sizeof(header), buffer_sz, buffer, &ptrbuf);
+  #define X(name) bufwrite(&m->name, sizeof(m->name), buffer_sz, buffer, &ptrbuf);
+  MJMODEL_SIZES
+  #undef X
+  bufwrite((void*)&m->opt, sizeof(mjOption), buffer_sz, buffer, &ptrbuf);
+  bufwrite((void*)&m->vis, sizeof(mjVisual), buffer_sz, buffer, &ptrbuf);
+  bufwrite((void*)&m->stat, sizeof(mjStatistic), buffer_sz, buffer, &ptrbuf);
+  {
+    MJMODEL_POINTERS_PREAMBLE(m)
+    #define X(type, name, nr, nc)  \
+      bufwrite((void*)m->name, sizeof(type)*(m->nr)*(nc), buffer_sz, buffer, &ptrbuf);
+    MJMODEL_POINTERS
     #undef X
-    fwrite((void*)&m->opt, sizeof(mjOption), 1, fp);
-    fwrite((void*)&m->vis, sizeof(mjVisual), 1, fp);
-    fwrite((void*)&m->stat, sizeof(mjStatistic), 1, fp);
-    {
-      MJMODEL_POINTERS_PREAMBLE(m)
-      #define X(type, name, nr, nc)  \
-        fwrite((void*)m->name, sizeof(type), (m->nr)*(nc), fp);
-      MJMODEL_POINTERS
-      #undef X
-    }
-  } else {
-    bufwrite(header, sizeof(header), buffer_sz, buffer, &ptrbuf);
-    #define X(name) bufwrite(&m->name, sizeof(m->name), buffer_sz, buffer, &ptrbuf);
-    MJMODEL_SIZES
-    #undef X
-    bufwrite((void*)&m->opt, sizeof(mjOption), buffer_sz, buffer, &ptrbuf);
-    bufwrite((void*)&m->vis, sizeof(mjVisual), buffer_sz, buffer, &ptrbuf);
-    bufwrite((void*)&m->stat, sizeof(mjStatistic), buffer_sz, buffer, &ptrbuf);
-    {
-      MJMODEL_POINTERS_PREAMBLE(m)
-      #define X(type, name, nr, nc)  \
-        bufwrite((void*)m->name, sizeof(type)*(m->nr)*(nc), buffer_sz, buffer, &ptrbuf);
-      MJMODEL_POINTERS
-      #undef X
-    }
-  }
-
-  if (fp) {
-    fclose(fp);
   }
 }
 
@@ -599,7 +609,7 @@ mjModel* mj_loadModelBuffer(const void* buffer, int buffer_sz) {
                sizes[56], sizes[57], sizes[58], sizes[59], sizes[60], sizes[61], sizes[62],
                sizes[63], sizes[64], sizes[65], sizes[66], sizes[67], sizes[68], sizes[69],
                sizes[70], sizes[71], sizes[72], sizes[73], sizes[74], sizes[75], sizes[76],
-               sizes[77]);
+               sizes[77], sizes[78], sizes[79]);
 
   // mj_makeModel may fail if the input buffer has invalid sizes
   if (!m) {
@@ -1054,6 +1064,9 @@ void mj_makeRawData(mjData** dest, const mjModel* m) {
     mjERROR("could not allocate mjData");
   }
 
+  // prevent spurious timing print from mj_resetData before _resetData zeroes the struct
+  d->timer[mjTIMER_STEP].number = 0;
+
   // compute buffer size
   d->nbuffer = 0;
   d->buffer = d->arena = NULL;
@@ -1090,6 +1103,7 @@ void mj_makeRawData(mjData** dest, const mjModel* m) {
 
   // clear threadpool
   d->threadpool = 0;
+  d->threadlock = 0;
 
   // clear nplugin (overwritten by _initPlugin)
   d->nplugin = 0;
@@ -1149,6 +1163,7 @@ mjData* mj_copyDataVisual(mjData* dest, const mjModel* m, const mjData* src, int
   *dest = *src;
   dest->buffer = save_buffer;
   dest->arena = save_arena;
+  dest->threadpool = 0;
   mj_setPtrData(m, dest);
 
   // save plugin_data, since the X macro copying block below will override it
@@ -1248,8 +1263,6 @@ mjData* mj_copyDataVisual(mjData* dest, const mjModel* m, const mjData* src, int
     }
   }
 
-  dest->threadpool = src->threadpool;
-
   return dest;
 }
 
@@ -1309,7 +1322,6 @@ static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
 
   // clear memory utilization stats
   d->maxuse_stack = 0;
-  memset(d->maxuse_threadstack, 0, mjMAXTHREAD*sizeof(mjtSize));
   d->maxuse_arena = 0;
   d->maxuse_con = 0;
   d->maxuse_efc = 0;
@@ -1329,6 +1341,7 @@ static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
   d->nl = 0;
   d->nefc = 0;
   d->nJ = 0;
+  d->nY = 0;
   d->nA = 0;
   d->nisland = 0;
   d->nidof = 0;
@@ -1427,9 +1440,6 @@ static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
       mju_zero(values, n*dim);
     }
   }
-
-  // zero out qM, special case because scattering from M skips simple body off-diagonals
-  mju_zero(d->qM, m->nM);
 
   // copy qpos0 from model
   if (m->qpos0) {
@@ -1548,10 +1558,83 @@ static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
 }
 
 
+// emit step timing diagnostics
+static void mj_logTimingDiagnostics(const mjData* d) {
+  int nstep = d->timer[mjTIMER_STEP].number;
+  if (nstep <= 0) {
+    return;
+  }
+
+  mjtNum tstep = d->timer[mjTIMER_STEP].duration / nstep;
+  if (tstep <= 0) {
+    return;
+  }
+
+  char buf[2048];
+  int pos = 0;
+  mjtNum components = 0;
+
+  for (int i = mjTIMER_POSITION; i <= mjTIMER_ADVANCE; i++) {
+    if (d->timer[i].number > 0) {
+      mjtNum istep = d->timer[i].duration / d->timer[i].number;
+      components += istep;
+      pos += snprintf(buf + pos, sizeof(buf) - pos,
+                      "%s  %-15s %8.1f  (%5.1f%%)",
+                      pos > 0 ? "\n" : "",
+                      mjTIMERSTRING[i], istep * 1000, 100 * istep / tstep);
+
+      // position sub-breakdown
+      if (i == mjTIMER_POSITION) {
+        for (int p = mjTIMER_POS_KINEMATICS; p <= mjTIMER_POS_PROJECT; p++) {
+          if (d->timer[p].number > 0) {
+            mjtNum pstep = d->timer[p].duration / d->timer[p].number;
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            "\n    %-13s %8.1f  (%5.1f%%)",
+                            mjTIMERSTRING[p] + 4, pstep * 1000, 100 * pstep / tstep);
+
+            // collision sub-breakdown
+            if (p == mjTIMER_POS_COLLISION) {
+              for (int c = mjTIMER_COL_BROAD; c <= mjTIMER_COL_NARROW; c++) {
+                if (d->timer[c].number > 0) {
+                  mjtNum cstep = d->timer[c].duration / d->timer[c].number;
+                  pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                  "\n      %-11s %8.1f  (%5.1f%%)",
+                                  mjTIMERSTRING[c] + 4, cstep * 1000, 100 * cstep / tstep);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  mjtNum other = tstep - components;
+  pos += snprintf(buf + pos, sizeof(buf) - pos,
+                  "%s  %-15s %8.1f  (%5.1f%%)",
+                  pos > 0 ? "\n" : "",
+                  "other", other * 1000, 100 * other / tstep);
+
+  pos += snprintf(buf + pos, sizeof(buf) - pos,
+                  "%s  %-15s %8.1f",
+                  pos > 0 ? "\n" : "",
+                  "total", tstep * 1000);
+
+  mjLogMessage msg = {.level = mjLOG_INFO, .topic = mjTOPIC_TIME_STP, .body = buf};
+  snprintf(msg.subject, sizeof(msg.subject),
+           "average time per step (%d steps, units: \u00B5s)", nstep);
+  mju_message(&msg);
+}
+
+
 // clear data, set data->qpos = model->qpos0
 void mj_resetData(const mjModel* m, mjData* d) {
+  // emit step timing diagnostics before timers are cleared
+  mj_logTimingDiagnostics(d);
+
   _resetData(m, d, 0);
 }
+
 
 
 // clear data, set data->qpos = model->qpos0, fill with debug_value
@@ -1580,6 +1663,7 @@ void mj_resetDataKeyframe(const mjModel* m, mjData* d, int key) {
 // de-allocate mjData
 void mj_deleteData(mjData* d) {
   if (d) {
+    mju_threadpool(d, 0);
     freeDataBuffers(d);
     mju_free(d);
   }
@@ -2087,8 +2171,7 @@ const char* mj_validateReferences(const mjModel* m) {
       return "Invalid model: invalid sensor_refid";
     }
     if (sensor_type == mjSENS_TACTILE) {
-      int obj_id = m->sensor_objid[i];
-      int parent_body = m->geom_bodyid[obj_id];
+      int parent_body = m->geom_bodyid[m->sensor_refid[i]];
       int collision_geoms = 0;
       for (int b = 0; b < m->body_geomnum[parent_body]; ++b) {
         int geom_id = m->body_geomadr[parent_body]+b;

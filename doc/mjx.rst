@@ -14,10 +14,10 @@ under the `mjx <https://github.com/google-deepmind/mujoco/tree/main/mjx>`__ dire
 
 MJX allows users to run MuJoCo
 on all compute hardware supported by the `XLA <https://www.tensorflow.org/xla>`__ compiler. A JAX re-implementation of
-MuJoCo (:ref:`MJX-JAX <MjxJAX>`) was added in version 3.0.0. MJX-JAX
+MuJoCo (:ref:`MJX-JAX <MjxJAX>`) is available. MJX-JAX
 `runs on <https://jax.readthedocs.io/en/latest/installation.html#supported-platforms>`__: Nvidia and AMD GPUs,
 Apple Silicon, and `Google Cloud TPUs <https://cloud.google.com/tpu>`__. A Warp implementation of MuJoCo
-(:ref:`MJX-Warp <MjxWarp>`) was added in version 3.3.5 to optimize performance specifically for NVIDIA GPUs, resolving
+(:ref:`MJX-Warp <MjxWarp>`) optimizes performance specifically for NVIDIA GPUs, resolving
 several performance bottlenecks exhibited in MJX-JAX.
 
 MJX is distributed as a separate package called ``mujoco-mjx`` on `PyPI <https://pypi.org/project/mujoco-mjx>`__.
@@ -125,12 +125,26 @@ Notice that we pass two extra arguments to ``mjx.make_data``:
 Contacts
 ~~~~~~~~
 
-Since JAX and Warp diverge in their implementations of contact buffers, contacts were moved from
-``mjx.Data.contact`` to private ``mjx.Data._impl`` in MuJoCo 3.3.5. We encourage users to read out contacts solely through
+Since JAX and Warp diverge in their implementations of contact buffers, contacts are located in the private
+``mjx.Data._impl`` instead of ``mjx.Data.contact``. We encourage users to read out contacts solely through
 :ref:`contact sensors <sensor-contact>`.
 
 For more details and examples of using MJX-Warp in the wild, see the announcement in MuJoCo Playground
 `here <https://github.com/google-deepmind/mujoco_playground/discussions/197>`__.
+
+Batched ``Data`` updates
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+With MJX-JAX it is possible to reset a subset of environments in a batch with
+`jax.tree.map(jax.numpy.where, done, reset_data, data)`. However, this approach does not work out-of-the-box for
+MJX-Warp due to internal implementation details.
+
+To support batched ``Data`` updates for both implementations, MJX provides a unified `where` method on `Data` objects:
+
+.. code-block:: python
+
+   data = data.where(done, reset_data)
+
 
 .. _MjxWarpGraphModes:
 
@@ -426,8 +440,8 @@ solver parameters.
 Feature Parity
 ==============
 
-MJX supports most of the main simulation features of MuJoCo to be run on hardware accelerated devices. MJX will raise an exception if
-asked to copy to device an :ref:`mjModel` with field values referencing unsupported features.
+MJX supports most of the main simulation features of MuJoCo for execution on hardware-accelerated devices. MJX will
+raise an exception if asked to copy an :ref:`mjModel` to the device that references unsupported features.
 
 The following table compares feature support between MJX-Warp and MJX-JAX compared to MuJoCo:
 
@@ -473,7 +487,7 @@ The following table compares feature support between MJX-Warp and MJX-JAX compar
      - All
      - ``CONNECT``, ``WELD``, ``JOINT``, ``TENDON``
    * - :ref:`Integrator <mjtIntegrator>`
-     - All except ``IMPLICIT``
+     - All except ``IMPLICITFAST`` midpoint integrator feature
      - ``EULER``, ``RK4``, ``IMPLICITFAST`` (``IMPLICITFAST`` not supported with :doc:`fluid drag <computation/fluid>`)
    * - :ref:`Cone <mjtCone>`
      - All
@@ -503,8 +517,8 @@ The following table compares feature support between MJX-Warp and MJX-JAX compar
      - Sparse and Dense
      - Sparse and Dense
    * - Jacobian format
-     - ``DENSE`` only
      - ``DENSE`` and ``SPARSE``
+     - ``DENSE`` only
    * - Lights
      - ✓
      - Positions and directions

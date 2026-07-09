@@ -39,7 +39,7 @@
 #include <vector>
 
 #if defined(MUJOCO_ENABLE_PNG)
-#include "lodepng.h"
+#include "lodepng.h"  // NOLINT
 #else
 enum LodePNGColorType {
   LCT_GREY,
@@ -47,11 +47,10 @@ enum LodePNGColorType {
   LCT_RGBA,
 };
 #endif
-#include "cc/array_safety.h"
-#include "engine/engine_passive.h"
-#include "engine/engine_support.h"
 #include <mujoco/mjspec.h>
 #include <mujoco/mujoco.h>
+#include "cc/array_safety.h"
+#include "engine/engine_passive.h"
 #include "user/user_api.h"
 #include "user/user_cache.h"
 #include "user/user_model.h"
@@ -213,7 +212,6 @@ mjCError::mjCError(const mjCBase* obj, const char* msg, const char* str, int pos
   char temp[600];
 
   // init
-  warning = false;
   if (obj || msg) {
     mju::sprintf_arr(message, "Error");
   } else {
@@ -412,12 +410,12 @@ mjCBoundingVolumeHierarchy::AddBoundingVolume(const int* id, int contype, int co
 
 
 // create bounding volume hierarchy
-void mjCBoundingVolumeHierarchy::CreateBVH() {
+void mjCBoundingVolumeHierarchy::CreateBVH(mjCModel* model,
+                                           const mjCBase* owner) {
   std::vector<BVElement> elements;
   Make(elements);
-  MakeBVH(elements.begin(), elements.end());
+  MakeBVH(elements.begin(), elements.end(), 0, model, owner);
 }
-
 
 void mjCBoundingVolumeHierarchy::Make(std::vector<BVElement>& elements) {
   // precompute the positions of each element in the hierarchy's axes, and drop
@@ -440,8 +438,9 @@ void mjCBoundingVolumeHierarchy::Make(std::vector<BVElement>& elements) {
 
 // compute bounding volume hierarchy
 int mjCBoundingVolumeHierarchy::MakeBVH(
-  std::vector<BVElement>::iterator elements_begin,
-  std::vector<BVElement>::iterator elements_end, int lev) {
+    std::vector<BVElement>::iterator elements_begin,
+    std::vector<BVElement>::iterator elements_end, int lev, mjCModel* model,
+    const mjCBase* owner) {
   int nelements = elements_end - elements_begin;
   if (nelements == 0) {
     return -1;
@@ -541,11 +540,13 @@ int mjCBoundingVolumeHierarchy::MakeBVH(
 
   // recursive calls
   if (m > 0) {
-    child_[2*index + 0] = MakeBVH(elements_begin, elements_begin + m, lev + 1);
+    child_[2 * index + 0] =
+        MakeBVH(elements_begin, elements_begin + m, lev + 1, model, owner);
   }
 
   if (m != nelements) {
-    child_[2*index + 1] = MakeBVH(elements_begin + m, elements_end, lev + 1);
+    child_[2 * index + 1] =
+        MakeBVH(elements_begin + m, elements_end, lev + 1, model, owner);
   }
 
   // SHOULD NOT OCCUR
@@ -555,13 +556,11 @@ int mjCBoundingVolumeHierarchy::MakeBVH(
   }
 
   if (lev > mjMAXTREEDEPTH) {
-    mju_warning("max tree depth exceeded in body=%s", name_.c_str());
+    model->AddWarning("max tree depth exceeded", owner);
   }
 
   return index;
 }
-
-
 
 //------------------------- class mjCOctree implementation --------------------------------------------
 
@@ -1301,7 +1300,7 @@ void mjCOctree::MakeOctree(const std::vector<Triangle*>& elements, const double 
     }
 
     // skip if the box is empty
-    if (colliding.empty() || task.lev >= 6) {
+    if (colliding.empty() || task.lev >= max_depth_) {
       continue;
     }
 
@@ -2267,7 +2266,7 @@ mjCBase* mjCBody::GetObject(mjtObj type, int i) {
 
 // find object by name in given list
 template <class T>
-static T* findobject(std::string name, std::vector<T*>& list) {
+static T* findobject(const std::string& name, const std::vector<T*>& list) {
   for (unsigned int i=0; i < list.size(); i++) {
     if (list[i]->name == name) {
       return list[i];
@@ -2280,12 +2279,12 @@ static T* findobject(std::string name, std::vector<T*>& list) {
 
 
 // recursive find by name
-mjCBase* mjCBody::FindObject(mjtObj type, std::string _name, bool recursive) {
+mjCBase* mjCBody::FindObject(mjtObj type, const std::string& _name, bool recursive) const {
   mjCBase* res = 0;
 
   // check self: just in case
   if (name == _name) {
-    return this;
+    return const_cast<mjCBody*>(this);
   }
 
   // search elements of this body
@@ -2422,7 +2421,7 @@ static mjsElement* GetNextBody(const mjCBody* body, const mjsElement* child,
 
 
 // get next child of given type
-mjsElement* mjCBody::NextChild(const mjsElement* child, mjtObj type, bool recursive) {
+mjsElement* mjCBody::NextChild(const mjsElement* child, mjtObj type, bool recursive) const {
   if (type == mjOBJ_UNKNOWN) {
     if (!child) {
       throw mjCError(this, "child type must be specified if no child element is given");
@@ -2647,7 +2646,7 @@ void mjCBody::ComputeBVH() {
     tree.AddBoundingVolume(&geom->id, geom->contype, geom->conaffinity,
                            geom->pos, geom->quat, geom->aabb);
   }
-  tree.CreateBVH();
+  tree.CreateBVH(model, this);
 }
 
 
@@ -3887,7 +3886,7 @@ void mjCGeom::SetFluidCoefs(void) {
 
 // compute bounding box
 void mjCGeom::ComputeAABB(void) {
-  double aamm[6]; // axis-aligned bounding box in (min, max) format
+  double aamm[6];  // axis-aligned bounding box in (min, max) format
   switch (type) {
     case mjGEOM_HFIELD:
       aamm[0] = -hfield->size[0];
@@ -4684,9 +4683,6 @@ void mjCHField::NameSpace(const mjCModel* m) {
     name = mjuu_stripext(stripped);
   }
   mjCBase::NameSpace(m);
-  if (modelfiledir_.empty()) {
-    modelfiledir_ = FilePath(m->spec_modelfiledir_);
-  }
 }
 
 
@@ -4814,15 +4810,12 @@ void mjCHField::Compile(const mjVFS* vfs) {
       throw mjCError(this, "unsupported content type: '%s'", asset_type.c_str());
     }
 
-    // copy paths from model if not already defined
-    if (modelfiledir_.empty()) {
-      modelfiledir_ = FilePath(model->modelfiledir_);
-    }
     mujoco::user::FilePath meshdir_;
     meshdir_ = FilePath(mjs_getString(compiler->meshdir));
 
     FilePath filename = meshdir_ + FilePath(file_);
-    mjResource* resource = LoadResource(modelfiledir_.Str(), filename.Str(), vfs);
+    mjSpec* owning_spec = model->FindSpec(compiler);
+    mjResource* resource = LoadResource(owning_spec->modelfiledir->c_str(), filename.Str(), vfs);
 
     struct CachedHField {
       int nrow, ncol;
@@ -4981,9 +4974,6 @@ void mjCTexture::NameSpace(const mjCModel* m) {
     name = mjuu_stripext(stripped);
   }
   mjCBase::NameSpace(m);
-  if (modelfiledir_.empty()) {
-    modelfiledir_ = FilePath(m->spec_modelfiledir_);
-  }
 }
 
 
@@ -5281,6 +5271,7 @@ void mjCTexture::LoadKTX(mjResource* resource, std::vector<std::byte>& image,
 
   w = buffer_sz;
   h = 1;
+  nchannel = 1;
   is_srgb = false;
 
   image.resize(buffer_sz);
@@ -5403,7 +5394,8 @@ void mjCTexture::LoadFlip(std::string filename, const mjVFS* vfs,
   }
 
   // try loading from cache
-  mjResource* resource = LoadResource(modelfiledir_.Str(), filename, vfs);
+  mjSpec* owning_spec = model->FindSpec(compiler);
+  mjResource* resource = LoadResource(owning_spec->modelfiledir->c_str(), filename, vfs);
   if (cache && cache->PopulateData(GetCacheId(resource, asset_type), resource, callback)) {
     mju_closeResource(resource);
     return;
@@ -5655,10 +5647,6 @@ void mjCTexture::LoadCubeSeparate(const mjVFS* vfs) {
 void mjCTexture::Compile(const mjVFS* vfs) {
   CopyFromSpec();
 
-  // copy paths from model if not already defined
-  if (modelfiledir_.empty()) {
-    modelfiledir_ = FilePath(model->modelfiledir_);
-  }
   mujoco::user::FilePath texturedir_;
   texturedir_ = FilePath(mjs_getString(compiler->texturedir));
 
@@ -7237,20 +7225,26 @@ void mjCActuator::Compile(void) {
 
   // check and set actdim
   if (!plugin.active) {
-    if (actdim > 1 && dyntype != mjDYN_USER) {
-      throw mjCError(this, "actdim > 1 is only allowed for dyntype 'user' in actuator");
+    if (actdim > 1 && dyntype != mjDYN_USER && dyntype != mjDYN_DCMOTOR) {
+      throw mjCError(this, "actdim > 1 is only allowed for dyntype 'user' and 'dcmotor'");
     }
     if (actdim == 1 && dyntype == mjDYN_NONE) {
       throw mjCError(this, "invalid actdim 1 in stateless actuator");
     }
-    if (actdim == 0 && dyntype != mjDYN_NONE) {
+    if (actdim == 0 && dyntype != mjDYN_NONE && dyntype != mjDYN_DCMOTOR) {
       throw mjCError(this, "invalid actdim 0 in stateful actuator");
     }
   }
 
-  // set actdim
+  // set actdim to 1 if it is unset and type is standard one-activation dyntype
   if (actdim < 0) {
-    actdim = (dyntype != mjDYN_NONE);
+    actdim = (dyntype != mjDYN_NONE && dyntype != mjDYN_DCMOTOR);
+  }
+
+  // DC motor always uses actearly
+  if (dyntype == mjDYN_DCMOTOR && !actearly) {
+    throw mjCError(this, "actearly cannot be false for DC motor actuator '%s' (id = %d)",
+                   name.c_str(), id);
   }
 
   // check muscle parameters

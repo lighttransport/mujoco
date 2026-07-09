@@ -29,7 +29,7 @@ set(MSVC_INCREMENTAL_DEFAULT ON)
 
 project(
   mujoco
-  VERSION 3.7.0
+  VERSION 3.10.1
   DESCRIPTION "MuJoCo Physics Simulator"
   HOMEPAGE_URL "https://mujoco.org"
 )
@@ -56,6 +56,8 @@ endif()
 if(EMSCRIPTEN)
   option(MUJOCO_BUILD_TESTS_WASM "Build tests for WASM bindings" ON)
   option(MUJOCO_BUILD_PHYSICS_WASM "Build the minimal physics-only WASM module" ON)
+  option(MUJOCO_BUILD_STUDIO "Build studio for MuJoCo (WASM)" OFF)
+  option(MUJOCO_USE_FILAMENT "Use filament rendering" OFF)
   option(MUJOCO_WASM_THREADS "Build the full WASM bindings with multithreading support" OFF)
   option(MUJOCO_PHYSICS_ENABLE_THREADS "Enable C++ thread support in the physics-only WASM core" OFF)
   option(MUJOCO_PHYSICS_ENABLE_EXCEPTIONS "Enable C++ exceptions in the physics-only WASM core" OFF)
@@ -71,14 +73,53 @@ if(EMSCRIPTEN)
   if(MUJOCO_WASM_THREADS OR MUJOCO_PHYSICS_ENABLE_THREADS)
     set(MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS -pthread)
   endif()
-  set(MUJOCO_EMSCRIPTEN_LTO_OPTIONS "")
-  if(MUJOCO_BUILD_PHYSICS_WASM)
-    set(MUJOCO_EMSCRIPTEN_LTO_OPTIONS -flto)
-  endif()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -O3")
+  if(MUJOCO_WASM_THREADS)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
+  endif()
+
+  # Filament uses the WASM variable (not EMSCRIPTEN) to identify web builds.
+  # Without this, it falls into the LINUX path and tries to compile with
+  # futex, X11, Vulkan, etc.
+  if(MUJOCO_USE_FILAMENT)
+    set(WASM ON CACHE BOOL "Filament WASM mode" FORCE)
+  endif()
+
+  # Automatically generate host tool imports for Filament cross-compilation.
+  # When WASM is true, Filament hardcodes the path to:
+  #   ${FILAMENT}/${IMPORT_EXECUTABLES_DIR}/ImportExecutables-Release.cmake
+  # So we write our file with that exact name and set IMPORT_EXECUTABLES_DIR
+  # to point at CMAKE_BINARY_DIR (which is ../../ relative to filament-src).
+  set(MUJOCO_NATIVE_BUILD_DIR "${PROJECT_SOURCE_DIR}/build-host" CACHE PATH "Path to native build directory containing host tools")
+  find_program(MATC_EXE matc PATHS "${MUJOCO_NATIVE_BUILD_DIR}/bin" NO_DEFAULT_PATH)
+  find_program(RESGEN_EXE resgen PATHS "${MUJOCO_NATIVE_BUILD_DIR}/bin" NO_DEFAULT_PATH)
+  find_program(CMGEN_EXE cmgen PATHS "${MUJOCO_NATIVE_BUILD_DIR}/bin" NO_DEFAULT_PATH)
+
+  if(MATC_EXE AND RESGEN_EXE AND CMGEN_EXE)
+    message(STATUS "Found host tools in ${MUJOCO_NATIVE_BUILD_DIR}/bin")
+    set(IMPORT_EXECUTABLES_FILE "${CMAKE_BINARY_DIR}/ImportExecutables-Release.cmake")
+    file(WRITE "${IMPORT_EXECUTABLES_FILE}"
+      "add_executable(matc IMPORTED)\n"
+      "set_property(TARGET matc PROPERTY IMPORTED_LOCATION \"${MATC_EXE}\")\n"
+      "add_executable(resgen IMPORTED)\n"
+      "set_property(TARGET resgen PROPERTY IMPORTED_LOCATION \"${RESGEN_EXE}\")\n"
+      "add_executable(cmgen IMPORTED)\n"
+      "set_property(TARGET cmgen PROPERTY IMPORTED_LOCATION \"${CMGEN_EXE}\")\n"
+    )
+    # Filament's WASM path resolves: ${FILAMENT}/${IMPORT_EXECUTABLES_DIR}/ImportExecutables-Release.cmake
+    # FILAMENT = _deps/filament-src, so ../../ resolves to CMAKE_BINARY_DIR.
+    set(IMPORT_EXECUTABLES_DIR "../../" CACHE PATH "" FORCE)
+  else()
+    message(WARNING "Host tools (matc, resgen, cmgen) not found in ${MUJOCO_NATIVE_BUILD_DIR}/bin. WASM build of Studio might fail.")
+  endif()
 endif()
 
-if(APPLE AND (MUJOCO_BUILD_EXAMPLES OR MUJOCO_BUILD_SIMULATE))
+if(APPLE AND (MUJOCO_BUILD_EXAMPLES OR MUJOCO_BUILD_SIMULATE OR MUJOCO_USE_FILAMENT))
+  # NOTE: OBJC* languages are proactively enabled when using Filament to
+  # workaround a CMake bug triggered by Filament recently adding:
+  #   set(EXTRA_LANGS OBJC OBJCXX)
+  # See also: https://gitlab.kitware.com/cmake/cmake/-/work_items/24104
   enable_language(OBJC)
   enable_language(OBJCXX)
 endif()
@@ -88,16 +129,18 @@ include(MujocoMacOS)
 include(MujocoDependencies)
 
 set(MUJOCO_HEADERS
+    include/mujoco/mjassert.h
     include/mujoco/mjdata.h
     include/mujoco/mjexport.h
     include/mujoco/mjmacro.h
     include/mujoco/mjmodel.h
     include/mujoco/mjplugin.h
     include/mujoco/mjrender.h
+    include/mujoco/mjrfilament.h
     include/mujoco/mjsan.h
     include/mujoco/mjspec.h
-    include/mujoco/mjthread.h
-    include/mujoco/mjtnum.h
+    include/mujoco/mjspecmacro.h
+    include/mujoco/mjtype.h
     include/mujoco/mjui.h
     include/mujoco/mjvisualize.h
     include/mujoco/mjxmacro.h
@@ -113,6 +156,7 @@ endif()
 
 # Emscripten does not support SHARED libs
 if(NOT EMSCRIPTEN)
+  find_package(Threads REQUIRED)
   add_library(mujoco SHARED ${MUJOCO_RESOURCE_FILES})
 else()
   add_library(mujoco STATIC ${MUJOCO_RESOURCE_FILES})
@@ -207,24 +251,24 @@ if(NOT EMSCRIPTEN)
 endif()
 add_subdirectory(plugin/obj_decoder)
 add_subdirectory(plugin/stl_decoder)
+
 add_subdirectory(src/engine)
 add_subdirectory(src/user)
 add_subdirectory(src/xml)
-add_subdirectory(src/thread)
+add_subdirectory(src/xml/mjz)
 if(NOT EMSCRIPTEN AND NOT MUJOCO_USE_FILAMENT_MJR_COMPAT)
   add_subdirectory(src/render/classic)
   add_subdirectory(src/ui)
 endif()
+add_subdirectory(src/render/noop)
 
-if(MUJOCO_USE_FILAMENT AND NOT EMSCRIPTEN)
+if(MUJOCO_USE_FILAMENT)
+  add_subdirectory(src/render/filament)
   add_subdirectory(src/experimental/filament)
 endif()
 
 if(EMSCRIPTEN)
   add_subdirectory(wasm)
-  if(MUJOCO_BUILD_TESTS_WASM)
-    add_subdirectory(wasm/tests)
-  endif()
 endif()
 
 
@@ -247,12 +291,13 @@ if(TARGET mujoco_physics_core)
             qhullstatic_r
   )
   if(MUJOCO_PHYSICS_ENABLE_SPEC AND MUJOCO_ENABLE_PNG)
-    target_link_libraries(
-      mujoco_physics_core
-      PRIVATE lodepng
-    )
+    target_link_libraries(mujoco_physics_core PRIVATE lodepng)
     target_compile_definitions(mujoco_physics_core PRIVATE MUJOCO_ENABLE_PNG=1)
   endif()
+endif()
+
+if(NOT EMSCRIPTEN)
+  target_link_libraries(mujoco PRIVATE Threads::Threads)
 endif()
 
 set_target_properties(
@@ -310,7 +355,6 @@ if(MUJOCO_BUILD_SIMULATE)
 endif()
 
 if(MUJOCO_BUILD_STUDIO)
-  add_subdirectory(src/experimental/mjz)
   add_subdirectory(src/experimental/platform)
   add_subdirectory(src/experimental/studio)
 endif()
@@ -350,11 +394,8 @@ if(BUILD_TESTING AND MUJOCO_BUILD_TESTS)
   endif()
 endif()
 
-if(NOT (APPLE AND MUJOCO_BUILD_MACOS_FRAMEWORKS))
+if(NOT EMSCRIPTEN AND NOT (APPLE AND MUJOCO_BUILD_MACOS_FRAMEWORKS))
   set(MUJOCO_TARGETS mujoco)
-  if (EMSCRIPTEN AND MUJOCO_ENABLE_PNG)
-    list(APPEND MUJOCO_TARGETS lodepng)
-  endif()
 
   # Install the libraries.
   install(

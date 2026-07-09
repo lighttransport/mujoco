@@ -113,6 +113,15 @@ _SIMPLE_BODY = """
   </mujoco>
 """
 
+_LIGHTS = """
+  <mujoco>
+    <worldbody>
+      <light name="inactive" active="false"/>
+      <light name="active" active="true"/>
+    </worldbody>
+  </mujoco>
+"""
+
 
 def _get_name_from_path(path: jax.tree_util.KeyPath) -> str:
   """Returns a flattened name from a jax.tree_util.KeyPath."""
@@ -173,8 +182,6 @@ class ModelIOTest(parameterized.TestCase):
       self.assertFalse(hasattr(mx, 'bvh_aabb'))
 
     elif impl == 'warp':
-      # Options specific to Warp are populated.
-      self.assertTrue(hasattr(mx.opt._impl, 'ls_parallel'))
       # Fields private to Warp backend impl are populated.
       self.assertTrue(hasattr(mx._impl, 'nxn_geom_pair'))
     elif impl == 'cpp':
@@ -202,6 +209,21 @@ class ModelIOTest(parameterized.TestCase):
     np.testing.assert_equal(mx.wrap_type, m.wrap_type)
     np.testing.assert_equal(mx.wrap_objid, m.wrap_objid)
     np.testing.assert_almost_equal(mx.wrap_prm, m.wrap_prm)
+
+  @parameterized.parameters('jax', 'warp', 'cpp')
+  def test_put_model_light_active(self, impl):
+    """Tests that light_active is copied to the public Model field."""
+    if impl == 'warp' and not mjxw.WARP_INSTALLED:
+      self.skipTest('Warp not installed.')
+
+    m = mujoco.MjModel.from_xml_string(_LIGHTS)
+    mx = mjx.put_model(m, impl=impl)
+
+    self.assertIn('light_active', [f.name for f in mx.fields()])
+    np.testing.assert_array_equal(
+        np.asarray(mx.light_active),
+        m.light_active.astype(np.asarray(mx.light_active).dtype),
+    )
 
   def test_fluid_params(self):
     """Test that has_fluid_params is set when fluid params are present."""
@@ -454,18 +476,16 @@ class DataIOTest(parameterized.TestCase):
     self.assertEqual(d._impl.efc_force.shape, (nefc,))
 
     if impl == 'jax':
-      self.assertEqual(d._impl.qM.shape, (nv, nv))
+      self.assertEqual(d._impl.M.shape, (nv, nv))
       self.assertEqual(d._impl.qLD.shape, (nv, nv))
       self.assertEqual(d._impl.qLDiagInv.shape, (0,))
-
 
     # test sparse
     m.opt.jacobian = mujoco.mjtJacobian.mjJAC_SPARSE
     d = mjx.make_data(m, impl=impl)
-    self.assertEqual(d._impl.qM.shape, (nm,))
-    self.assertEqual(d._impl.qLD.shape, (nm,))
+    self.assertEqual(d._impl.M.shape, (m.nC,))
+    self.assertEqual(d._impl.qLD.shape, (m.nC,))
     self.assertEqual(d._impl.qLDiagInv.shape, (nv,))
-
 
 
   @mock.patch.dict(os.environ, {'MJX_GPU_DEFAULT_WARP': 'true'})
@@ -475,9 +495,20 @@ class DataIOTest(parameterized.TestCase):
     if not mjx_io.has_cuda_gpu_device():
       self.skipTest('No CUDA GPU device.')
     m = mujoco.MjModel.from_xml_string(_MULTIPLE_CONVEX_OBJECTS)
-    d = mjx.make_data(m, impl='warp', nconmax=9, njmax=23)
+    d = mjx.make_data(m, impl='warp', naconmax=9, njmax=23, nvmax=8)
     self.assertEqual(d._impl.contact__dist.shape[0], 9)
     self.assertEqual(d._impl.efc__pos.shape[0], 23)
+    self.assertEqual(d._impl.nvmax, 8)
+
+  def test_put_data_warp_nvmax(self):
+    if not mjxw.WARP_INSTALLED:
+      self.skipTest('Warp is not installed.')
+    if not mjx_io.has_cuda_gpu_device():
+      self.skipTest('No CUDA GPU device.')
+    m = mujoco.MjModel.from_xml_string(_MULTIPLE_CONVEX_OBJECTS)
+    d = mujoco.MjData(m)
+    dx = mjx.put_data(m, d, impl='warp', nvmax=8)
+    self.assertEqual(dx._impl.nvmax, 8)
 
   @parameterized.parameters('jax', 'cpp', 'warp')
   def test_put_data(self, impl: str):
@@ -520,7 +551,7 @@ class DataIOTest(parameterized.TestCase):
     if impl == 'jax':
       # check that qM is transformed properly
       qm = np.zeros((m.nv, m.nv), dtype=np.float64)
-      mujoco.mj_fullM(m, qm, d.qM)
+      mujoco.mju_sym2dense(qm, d.M, m.M_rownnz, m.M_rowadr, m.M_colind)
       np.testing.assert_allclose(qm, mjx.full_m(mjx.put_model(m), dx))
 
     elif impl == 'cpp':
@@ -529,8 +560,16 @@ class DataIOTest(parameterized.TestCase):
       return  # cpp does not populate other fields in _impl
     elif impl == 'warp':
       qm = np.zeros((m.nv, m.nv), dtype=np.float64)
-      mujoco.mj_fullM(m, qm, d.qM)
-      np.testing.assert_allclose(dx._impl.qM, qm)
+      mujoco.mju_sym2dense(qm, d.M, m.M_rownnz, m.M_rowadr, m.M_colind)
+      warp_M = np.zeros((m.nv, m.nv))
+      mujoco.mju_sym2dense(
+          warp_M,
+          np.array(dx._impl.M),
+          m.M_rownnz,
+          m.M_rowadr,
+          m.M_colind,
+      )
+      np.testing.assert_allclose(warp_M, qm)
       # TODO(taylorhowell): test efc__J
       np.testing.assert_allclose(dx._impl.efc__aref[:3], d.efc_aref[:3])
 
@@ -583,7 +622,7 @@ class DataIOTest(parameterized.TestCase):
     )
 
     # check sparse mass matrices are correct
-    np.testing.assert_allclose(dx_sparse._impl.qM, d.qM, atol=1e-8)
+    np.testing.assert_allclose(dx_sparse._impl.M, d.M, atol=1e-8)
     np.testing.assert_allclose(dx_sparse._impl.qLD, d.qLD, atol=1e-8)
     np.testing.assert_allclose(
         dx_sparse._impl.qLDiagInv, d.qLDiagInv, atol=1e-8
@@ -596,8 +635,8 @@ class DataIOTest(parameterized.TestCase):
     dx_from_dense = mjx.put_data(m, d, impl=impl)
     if impl == 'jax':
       qm = np.zeros((m.nv, m.nv))
-      mujoco.mj_fullM(m, qm, d.qM)
-      np.testing.assert_allclose(dx_from_dense._impl.qM, qm, atol=1e-8)
+      mujoco.mju_sym2dense(qm, d.M, m.M_rownnz, m.M_rowadr, m.M_colind)
+      np.testing.assert_allclose(dx_from_dense._impl.M, qm, atol=1e-8)
 
 
   def test_put_data_warp_ndim(self):
@@ -643,7 +682,6 @@ class DataIOTest(parameterized.TestCase):
     np.testing.assert_allclose(d_2.xpos, d.xpos)
     np.testing.assert_allclose(d_2.cvel, d.cvel)
     np.testing.assert_allclose(d_2.cdof_dot, d.cdof_dot)
-    np.testing.assert_allclose(d_2.qM, d.qM)
     np.testing.assert_allclose(d_2.qLD, d.qLD, atol=1e-6)
     np.testing.assert_allclose(d_2.qLDiagInv, d.qLDiagInv, atol=1e-6)
 
@@ -754,7 +792,6 @@ class DataIOTest(parameterized.TestCase):
     # check a few fields
     np.testing.assert_allclose(d_2.qpos, d.qpos)
     np.testing.assert_allclose(d_2.xpos, d.xpos)
-    np.testing.assert_allclose(d_2.qM, d.qM)
 
     # only 1 contact active
     self.assertEqual(d_2.contact.dist.shape, (1,))
@@ -773,7 +810,19 @@ class DataIOTest(parameterized.TestCase):
     if not mjx_io.has_cuda_gpu_device():
       self.skipTest('No CUDA GPU device.')
 
-    m = mujoco.MjModel.from_xml_string('<mujoco></mujoco>')
+    # Use a model with at least one kinematic tree so that island
+    # fields (e.g. dof_island, tree_island) are populated on the host
+    # MjData.
+    m = mujoco.MjModel.from_xml_string("""
+      <mujoco>
+        <worldbody>
+          <body>
+            <freejoint/>
+            <geom size="0.1"/>
+          </body>
+        </worldbody>
+      </mujoco>
+    """)
     d = mujoco.MjData(m)
     mx = mjx.put_model(m, impl='warp')
     dx = mjx.make_data(m, impl='warp')
@@ -825,8 +874,8 @@ class DataIOTest(parameterized.TestCase):
       mjx.make_data(m)
 
   @parameterized.parameters(JacobianType.DENSE, JacobianType.SPARSE)
-  def test_qm_mapm2m(self, jacobian):
-    """Test that qM is mapped to M."""
+  def test_m_mapm2m(self, jacobian):
+    """Test that M matches MuJoCo."""
     m = test_util.load_test_file('humanoid/humanoid.xml')
     m.opt.jacobian = jacobian
     d = mujoco.MjData(m)
@@ -934,8 +983,8 @@ _DEVICE_TEST_CASES = [
     ('gpu-nvidia', 'jax', ('gpu', Impl.JAX)),
     ('tpu', 'jax', ('tpu', Impl.JAX)),
     # WARP backend specified.
-    ('cpu', 'warp', ('cpu', 'error')),
-    ('gpu-notnvidia', 'warp', ('cpu', 'error')),
+    ('cpu', 'warp', ('cpu', Impl.WARP)),
+    ('gpu-notnvidia', 'warp', ('gpu', 'error')),
     ('gpu-nvidia', 'warp', ('gpu', Impl.WARP)),
     ('tpu', 'warp', ('tpu', 'error')),
     # CPP backend specified.
@@ -962,10 +1011,10 @@ _DEFAULT_DEVICE_TEST_CASES = [
     ('gpu-nvidia', 'jax', ('gpu', Impl.JAX)),
     ('tpu', 'jax', ('tpu', Impl.JAX)),
     # WARP backend impl specified.
-    ('cpu', 'warp', ('cpu', 'error')),
-    ('gpu-notnvidia', 'warp', ('cpu', 'error')),
+    ('cpu', 'warp', ('cpu', Impl.WARP)),
+    ('gpu-notnvidia', 'warp', ('cpu', Impl.WARP)),
     ('gpu-nvidia', 'warp', ('gpu', Impl.WARP)),
-    ('tpu', 'warp', ('tpu', 'error')),
+    ('tpu', 'warp', ('cpu', Impl.WARP)),
     # CPP backend impl specified, CPU should always be available.
     ('cpu', 'cpp', ('cpu', Impl.CPP)),
     ('gpu-notnvidia', 'cpp', ('cpu', Impl.CPP)),
@@ -1140,15 +1189,6 @@ class ResolveImplAndDeviceTest(parameterized.TestCase):
     self.mock_jax_backends.side_effect = backends_side_effect
 
     expected_device, expected_impl = expected
-    if (
-        expected_impl == 'error'
-        and default_device_str != 'gpu-nvidia'
-        and impl_str == 'warp'
-    ):
-      with self.assertRaisesRegex(RuntimeError, 'cuda backend not supported'):
-        mjx_io._resolve_impl_and_device(impl=impl_str, device=None)
-      return
-
     if expected_impl == 'error':
       with self.assertRaises(AssertionError):
         mjx_io._resolve_impl_and_device(impl=impl_str, device=None)
