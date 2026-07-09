@@ -268,11 +268,23 @@ class PhysicsData {
     return val(typed_memory_view(qm_diag_buf_.size(), qm_diag_buf_.data()));
   }
 
+  // 6×nv body Jacobian at the body-frame origin, from the last forward pass:
+  // rows 0–2 translational (jacp), rows 3–5 rotational (jacr), row-major.
+  // Backs the damped-least-squares 6-DOF IK (CCD can't satisfy simultaneous
+  // position+orientation targets on a 7-DOF arm). View valid until next call.
+  val jacBody(int body) const {
+    const int nv = model_->nv;
+    jac_buf_.resize(static_cast<std::size_t>(6) * nv);
+    mj_jacBody(model_, data_, jac_buf_.data(), jac_buf_.data() + 3 * nv, body);
+    return val(typed_memory_view(jac_buf_.size(), jac_buf_.data()));
+  }
+
  private:
   mjModel* model_;
   mjData* data_ = nullptr;
   mutable std::vector<double> contact_buf_;
   mutable std::vector<double> qm_diag_buf_;
+  mutable std::vector<double> jac_buf_;
 };
 
 // ---------------------------------------------------------------------------
@@ -793,7 +805,8 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("qfrc_bias", &PhysicsData::qfrc_bias)
       .function("qM_diag", &PhysicsData::qM_diag)
       .function("ncon", &PhysicsData::ncon)
-      .function("contacts", &PhysicsData::contacts);
+      .function("contacts", &PhysicsData::contacts)
+      .function("jacBody", &PhysicsData::jacBody);
 
   // --- Load from binary ---
   emscripten::function("loadModelFromArrayBuffer", &LoadModelFromArrayBuffer,
