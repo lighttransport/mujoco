@@ -454,6 +454,59 @@ class SpecWrapper {
     }
   }
 
+  // Fixed tendon — q-space coupling: tendon length = Σ coef_i · qpos_i
+  // (the MJCF `<tendon><fixed>` element). Joint wraps are appended by the
+  // caller through MjsTendon.wrapJoint on the returned pointer. Length
+  // limits activate when `limited` (range in tendon-length units);
+  // stiffness/damping are the scalar `<fixed stiffness damping>` attrs.
+  mjsTendon* addFixedTendon(const std::string& name, double stiffness,
+                            double damping, double frictionloss,
+                            double armature, double rangeLo, double rangeHi,
+                            bool limited) {
+    mjsTendon* t = mjs_addTendon(spec_, nullptr);
+    if (!t) {
+      mju_error("mjs_addTendon failed");
+    }
+    mjs_setName(t->element, name.c_str());
+    t->stiffness[0] = stiffness;
+    t->damping[0] = damping;
+    t->frictionloss = frictionloss;
+    t->armature = armature;
+    if (limited) {
+      t->limited = mjLIMITED_TRUE;
+      t->range[0] = rangeLo;
+      t->range[1] = rangeHi;
+    }
+    return t;
+  }
+
+  // Joint equality constraint — the MJCF `<equality><joint>` element:
+  // qpos(joint1) − poly(qpos(joint2)) = 0 with polycoef p0..p4 (joint2
+  // empty = constrain joint1 to the polynomial constant).
+  void addJointEquality(const std::string& name, const std::string& joint1,
+                        const std::string& joint2, double p0, double p1,
+                        double p2, double p3, double p4, bool active) {
+    mjsEquality* e = mjs_addEquality(spec_, nullptr);
+    if (!e) {
+      mju_error("mjs_addEquality failed");
+    }
+    if (!name.empty()) {
+      mjs_setName(e->element, name.c_str());
+    }
+    e->type = mjEQ_JOINT;
+    e->objtype = mjOBJ_JOINT;
+    mjs_setString(e->name1, joint1.c_str());
+    if (!joint2.empty()) {
+      mjs_setString(e->name2, joint2.c_str());
+    }
+    e->data[0] = p0;
+    e->data[1] = p1;
+    e->data[2] = p2;
+    e->data[3] = p3;
+    e->data[4] = p4;
+    e->active = active ? 1 : 0;
+  }
+
   PhysicsModel* compile() {
     mjModel* m = mj_compile(spec_, nullptr);
     if (!m) {
@@ -474,6 +527,13 @@ class SpecWrapper {
   mjSpec* spec_;
   bool owned_;
 };
+
+// Tendon helper — append a joint wrap (`<fixed><joint joint coef/>`).
+void tendonWrapJoint(mjsTendon* t, const std::string& jointName, double coef) {
+  if (!mjs_wrapJoint(t, jointName.c_str(), coef)) {
+    mju_error("mjs_wrapJoint failed");
+  }
+}
 
 // Body helpers — thin wrappers so we can chain calls from JS.
 
@@ -826,6 +886,9 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("addExclude", &SpecWrapper::addExclude)
       .function("addPositionActuator", &SpecWrapper::addPositionActuator)
       .function("addVelocityActuator", &SpecWrapper::addVelocityActuator)
+      .function("addFixedTendon", &SpecWrapper::addFixedTendon,
+                emscripten::allow_raw_pointers())
+      .function("addJointEquality", &SpecWrapper::addJointEquality)
       .function("compile", &SpecWrapper::compile, emscripten::allow_raw_pointers());
 
   // --- Body ---
@@ -838,6 +901,11 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .class_function("setIQuat", &setBodyIQuat, emscripten::allow_raw_pointers())
       .class_function("setDiagInertia", &setBodyDiagInertia, emscripten::allow_raw_pointers())
       .class_function("setMocap", &setBodyMocap, emscripten::allow_raw_pointers());
+
+  // --- Fixed tendon (q-space joint coupling) ---
+  emscripten::class_<mjsTendon>("MjsTendon")
+      .class_function("wrapJoint", &tendonWrapJoint,
+                      emscripten::allow_raw_pointers());
 
   // --- Geom ---
   emscripten::class_<mjsGeom>("MjsGeom")
