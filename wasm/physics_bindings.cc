@@ -93,9 +93,22 @@ class PhysicsModel {
   // and restore the authored masks afterwards.
   val geom_contype() const { return val(typed_memory_view(model_->ngeom, model_->geom_contype)); }
   val geom_conaffinity() const { return val(typed_memory_view(model_->ngeom, model_->geom_conaffinity)); }
+  // Per-geom contact-solver readback (compiled model), so callers can verify
+  // authored mjc:priority/solmix/margin/gap/solref/solimp landed on the geom.
+  val geom_priority() const { return val(typed_memory_view(model_->ngeom, model_->geom_priority)); }
+  val geom_solmix() const { return val(typed_memory_view(model_->ngeom, model_->geom_solmix)); }
+  val geom_margin() const { return val(typed_memory_view(model_->ngeom, model_->geom_margin)); }
+  val geom_gap() const { return val(typed_memory_view(model_->ngeom, model_->geom_gap)); }
+  val geom_solref() const { return val(typed_memory_view(model_->ngeom * mjNREF, model_->geom_solref)); }
+  val geom_solimp() const { return val(typed_memory_view(model_->ngeom * mjNIMP, model_->geom_solimp)); }
   val jnt_stiffness() const { return val(typed_memory_view(model_->njnt, model_->jnt_stiffness)); }
   val jnt_range() const { return val(typed_memory_view(model_->njnt * 2, model_->jnt_range)); }
   val dof_damping() const { return val(typed_memory_view(model_->nv, model_->dof_damping)); }
+  // Per-body dof range (address + count in the dof arrays), so callers can map
+  // an authored PhysX body linear/angular damping onto the right dof_damping
+  // slots (translational dofs first, then rotational, for a free body).
+  val body_dofadr() const { return val(typed_memory_view(model_->nbody, model_->body_dofadr)); }
+  val body_dofnum() const { return val(typed_memory_view(model_->nbody, model_->body_dofnum)); }
   val dof_armature() const { return val(typed_memory_view(model_->nv, model_->dof_armature)); }
   val dof_frictionloss() const { return val(typed_memory_view(model_->nv, model_->dof_frictionloss)); }
   double timestep() const { return model_->opt.timestep; }
@@ -130,6 +143,11 @@ class PhysicsModel {
   void setOMargin(double m) { model_->opt.o_margin = m; }
   int enableflags() const { return model_->opt.enableflags; }
   void setEnableFlags(int f) { model_->opt.enableflags = f; }
+  // Disable flags (mjDSBL_*) — MJCF `<flag warmstart="disable" .../>`, authored
+  // on USD as `mjc:flag:*`. Kept separate from enableflags so the web build can
+  // honor authored solver flags (warmstart / contact / gravity / …).
+  int disableflags() const { return model_->opt.disableflags; }
+  void setDisableFlags(int f) { model_->opt.disableflags = f; }
 
  private:
   mjModel* model_;
@@ -650,6 +668,28 @@ void setGeomConType(mjsGeom* g, int contype) { g->contype = contype; }
 void setGeomConAffinity(mjsGeom* g, int conaffinity) { g->conaffinity = conaffinity; }
 void setGeomCondim(mjsGeom* g, int condim) { g->condim = condim; }
 
+// Per-geom contact-solver tuning (MJCF `<geom priority/solmix/margin/gap/
+// solref/solimp>`). These mirror the fields authored on USD colliders as
+// `mjc:priority` / `mjc:solmix` / `mjc:margin` / `mjc:gap` / `mjc:solref` /
+// `mjc:solimp`, so the web MuJoCo build can honor them per-geom instead of
+// only the global mjENBL_OVERRIDE contact override.
+void setGeomPriority(mjsGeom* g, int priority) { g->priority = priority; }
+void setGeomSolmix(mjsGeom* g, double solmix) { g->solmix = solmix; }
+void setGeomMargin(mjsGeom* g, double margin) { g->margin = margin; }
+void setGeomGap(mjsGeom* g, double gap) { g->gap = gap; }
+void setGeomSolref(mjsGeom* g, double timeconst, double dampratio) {
+  g->solref[0] = timeconst;
+  g->solref[1] = dampratio;
+}
+void setGeomSolimp(mjsGeom* g, double d0, double d1, double width,
+                   double midpoint, double power) {
+  g->solimp[0] = d0;
+  g->solimp[1] = d1;
+  g->solimp[2] = width;
+  g->solimp[3] = midpoint;
+  g->solimp[4] = power;
+}
+
 // Bind a `<geom type="mesh">` to the named MjsMesh asset (the same
 // name passed to addMesh). MuJoCo computes a convex hull from the
 // referenced mesh's user-supplied vertices at compile time.
@@ -819,6 +859,8 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("jnt_stiffness", &PhysicsModel::jnt_stiffness)
       .function("jnt_range", &PhysicsModel::jnt_range)
       .function("dof_damping", &PhysicsModel::dof_damping)
+      .function("body_dofadr", &PhysicsModel::body_dofadr)
+      .function("body_dofnum", &PhysicsModel::body_dofnum)
       .function("dof_armature", &PhysicsModel::dof_armature)
       .function("dof_frictionloss", &PhysicsModel::dof_frictionloss)
       .function("nsensordata", &PhysicsModel::nsensordata)
@@ -826,6 +868,12 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("setTimestep", &PhysicsModel::setTimestep)
       .function("geom_contype", &PhysicsModel::geom_contype)
       .function("geom_conaffinity", &PhysicsModel::geom_conaffinity)
+      .function("geom_priority", &PhysicsModel::geom_priority)
+      .function("geom_solmix", &PhysicsModel::geom_solmix)
+      .function("geom_margin", &PhysicsModel::geom_margin)
+      .function("geom_gap", &PhysicsModel::geom_gap)
+      .function("geom_solref", &PhysicsModel::geom_solref)
+      .function("geom_solimp", &PhysicsModel::geom_solimp)
       .function("cone", &PhysicsModel::cone)
       .function("setCone", &PhysicsModel::setCone)
       .function("impratio", &PhysicsModel::impratio)
@@ -839,11 +887,36 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("o_margin", &PhysicsModel::o_margin)
       .function("setOMargin", &PhysicsModel::setOMargin)
       .function("enableflags", &PhysicsModel::enableflags)
-      .function("setEnableFlags", &PhysicsModel::setEnableFlags);
+      .function("setEnableFlags", &PhysicsModel::setEnableFlags)
+      .function("disableflags", &PhysicsModel::disableflags)
+      .function("setDisableFlags", &PhysicsModel::setDisableFlags);
 
   // Enable bit that makes the solver use opt.o_solref/o_solimp/o_margin for
   // all contacts (runtime contact-compliance override).
   emscripten::constant("mjENBL_OVERRIDE", static_cast<int>(mjENBL_OVERRIDE));
+
+  // Enable flags (mjENBL_*) authored via `mjc:flag:<name> = enable`.
+  emscripten::constant("mjENBL_ENERGY", static_cast<int>(mjENBL_ENERGY));
+  emscripten::constant("mjENBL_FWDINV", static_cast<int>(mjENBL_FWDINV));
+  emscripten::constant("mjENBL_INVDISCRETE", static_cast<int>(mjENBL_INVDISCRETE));
+
+  // Disable flags (mjDSBL_*) authored via `mjc:flag:<name> = disable`.
+  emscripten::constant("mjDSBL_CONSTRAINT", static_cast<int>(mjDSBL_CONSTRAINT));
+  emscripten::constant("mjDSBL_EQUALITY", static_cast<int>(mjDSBL_EQUALITY));
+  emscripten::constant("mjDSBL_FRICTIONLOSS", static_cast<int>(mjDSBL_FRICTIONLOSS));
+  emscripten::constant("mjDSBL_LIMIT", static_cast<int>(mjDSBL_LIMIT));
+  emscripten::constant("mjDSBL_CONTACT", static_cast<int>(mjDSBL_CONTACT));
+  emscripten::constant("mjDSBL_GRAVITY", static_cast<int>(mjDSBL_GRAVITY));
+  emscripten::constant("mjDSBL_CLAMPCTRL", static_cast<int>(mjDSBL_CLAMPCTRL));
+  emscripten::constant("mjDSBL_WARMSTART", static_cast<int>(mjDSBL_WARMSTART));
+  emscripten::constant("mjDSBL_FILTERPARENT", static_cast<int>(mjDSBL_FILTERPARENT));
+  emscripten::constant("mjDSBL_ACTUATION", static_cast<int>(mjDSBL_ACTUATION));
+  emscripten::constant("mjDSBL_REFSAFE", static_cast<int>(mjDSBL_REFSAFE));
+  emscripten::constant("mjDSBL_SENSOR", static_cast<int>(mjDSBL_SENSOR));
+  emscripten::constant("mjDSBL_MIDPHASE", static_cast<int>(mjDSBL_MIDPHASE));
+  emscripten::constant("mjDSBL_EULERDAMP", static_cast<int>(mjDSBL_EULERDAMP));
+  emscripten::constant("mjDSBL_SPRING", static_cast<int>(mjDSBL_SPRING));
+  emscripten::constant("mjDSBL_DAMPER", static_cast<int>(mjDSBL_DAMPER));
 
   // --- PhysicsData ---
   emscripten::class_<PhysicsData>("PhysicsData")
@@ -920,6 +993,12 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .class_function("setConType", &setGeomConType, emscripten::allow_raw_pointers())
       .class_function("setConAffinity", &setGeomConAffinity, emscripten::allow_raw_pointers())
       .class_function("setCondim", &setGeomCondim, emscripten::allow_raw_pointers())
+      .class_function("setPriority", &setGeomPriority, emscripten::allow_raw_pointers())
+      .class_function("setSolmix", &setGeomSolmix, emscripten::allow_raw_pointers())
+      .class_function("setMargin", &setGeomMargin, emscripten::allow_raw_pointers())
+      .class_function("setGap", &setGeomGap, emscripten::allow_raw_pointers())
+      .class_function("setSolref", &setGeomSolref, emscripten::allow_raw_pointers())
+      .class_function("setSolimp", &setGeomSolimp, emscripten::allow_raw_pointers())
       .class_function("setMeshName", &setGeomMeshName, emscripten::allow_raw_pointers());
 
   // --- Mesh asset (for `<geom type="mesh">`). MuJoCo computes the
