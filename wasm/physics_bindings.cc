@@ -915,6 +915,10 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
   emscripten::constant("mjDSBL_SENSOR", static_cast<int>(mjDSBL_SENSOR));
   emscripten::constant("mjDSBL_MIDPHASE", static_cast<int>(mjDSBL_MIDPHASE));
   emscripten::constant("mjDSBL_EULERDAMP", static_cast<int>(mjDSBL_EULERDAMP));
+  emscripten::constant("mjDSBL_AUTORESET", static_cast<int>(mjDSBL_AUTORESET));
+  emscripten::constant("mjDSBL_NATIVECCD", static_cast<int>(mjDSBL_NATIVECCD));
+  emscripten::constant("mjDSBL_ISLAND", static_cast<int>(mjDSBL_ISLAND));
+  emscripten::constant("mjDSBL_MULTICCD", static_cast<int>(mjDSBL_MULTICCD));
   emscripten::constant("mjDSBL_SPRING", static_cast<int>(mjDSBL_SPRING));
   emscripten::constant("mjDSBL_DAMPER", static_cast<int>(mjDSBL_DAMPER));
 
