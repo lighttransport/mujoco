@@ -297,6 +297,18 @@ class PhysicsData {
     return val(typed_memory_view(jac_buf_.size(), jac_buf_.data()));
   }
 
+  // 6×nv Jacobian at the body's center of mass. Link-space damping and
+  // external-wrench controllers must use the COM velocity: jacBody() is at
+  // the body-frame origin and differs by omega×r when the inertial frame is
+  // offset (common for compound collision geometry).
+  val jacBodyCom(int body) const {
+    const int nv = model_->nv;
+    jac_buf_.resize(static_cast<std::size_t>(6) * nv);
+    mj_jacBodyCom(model_, data_, jac_buf_.data(), jac_buf_.data() + 3 * nv,
+                  body);
+    return val(typed_memory_view(jac_buf_.size(), jac_buf_.data()));
+  }
+
  private:
   mjModel* model_;
   mjData* data_ = nullptr;
@@ -498,6 +510,21 @@ class SpecWrapper {
     return t;
   }
 
+  // Spatial tendon — Cartesian distance between site wraps. This is the
+  // native MuJoCo representation of a bounded UsdPhysicsDistanceJoint.
+  mjsTendon* addSpatialTendon(const std::string& name, double rangeLo,
+                              double rangeHi, bool limited) {
+    mjsTendon* t = mjs_addTendon(spec_, nullptr);
+    if (!t) mju_error("mjs_addTendon failed");
+    mjs_setName(t->element, name.c_str());
+    if (limited) {
+      t->limited = mjLIMITED_TRUE;
+      t->range[0] = rangeLo;
+      t->range[1] = rangeHi;
+    }
+    return t;
+  }
+
   // Joint equality constraint — the MJCF `<equality><joint>` element:
   // qpos(joint1) − poly(qpos(joint2)) = 0 with polycoef p0..p4 (joint2
   // empty = constrain joint1 to the polynomial constant).
@@ -553,6 +580,12 @@ void tendonWrapJoint(mjsTendon* t, const std::string& jointName, double coef) {
   }
 }
 
+void tendonWrapSite(mjsTendon* t, const std::string& siteName) {
+  if (!mjs_wrapSite(t, siteName.c_str())) {
+    mju_error("mjs_wrapSite failed");
+  }
+}
+
 // Body helpers — thin wrappers so we can chain calls from JS.
 
 mjsBody* addBody(mjsBody* parent, const std::string& name) {
@@ -562,6 +595,16 @@ mjsBody* addBody(mjsBody* parent, const std::string& name) {
   }
   mjs_setName(b->element, name.c_str());
   return b;
+}
+
+void addSite(mjsBody* body, const std::string& name,
+             double x, double y, double z) {
+  mjsSite* site = mjs_addSite(body, nullptr);
+  if (!site) mju_error("mjs_addSite failed");
+  mjs_setName(site->element, name.c_str());
+  site->pos[0] = x;
+  site->pos[1] = y;
+  site->pos[2] = z;
 }
 
 void setBodyPos(mjsBody* body, double x, double y, double z) {
@@ -943,7 +986,8 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("qM_diag", &PhysicsData::qM_diag)
       .function("ncon", &PhysicsData::ncon)
       .function("contacts", &PhysicsData::contacts)
-      .function("jacBody", &PhysicsData::jacBody);
+      .function("jacBody", &PhysicsData::jacBody)
+      .function("jacBodyCom", &PhysicsData::jacBodyCom);
 
   // --- Load from binary ---
   emscripten::function("loadModelFromArrayBuffer", &LoadModelFromArrayBuffer,
@@ -965,6 +1009,8 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("addVelocityActuator", &SpecWrapper::addVelocityActuator)
       .function("addFixedTendon", &SpecWrapper::addFixedTendon,
                 emscripten::allow_raw_pointers())
+      .function("addSpatialTendon", &SpecWrapper::addSpatialTendon,
+                emscripten::allow_raw_pointers())
       .function("addJointEquality", &SpecWrapper::addJointEquality)
       .function("compile", &SpecWrapper::compile, emscripten::allow_raw_pointers());
 
@@ -977,11 +1023,14 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .class_function("setIPos", &setBodyIPos, emscripten::allow_raw_pointers())
       .class_function("setIQuat", &setBodyIQuat, emscripten::allow_raw_pointers())
       .class_function("setDiagInertia", &setBodyDiagInertia, emscripten::allow_raw_pointers())
-      .class_function("setMocap", &setBodyMocap, emscripten::allow_raw_pointers());
+      .class_function("setMocap", &setBodyMocap, emscripten::allow_raw_pointers())
+      .class_function("addSite", &addSite, emscripten::allow_raw_pointers());
 
   // --- Fixed tendon (q-space joint coupling) ---
   emscripten::class_<mjsTendon>("MjsTendon")
       .class_function("wrapJoint", &tendonWrapJoint,
+                      emscripten::allow_raw_pointers())
+      .class_function("wrapSite", &tendonWrapSite,
                       emscripten::allow_raw_pointers());
 
   // --- Geom ---
