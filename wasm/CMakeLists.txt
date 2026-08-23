@@ -29,6 +29,20 @@ link_directories(${CMAKE_BINARY_DIR}/lib)
 # the ST build needs it set explicitly here.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
 
+# Emit TypeScript definitions (.d.ts) via emscripten's --emit-tsd.
+#
+# Opt-in because the codegen step shells out to `tsc --outFile ...`, which
+# was removed in TypeScript 5.x (error TS5102). Builds only need the .js/.wasm
+# artifacts, so keep .d.ts generation available for tooling consumers that pin
+# a compatible tsc (4.x) but off by default so plain builds do not depend on
+# the ambient TypeScript version.
+option(MUJOCO_WASM_EMIT_TSD "Generate .d.ts typings via emscripten --emit-tsd (requires TypeScript 4.x)" OFF)
+
+set(EMCC_TSD_FLAGS "")
+if(MUJOCO_WASM_EMIT_TSD)
+    list(APPEND EMCC_TSD_FLAGS "--emit-tsd mujoco.d.ts")
+endif()
+
 # Set Emscripten linker flags shared by all WASM targets.
 set(EMCC_COMMON_LINKER_FLAGS
     "--bind"
@@ -47,7 +61,7 @@ set(EMCC_FULL_LINKER_FLAGS
     "-fexceptions"
     "-gsource-map"
     "-g"
-    "--emit-tsd mujoco.d.ts"
+    ${EMCC_TSD_FLAGS}
 )
 if(MUJOCO_WASM_THREADS)
     list(APPEND EMCC_FULL_LINKER_FLAGS
@@ -57,6 +71,11 @@ if(MUJOCO_WASM_THREADS)
     add_definitions(-DMUJOCO_WASM_THREADS)
 endif()
 string(REPLACE ";" " " EMCC_FULL_LINKER_FLAGS_STR "${EMCC_FULL_LINKER_FLAGS}")
+
+set(EMCC_PHYSICS_TSD_FLAGS "")
+if(MUJOCO_WASM_EMIT_TSD)
+    list(APPEND EMCC_PHYSICS_TSD_FLAGS "--emit-tsd mujoco_physics.d.ts")
+endif()
 
 set(EMCC_PHYSICS_LINKER_FLAGS
     ${EMCC_COMMON_LINKER_FLAGS}
@@ -71,7 +90,7 @@ set(EMCC_PHYSICS_LINKER_FLAGS
     "-s EXPORTED_RUNTIME_METHODS=['HEAPF32','HEAP32']"
     "-s EXPORT_NAME=loadMujocoPhysics"
     "--closure=1"
-    "--emit-tsd mujoco_physics.d.ts"
+    ${EMCC_PHYSICS_TSD_FLAGS}
 )
 if(MUJOCO_PHYSICS_ENABLE_EXCEPTIONS)
     list(REMOVE_ITEM EMCC_PHYSICS_LINKER_FLAGS "-s DISABLE_EXCEPTION_CATCHING=1")
@@ -176,7 +195,9 @@ if(MUJOCO_BUILD_TESTS_WASM)
 
     set(BENCHMARK_LINKER_FLAGS ${EMCC_FULL_LINKER_FLAGS})
     list(REMOVE_ITEM BENCHMARK_LINKER_FLAGS "--emit-tsd mujoco.d.ts")
-    list(APPEND BENCHMARK_LINKER_FLAGS "--emit-tsd mujoco_wasm_benchmark.d.ts")
+    if(MUJOCO_WASM_EMIT_TSD)
+        list(APPEND BENCHMARK_LINKER_FLAGS "--emit-tsd mujoco_wasm_benchmark.d.ts")
+    endif()
     string(REPLACE ";" " " BENCHMARK_LINKER_FLAGS_STR "${BENCHMARK_LINKER_FLAGS}")
 
     add_executable(mujoco_wasm_benchmark ${MUJOCO_WASM_BENCHMARK_FILES})
