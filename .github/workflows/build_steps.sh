@@ -341,6 +341,7 @@ build_physics_wasm() {
     test -s wasm/dist/mujoco_physics.js
     test -s wasm/dist/mujoco_physics.wasm
     test -s wasm/dist/mujoco_physics.d.ts
+    npm run test:physics --prefix ./wasm
 }
 
 package_wasm() {
