@@ -327,14 +327,13 @@ build_physics_wasm() {
     use_wasm_npm_bins
 
     emcmake cmake -B build_wasm_physics \
-        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION:BOOL=OFF \
         -DMUJOCO_ENABLE_FETCHCONTENT:BOOL=ON \
         -DMUJOCO_BUILD_TESTS_WASM:BOOL=OFF \
         -DMUJOCO_BUILD_PHYSICS_WASM:BOOL=ON \
         -DMUJOCO_WASM_EMIT_TSD:BOOL=ON \
         -DMUJOCO_WASM_THREADS:BOOL=OFF \
         -DMUJOCO_PHYSICS_ENABLE_THREADS:BOOL=OFF \
-        -DMUJOCO_ENABLE_PNG:BOOL=OFF \
+        -DMUJOCO_PHYSICS_ENABLE_EXCEPTIONS:BOOL=ON \
         $WASM_CMAKE_ARGS
     cmake --build build_wasm_physics --target mujoco_physics_wasm --parallel $(nproc)
 
