@@ -14,10 +14,6 @@
 
 # Build configuration for third party libraries used in MuJoCo.
 
-set(MUJOCO_DEP_VERSION_lodepng
-    17d08dd26cac4d63f43af217ebd70318bfb8189c
-    CACHE STRING "Version of `lodepng` to be fetched."
-)
 set(MUJOCO_DEP_VERSION_tinyxml2
     e6caeae85799003f4ca74ff26ee16a789bc2af48
     CACHE STRING "Version of `tinyxml2` to be fetched."
@@ -53,7 +49,7 @@ set(MUJOCO_DEP_VERSION_abseil
 )
 
 set(MUJOCO_DEP_VERSION_gtest
-    52eb8108c5bdec04579160ae17225d66034bd723 # v1.17.0
+    063de7e9578f82b369302001269680b4b1553359 # v1.18.0
     CACHE STRING "Version of `gtest` to be fetched."
 )
 
@@ -62,7 +58,6 @@ set(MUJOCO_DEP_VERSION_benchmark
     CACHE STRING "Version of `benchmark` to be fetched."
 )
 
-mark_as_advanced(MUJOCO_DEP_VERSION_lodepng)
 mark_as_advanced(MUJOCO_DEP_VERSION_MarchingCubeCpp)
 mark_as_advanced(MUJOCO_DEP_VERSION_tinyxml2)
 mark_as_advanced(MUJOCO_DEP_VERSION_tinyobjloader)
@@ -73,25 +68,8 @@ mark_as_advanced(MUJOCO_DEP_VERSION_abseil)
 mark_as_advanced(MUJOCO_DEP_VERSION_gtest)
 mark_as_advanced(MUJOCO_DEP_VERSION_benchmark)
 
-if(NOT DEFINED MUJOCO_ENABLE_FETCHCONTENT)
-  set(MUJOCO_ENABLE_FETCHCONTENT OFF)
-endif()
-
-if(MUJOCO_ENABLE_FETCHCONTENT)
-  include(FetchContent)
-endif()
+include(FetchContent)
 include(FindOrFetch)
-
-function(mujoco_get_local_dependency_source name out_var)
-  string(TOUPPER "${name}" name_upper)
-  if(DEFINED FETCHCONTENT_SOURCE_DIR_${name})
-    set(${out_var} "${FETCHCONTENT_SOURCE_DIR_${name}}" PARENT_SCOPE)
-  elseif(DEFINED FETCHCONTENT_SOURCE_DIR_${name_upper})
-    set(${out_var} "${FETCHCONTENT_SOURCE_DIR_${name_upper}}" PARENT_SCOPE)
-  else()
-    set(${out_var} "" PARENT_SCOPE)
-  endif()
-endfunction()
 
 # Override the BUILD_SHARED_LIBS setting, just for building third party libs (since we always want
 # static libraries). The ccd CMakeLists.txt doesn't expose an option to build a static ccd library,
@@ -105,64 +83,9 @@ set(BUILD_SHARED_LIBS
     CACHE INTERNAL "Build SHARED libraries"
 )
 
-if(MUJOCO_ENABLE_PNG AND NOT TARGET lodepng AND MUJOCO_ENABLE_FETCHCONTENT)
-  FetchContent_Declare(
-    lodepng
-    GIT_REPOSITORY https://github.com/lvandeve/lodepng.git
-    GIT_TAG ${MUJOCO_DEP_VERSION_lodepng}
-  )
+include(third_party_deps/lodepng)
 
-  FetchContent_GetProperties(lodepng)
-  if(NOT lodepng_POPULATED)
-    FetchContent_Populate(lodepng)
-    # This is not a CMake project.
-    set(LODEPNG_SRCS ${lodepng_SOURCE_DIR}/lodepng.cpp)
-    set(LODEPNG_HEADERS ${lodepng_SOURCE_DIR}/lodepng.h)
-    add_library(lodepng STATIC ${LODEPNG_HEADERS} ${LODEPNG_SRCS})
-    target_compile_options(lodepng PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS}
-                                           ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS})
-    target_link_options(lodepng PRIVATE ${MUJOCO_MACOS_LINK_OPTIONS})
-    if(NOT EMSCRIPTEN)
-      target_include_directories(lodepng PUBLIC ${lodepng_SOURCE_DIR})
-    else()
-      target_include_directories(lodepng PUBLIC  $<BUILD_INTERFACE:${lodepng_SOURCE_DIR}> $<INSTALL_INTERFACE:include>)
-    endif()
-  endif()
-endif()
-
-if(MUJOCO_ENABLE_PNG AND NOT TARGET lodepng AND NOT MUJOCO_ENABLE_FETCHCONTENT)
-  mujoco_get_local_dependency_source(lodepng lodepng_SOURCE_DIR)
-  if(lodepng_SOURCE_DIR)
-    set(LODEPNG_SRCS ${lodepng_SOURCE_DIR}/lodepng.cpp)
-    set(LODEPNG_HEADERS ${lodepng_SOURCE_DIR}/lodepng.h)
-    add_library(lodepng STATIC ${LODEPNG_HEADERS} ${LODEPNG_SRCS})
-    target_compile_options(lodepng PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS}
-                                           ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS})
-    target_link_options(lodepng PRIVATE ${MUJOCO_MACOS_LINK_OPTIONS})
-    if(NOT EMSCRIPTEN)
-      target_include_directories(lodepng PUBLIC ${lodepng_SOURCE_DIR})
-    else()
-      target_include_directories(lodepng PUBLIC  $<BUILD_INTERFACE:${lodepng_SOURCE_DIR}> $<INSTALL_INTERFACE:include>)
-    endif()
-  else()
-    find_path(LODEPNG_INCLUDE_DIR lodepng.h)
-    find_library(LODEPNG_LIBRARY NAMES lodepng)
-    if(NOT LODEPNG_INCLUDE_DIR OR NOT LODEPNG_LIBRARY)
-      message(FATAL_ERROR
-              "lodepng is required because MUJOCO_ENABLE_PNG=ON, but MuJoCo "
-              "FetchContent is disabled. Set FETCHCONTENT_SOURCE_DIR_LODEPNG "
-              "to a local lodepng checkout or install lodepng headers/library.")
-    endif()
-    add_library(lodepng UNKNOWN IMPORTED)
-    set_target_properties(
-      lodepng PROPERTIES
-      IMPORTED_LOCATION "${LODEPNG_LIBRARY}"
-      INTERFACE_INCLUDE_DIRECTORIES "${LODEPNG_INCLUDE_DIR}"
-    )
-  endif()
-endif()
-
-if(NOT TARGET marchingcubecpp AND MUJOCO_ENABLE_FETCHCONTENT)
+if(NOT TARGET marchingcubecpp)
   FetchContent_Declare(
     marchingcubecpp
     GIT_REPOSITORY https://github.com/aparis69/MarchingCubeCpp.git
@@ -176,26 +99,10 @@ if(NOT TARGET marchingcubecpp AND MUJOCO_ENABLE_FETCHCONTENT)
   endif()
 endif()
 
-if(NOT TARGET marchingcubecpp AND NOT MUJOCO_ENABLE_FETCHCONTENT)
-  mujoco_get_local_dependency_source(marchingcubecpp marchingcubecpp_SOURCE_DIR)
-  if(marchingcubecpp_SOURCE_DIR)
-    include_directories(${marchingcubecpp_SOURCE_DIR})
-  else()
-    find_path(MARCHINGCUBECPP_INCLUDE_DIR MC.h)
-    if(NOT MARCHINGCUBECPP_INCLUDE_DIR)
-      message(FATAL_ERROR
-              "MarchingCubeCpp is required by MuJoCo, but MuJoCo FetchContent "
-              "is disabled. Set FETCHCONTENT_SOURCE_DIR_MARCHINGCUBECPP to a "
-              "local MarchingCubeCpp checkout or install MC.h.")
-    endif()
-    include_directories(${MARCHINGCUBECPP_INCLUDE_DIR})
-  endif()
-endif()
-
 set(QHULL_ENABLE_TESTING OFF)
 # Patch changes in https://github.com/qhull/qhull/pull/173.patch
 set(QHULL_PATCH_COMMAND
-  git apply --reject --whitespace=fix ${mujoco_SOURCE_DIR}/cmake/qhull-support-emscripten.patch
+  git --git-dir=. -c core.autocrlf=false -c core.whitespace=cr-at-eol apply --verbose --whitespace=fix --ignore-space-change ${mujoco_SOURCE_DIR}/cmake/qhull-support-emscripten.patch
 )
 
 findorfetch(
@@ -219,9 +126,7 @@ findorfetch(
 target_include_directories(
   qhullstatic_r INTERFACE $<BUILD_INTERFACE:${qhull_SOURCE_DIR}/src/libqhull_r>
 )
-target_compile_options(qhullstatic_r PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS}
-                                             ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS}
-                                             ${MUJOCO_EMSCRIPTEN_LTO_OPTIONS})
+target_compile_options(qhullstatic_r PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS})
 target_link_options(qhullstatic_r PRIVATE ${MUJOCO_MACOS_LINK_OPTIONS})
 
 set(tinyxml2_BUILD_TESTING OFF)
@@ -240,8 +145,7 @@ findorfetch(
   tinyxml2
   EXCLUDE_FROM_ALL
 )
-target_compile_options(tinyxml2 PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS}
-                                        ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS})
+target_compile_options(tinyxml2 PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS})
 target_link_options(tinyxml2 PRIVATE ${MUJOCO_MACOS_LINK_OPTIONS})
 
 # update cmake_minimum_required version for compatibility with newer version of cmake
@@ -268,14 +172,18 @@ if(CMAKE_POLICY_VERSION_MINIMUM_LOCALLY_DEFINED)
   unset(CMAKE_POLICY_VERSION_MINIMUM)
   unset(CMAKE_POLICY_VERSION_MINIMUM_LOCALLY_DEFINED)
 endif()
-target_compile_options(tinyobjloader PRIVATE ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS})
 
-set(ENABLE_DOUBLE_PRECISION ON)
+# build ccd in single precision when MuJoCo is built with mjUSESINGLE
+if(CMAKE_C_FLAGS MATCHES "mjUSESINGLE")
+  set(ENABLE_DOUBLE_PRECISION OFF)
+else()
+  set(ENABLE_DOUBLE_PRECISION ON)
+endif()
 set(CCD_HIDE_ALL_SYMBOLS ON)
 
 # Patch changes in https://github.com/danfis/libccd/pull/83.patch
 set(CCD_PATCH_COMMAND
-  git apply --reject --whitespace=fix ${mujoco_SOURCE_DIR}/cmake/ccd-support-emscripten.patch
+  git --git-dir=. -c core.autocrlf=false -c core.whitespace=cr-at-eol apply --verbose --whitespace=fix --ignore-space-change ${mujoco_SOURCE_DIR}/cmake/ccd-support-emscripten.patch
 )
 
 # update cmake_minimum_required version for compatibility with newer version of cmake
@@ -303,9 +211,7 @@ if(CMAKE_POLICY_VERSION_MINIMUM_LOCALLY_DEFINED)
   unset(CMAKE_POLICY_VERSION_MINIMUM)
   unset(CMAKE_POLICY_VERSION_MINIMUM_LOCALLY_DEFINED)
 endif()
-target_compile_options(ccd PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS}
-                                   ${MUJOCO_EMSCRIPTEN_THREAD_COMPILE_OPTIONS}
-                                   ${MUJOCO_EMSCRIPTEN_LTO_OPTIONS})
+target_compile_options(ccd PRIVATE ${MUJOCO_MACOS_COMPILE_OPTIONS})
 target_link_options(ccd PRIVATE ${MUJOCO_MACOS_LINK_OPTIONS})
 
 # libCCD has an unconditional `#define _CRT_SECURE_NO_WARNINGS` on Windows.
@@ -351,7 +257,7 @@ if(MUJOCO_BUILD_TESTS OR MUJOCO_BUILD_STUDIO OR MUJOCO_USE_FILAMENT)
   )
 
   set(ABSL_PATCH_COMMAND
-    git apply --reject --whitespace=fix ${mujoco_SOURCE_DIR}/cmake/abseil-cpp-source_location.patch
+    git --git-dir=. -c core.autocrlf=false -c core.whitespace=cr-at-eol apply --verbose --whitespace=fix --ignore-space-change ${mujoco_SOURCE_DIR}/cmake/abseil-cpp-source_location.patch
   )
   set(ABSL_BUILD_TESTING OFF)
   findorfetch(
@@ -439,7 +345,7 @@ endif()
 
 if(MUJOCO_TEST_PYTHON_UTIL)
   add_compile_definitions(EIGEN_MPL2_ONLY)
-  if(NOT TARGET eigen AND MUJOCO_ENABLE_FETCHCONTENT)
+  if(NOT TARGET eigen)
     # Support new IN_LIST if() operator.
     set(CMAKE_POLICY_DEFAULT_CMP0057 NEW)
 
@@ -459,9 +365,6 @@ if(MUJOCO_TEST_PYTHON_UTIL)
         Eigen3::Eigen PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${eigen3_SOURCE_DIR}"
       )
     endif()
-  endif()
-  if(NOT TARGET eigen AND NOT MUJOCO_ENABLE_FETCHCONTENT)
-    find_package(Eigen3 REQUIRED)
   endif()
 endif()
 

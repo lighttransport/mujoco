@@ -18,7 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
+#include <filesystem>  // NOLINT
 #include <functional>
 #include <map>
 #include <memory>
@@ -479,6 +479,71 @@ TEST_F(MujocoTest, SetToDCMotorLuGre) {
   EXPECT_EQ(actuator->biasprm[3], 0.5);   // coulomb
   EXPECT_EQ(actuator->biasprm[4], 0.7);   // static
   EXPECT_EQ(actuator->biasprm[5], 10.0);  // stribeck
+
+  mj_deleteSpec(spec);
+}
+
+TEST_F(MujocoTest, SetToOrientation) {
+  mjSpec* spec = mj_makeSpec();
+  mjsActuator* actuator = mjs_addActuator(spec, 0);
+
+  // kv variant, default (expmap) chart
+  double kv = 2.0;
+  const char* err = mjs_setToOrientation(actuator, 5.0, &kv, nullptr, 0);
+  EXPECT_STREQ(err, "");
+  EXPECT_EQ(actuator->gaintype, mjGAIN_SO3);
+  EXPECT_EQ(actuator->biastype, mjBIAS_SO3);
+  EXPECT_EQ(actuator->dyntype, mjDYN_NONE);
+  EXPECT_EQ(actuator->gainprm[0], 5.0);
+  EXPECT_EQ(actuator->biasprm[1], -5.0);
+  EXPECT_EQ(actuator->biasprm[2], -2.0);
+  EXPECT_EQ(actuator->ctrlspec, 0);
+
+  // dampratio variant, quat chart
+  double dampratio = 1.0;
+  err = mjs_setToOrientation(actuator, 5.0, nullptr, &dampratio, mjCHART_QUAT);
+  EXPECT_STREQ(err, "");
+  EXPECT_EQ(actuator->biasprm[2], 1.0);
+  EXPECT_EQ(actuator->ctrlspec, mjCHART_QUAT);
+
+  // kv and dampratio are mutually exclusive
+  err = mjs_setToOrientation(actuator, 5.0, &kv, &dampratio, 0);
+  EXPECT_STREQ(err, "kv and dampratio cannot both be defined");
+
+  mj_deleteSpec(spec);
+}
+
+TEST_F(MujocoTest, SetToPID) {
+  mjSpec* spec = mj_makeSpec();
+  mjsActuator* actuator = mjs_addActuator(spec, 0);
+
+  // stateless PID with kv, default input signature
+  double kv = 3.0;
+  const char* err = mjs_setToPID(actuator, 5.0, &kv, nullptr, nullptr, nullptr,
+                                 nullptr, 0, 0);
+  EXPECT_STREQ(err, "");
+  EXPECT_EQ(actuator->gaintype, mjGAIN_PID);
+  EXPECT_EQ(actuator->biastype, mjBIAS_AFFINE);
+  EXPECT_EQ(actuator->dyntype, mjDYN_NONE);
+  EXPECT_EQ(actuator->biasprm[1], -5.0);
+  EXPECT_EQ(actuator->biasprm[2], -3.0);
+  EXPECT_EQ(actuator->gainprm[0], 0.0);
+
+  // integral action with anti-windup, pos-only signature
+  double ki = 0.5, imax = 2.0, dampratio = 1.0;
+  err = mjs_setToPID(actuator, 5.0, nullptr, &dampratio, &ki, &imax, nullptr, 0,
+                     mjINPUT_POS);
+  EXPECT_STREQ(err, "");
+  EXPECT_EQ(actuator->dyntype, mjDYN_PID);
+  EXPECT_EQ(actuator->gainprm[0], 0.5);
+  EXPECT_EQ(actuator->dynprm[0], 2.0);
+  EXPECT_EQ(actuator->biasprm[2], 1.0);
+  EXPECT_EQ(actuator->ctrlspec, mjINPUT_POS);
+
+  // kv and dampratio are mutually exclusive
+  err = mjs_setToPID(actuator, 5.0, &kv, &dampratio, nullptr, nullptr, nullptr,
+                     0, 0);
+  EXPECT_STREQ(err, "kv and dampratio cannot both be defined");
 
   mj_deleteSpec(spec);
 }
@@ -1282,6 +1347,20 @@ TEST_F(MujocoTest, AttachSpatialTendonWithoutSidesite) {
   EXPECT_THAT(
       mjs_findElement(parent, mjOBJ_TENDON, "tendon_without_sidesite_child"),
       NotNull());
+
+  mjsTendon* tendon = mjs_asTendon(
+      mjs_findElement(parent, mjOBJ_TENDON, "tendon_with_sidesite_child"));
+  ASSERT_THAT(tendon, NotNull());
+  ASSERT_EQ(mjs_getWrapNum(tendon), 3);
+
+  EXPECT_EQ(mjs_getWrapTarget(mjs_getWrap(tendon, 0)),
+            mjs_findElement(parent, mjOBJ_SITE, "site_A_child"));
+  EXPECT_EQ(mjs_getWrapTarget(mjs_getWrap(tendon, 1)),
+            mjs_findElement(parent, mjOBJ_GEOM, "wrap_geom_child"));
+  EXPECT_EQ(mjs_getWrapTarget(mjs_getWrap(tendon, 2)),
+            mjs_findElement(parent, mjOBJ_SITE, "site_B_child"));
+  EXPECT_EQ(mjs_getWrapSideSite(mjs_getWrap(tendon, 1)),
+            mjs_asSite(mjs_findElement(parent, mjOBJ_SITE, "side_site_child")));
 
   mjModel* model = mj_compile(parent, nullptr);
   ASSERT_THAT(model, NotNull()) << mjs_getError(parent);

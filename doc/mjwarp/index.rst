@@ -274,9 +274,9 @@ exceed these limits.
 
 It is expected that good values for these limits will be environment specific. In practice, selecting good values
 typically involves trial-and-error. :func:`mjwarp-testspeed <mujoco_warp.testspeed>` with the flag `--measure_alloc` for
-printing the number of contacts and constraints at each simulation step and interacting with the simulation via
-:func:`mjwarp-viewer <mujoco_warp.viewer>` and checking for overflow errors can both be useful techniques for
-iteratively testing values for these parameters.
+printing the number of contacts and constraints at each simulation step, `--overflow_behavior=error` (default) for
+detecting overflows, and programmatic inspection via :ref:`Overflow detection <mjwOverflow>` can all be useful
+techniques for iteratively testing values for these parameters.
 
 Solver iterations
 -----------------
@@ -444,10 +444,71 @@ high-performance tensor/matrix operations optimized for fixed tile sizes.
    to a tight upper bound of the expected active DOFs significantly reduces GPU memory usage and improves
    throughput.
 
+.. TODO(taylorhowell): update example with correct island cycles initialization
+
+4. When setting ``nvmax < nv`` it is recommended to initialize all trees to asleep in order to avoid initial dof
+   overflow.
+
+   .. code-block:: python
+
+      d.tree_asleep.assign(np.array(np.arange(mjm.ntree, dtype=np.int32)), dtype=np.int32)
+
 .. note::
    Consider increasing the sleep tolerance setting (e.g., ``sleep_tolerance="0.01"`` in XML options or
-   ``spec.option.sleep_tolerance = 0.01`` in Python) from its default value (0.0001) to more quickly
+   ``spec.option.sleep_tolerance = 0.01`` in Python) from its default value (0.001) to more quickly
    sleep objects.
+
+.. _mjwOverflow:
+
+Overflow detection
+------------------
+
+MJWarp relies on fixed-size buffer allocations (`nconmax`_ / `naconmax`_, `njmax`_, ``nccdmax`` / ``naccdmax``,
+``nvmax``, :attr:`Option.contact_sensor_maxmatch <mujoco_warp.Option.contact_sensor_maxmatch>`) for high-throughput GPU
+execution. When simulation demands exceed these pre-allocated limits, an overflow occurs, leading to undefined behavior.
+
+MJWarp tracks overflows per world in :attr:`Data.overflow <mujoco_warp.Data.overflow>`, a 1D Warp array of shape
+``(nworld,)`` storing bitmasks of :class:`mjw.OverflowType <mujoco_warp.OverflowType>`.
+
+:attr:`Data.overflow <mujoco_warp.Data.overflow>` is initialized to zero upon creation and cleared on
+:func:`mjw.reset_data <mujoco_warp.reset_data>`.
+
+.. rubric:: Checking for overflows programmatically
+
+.. code-block:: python
+
+   mjw.step(m, d)
+
+   # device-to-host transfer
+   overflow = d.overflow.numpy()
+
+   # check worlds for any overflow
+   any_overflow = np.any(overflow != 0)
+
+   # check for each world for (narrowphase) contact overflow
+   has_contact_overflow = (overflow & mjw.OverflowType.NARROWPHASE) != 0
+
+.. rubric:: Controlling warnings
+
+By default, :attr:`Option.warn_overflow <mujoco_warp.Option.warn_overflow>` is ``True``, causing kernels to print
+warning messages to stdout via ``wp.printf`` when an overflow occurs. Setting ``m.opt.warn_overflow = False`` suppresses
+these GPU-side warning prints while still recording the overflow bitmasks in :attr:`Data.overflow <mujoco_warp.Data.overflow>`.
+
+In `testspeed`_, the command-line flag ``--overflow_behavior=error`` (default) automatically checks
+:attr:`Data.overflow <mujoco_warp.Data.overflow>` and aborts with a diagnostic error if any world overflows, while
+``--overflow_behavior=continue`` allows execution to proceed with warnings enabled.
+
+.. rubric:: Performance implications
+
+- **Device printf overhead**: Printing warnings from GPU kernels (``m.opt.warn_overflow = True``) serializes execution
+  across threads, introduces CUDA device synchronizations, and can severely degrade simulation throughput when many
+  parallel worlds overflow. Disabling warnings (``m.opt.warn_overflow = False``) eliminates this GPU I/O overhead.
+- **Host-device synchronization**: Reading :attr:`Data.overflow <mujoco_warp.Data.overflow>` on CPU via ``d.overflow.numpy()``
+  requires a device-to-host memory copy and pipeline synchronization. In high-throughput reinforcement learning
+  pipelines, avoid synchronizing on every simulation step; instead, check :attr:`Data.overflow <mujoco_warp.Data.overflow>`
+  periodically (e.g., at environment reset or rollout boundaries) or inspect the tensor directly on device.
+- **Simulation fidelity**: If warnings are disabled and :attr:`Data.overflow <mujoco_warp.Data.overflow>` is not checked,
+  overflows will lead to undefined behavior.
 
 .. _mjwBatch:
 
@@ -501,19 +562,22 @@ Certain fields are safe to modify directly without compilation, enabling on-devi
 `GitHub issue 893 <https://github.com/google-deepmind/mujoco_warp/issues/893>`__ tracks adding on-device updates for a
 subset of fields.
 
-Per-world meshes
+Per-world assets
 ----------------
 
-Per-world meshes enable heterogeneous worlds where different worlds simulate different meshes. The workflow
-is:
+Per-world assets enable heterogeneous worlds where different worlds simulate different
+`assets <https://mujoco.readthedocs.io/en/latest/XMLreference.html#asset>`__ including meshes, height fields, materials,
+and textures. The general workflow is:
 
-1. Create an :ref:`mjSpec` with **all** mesh assets and the **maximum** number of geom slots needed across variants.
+1. Create an :ref:`mjSpec` with **all** assets.
 2. Compile each variant by mutating the spec and calling ``spec.compile()``.
 3. Compile a **base** model and create :class:`mjw.Model <mujoco_warp.Model>` from it.
 4. Override the relevant :class:`mjw.Model <mujoco_warp.Model>` fields with per-world arrays built from the compiled
    variants.
 
-**Example 1 — Geom-level** randomization (1 body, 1 geom, 2 mesh assets):
+.. rubric:: Per-world meshes
+
+**Example 1 — Per-world meshes: Geom-level** randomization (1 body, 1 geom, 2 mesh assets):
 
 The base scene includes all mesh assets. The geom references one mesh (``mesh_a``); a second mesh
 (``mesh_b``) is available for per-world substitution.
@@ -612,7 +676,7 @@ The base scene includes all mesh assets. The geom references one mesh (``mesh_a`
   m.body_ipos = wp.array(body_ipos, dtype=wp.vec3)
   m.body_iquat = wp.array(body_iquat, dtype=wp.quat)
 
-**Example 2 — Body-level** randomization (1 body, 1 or 2 geoms, 3 mesh assets):
+**Example 2 — Per-world meshes: Body-level** randomization (1 body, 1 or 2 geoms, 3 mesh assets):
 
 .. admonition:: Maximum geom count
    :class: important
@@ -783,6 +847,14 @@ The base scene includes all mesh assets. The geom references one mesh (``mesh_a`
    * - ``body_iquat``
      - ``wp.quat``
      - ``(nworld, nbody)``
+
+Per-world height fields, materials, and textures can be similarly formulated.
+
+.. admonition:: Per-world asset dependent field construction
+  :class: note
+
+  MJWarp enables per-world asset functionality but does not provide utilities for construction of dependent per-world
+  field variants. Construction is left to the user or environment authoring frameworks.
 
 Batch Rendering
 ===============
@@ -1044,6 +1116,11 @@ Warnings are provided when memory requirements exceed existing allocations durin
   :ref:`mjMAXCONPAIR <glNumericEngine>` and some contacts are ignored. To resolve this warning, reduce the height field
   resolution or reduce the size of the geom interacting with the height field.
 
+For programmatic inspection of these overflow conditions, check :attr:`Data.overflow <mujoco_warp.Data.overflow>`
+and :class:`mjw.OverflowType <mujoco_warp.OverflowType>`. To suppress stdout warning prints during high-throughput
+runs, set :attr:`Option.warn_overflow <mujoco_warp.Option.warn_overflow>` to ``False``. See
+:ref:`Overflow detection <mjwOverflow>` for details.
+
 Compilation
 -----------
 
@@ -1123,6 +1200,7 @@ Additional MJWarp-only options are available:
 - ``graph_conditional``: use CUDA graph conditional
 - ``run_collision_detection``: use collision detection routine
 - ``contact_sensor_maxmatch``: maximum number of contacts for contact sensor matching criteria
+- ``warn_overflow``: warn if simulation overflow is encountered
 
 .. admonition:: Fluid model
   :class: note

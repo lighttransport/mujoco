@@ -11,10 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Viewer component of Studio."""
+"""Python implementation of the default Studio Viewer application UI.
+
+The class can be used as a plugin to run the full Studio Viewer application in
+Python.
+
+Architecture:
+  ViewerApp provides the full default UI/UX as a viewer-side plugin. This class
+  is viewer-agnostic and as such does not own camera, vis_options, or perturb
+  objects (these are provided by the viewer).
+
+  Viewer classes (NativeViewer and WebViewer) own the renderer, camera,
+  vis_options, and local deep-copied model/data used for rendering. The sim side
+  owns the physical simulation and pushes state snapshots to the viewer via
+  ViewerHandle.sync().
+"""
 
 import copy
 import dataclasses
+
 import mujoco
 from mujoco.experimental.studio import messages
 from mujoco.experimental.studio import parser
@@ -25,14 +40,15 @@ from mujoco.experimental.studio import viewer_protocol
 from mujoco.experimental.studio import viewer_utils
 
 from mujoco.experimental.dear_imgui import dear_imgui as imgui
+import numpy as np
 
 
 @dataclasses.dataclass(frozen=True)
 class ViewerAppInitEvent(messages.Event):
   """Lifecycle event dispatched once when the ViewerApp is initialised.
 
-  Handlers that need access to the ViewerApp should handle this event
-  and cache the reference.
+  Plugins that need access to the ViewerApp should handle this event and cache
+  the reference.
   """
 
   viewer_app: 'ViewerApp'
@@ -77,20 +93,64 @@ class ViewerApp:
   def __init__(self) -> None:
     self._viewer: viewer_protocol.Viewer | None = None
     self.theme = ux.GuiTheme.LIGHT
-    self.show_stats = False
+    self.show_info = False
     self.show_solver = False
     self.status = 'Ready'
+    self.sim_history = sim.SimHistory()
     self._reset_app_state()
 
   @messages.handler(priority=messages.Priority.CRITICAL)
   def _on_viewer_init(self, event: viewer_protocol.ViewerInitEvent) -> None:
     self.viewer = event.viewer
+    self._setup_history()
     self.viewer.dispatch(ViewerAppInitEvent(viewer_app=self))
 
   def _reset_app_state(self) -> None:
     """Resets ViewerApp-specific state (step control, ux)."""
     self.step_control_state = sim.StepControl()
     self.ux_state = ux.UxState()
+    self._setup_history()
+
+  def _setup_history(self) -> None:
+    """(Re)initialize simulation history recording for the current model."""
+    if (
+        self._viewer is not None
+        and self.model is not None
+        and self.data is not None
+    ):
+      ux.setup_history(
+          self.step_control_state,
+          self.sim_history,
+          self.ux_state,
+          self.model,
+          self.data,
+      )
+
+  def align_camera(self) -> None:
+    """Recenter the camera on the model's home camera, else the free camera."""
+    cam_id = self.model.vis.global_.cameraid
+    if 0 <= cam_id < self.model.ncam:
+      self.ux_state.camera_index = ux.set_camera(
+          self.model, self.viewer.camera, cam_id
+      )
+    else:
+      mujoco.mjv_defaultFreeCamera(self.model, self.viewer.camera)
+
+  def reload_model(self) -> None:
+    """Reload the current model from its file."""
+    if self.model_path:
+      try:
+        data = parser.parse(self.model_path)
+        if data is not None:
+          self.viewer.send_to_sim(
+              messages.ModelEvent(model=data.model, path=self.model_path)
+          )
+          self.viewer.dispatch(
+              messages.ModelEvent(model=data.model, path=self.model_path)
+          )
+          self.viewer.get_sim_snapshots()
+      except Exception as ex:  # pylint: disable=broad-except
+        print(f'Error reloading model from {self.model_path!r}: {ex}')
 
   def close(self) -> None:
     self.viewer.close()
@@ -155,6 +215,7 @@ class ViewerApp:
     """Reset the physics."""
     mujoco.mj_resetData(self.model, self.data)
     mujoco.mj_forward(self.model, self.data)
+    self._setup_history()
     self.viewer.send_to_sim(messages.ResetEvent())
     # Discard any pre-reset snapshots so we don't overwrite the reset state.
     self.viewer.get_sim_snapshots()
@@ -243,12 +304,12 @@ class ViewerApp:
       if imgui.BeginMenu('Charts'):
         if imgui.MenuItem('Solver', '', self.show_solver):
           self.show_solver = not self.show_solver
-        if imgui.MenuItem('Stats', '', self.show_stats):
-          self.show_stats = not self.show_stats
+        if imgui.MenuItem('Info', '', self.show_info):
+          self.show_info = not self.show_info
         imgui.EndMenu()
       if imgui.BeginMenu('Help'):
-        if imgui.MenuItem('Stats', '', self.show_stats):
-          self.show_stats = not self.show_stats
+        if imgui.MenuItem('Info', '', self.show_info):
+          self.show_info = not self.show_info
         imgui.Separator()
         version = f'Version {mujoco.mj_versionString()}'
         imgui.MenuItem(version)
@@ -297,6 +358,17 @@ class ViewerApp:
     )
 
     imgui.Begin('Options')
+    # The Simulation panel draws its own collapsible section header.
+    ux.simulation_gui(
+        self.model,
+        self.data,
+        self.step_control_state,
+        self.sim_history,
+        self.ux_state,
+        self.reset_physics,
+        self.reload_model,
+        self.align_camera,
+    )
     if imgui.TreeNodeEx('Physics Settings', node_flags):
       ux.physics_gui(self.model)
       imgui.TreePop()
@@ -325,10 +397,30 @@ class ViewerApp:
       ux.noise_gui(self.step_control_state)
       imgui.TreePop()
     if imgui.TreeNodeEx('Joints', node_flags):
+      # The GUI edits the viewer's local data.qpos; forward any change to the
+      # sim, else the next incoming StateSnapshot reverts it.
+      qpos_before = self.data.qpos.copy()
       ux.joints_gui(self.model, self.data, self.viewer.vis_options)
+      if not np.array_equal(qpos_before, self.data.qpos):
+        viewer_utils.send_state(
+            self.viewer,
+            self.model,
+            self.data,
+            int(mujoco.mjtState.mjSTATE_QPOS),
+        )
       imgui.TreePop()
     if imgui.TreeNodeEx('Controls', node_flags):
+      # The GUI edits the viewer's local data.ctrl; forward any change to the
+      # sim, else the next incoming StateSnapshot reverts it.
+      ctrl_before = self.data.ctrl.copy()
       ux.controls_gui(self.model, self.data, self.viewer.vis_options)
+      if not np.array_equal(ctrl_before, self.data.ctrl):
+        viewer_utils.send_state(
+            self.viewer,
+            self.model,
+            self.data,
+            int(mujoco.mjtState.mjSTATE_CTRL),
+        )
       imgui.TreePop()
     if imgui.TreeNodeEx(
         'Sensors', node_flags | int(imgui.TreeNodeFlags.DefaultOpen)
@@ -350,12 +442,12 @@ class ViewerApp:
       ux.convergence_gui(self.model, self.data)
       imgui.End()
 
-    if self.show_stats:
-      _, self.show_stats = imgui.Begin('Stats', self.show_stats)
+    if self.show_info:
+      _, self.show_info = imgui.Begin('Info', self.show_info)
       paused = (
           self.step_control_state.get_pause_state() != sim.PauseState.UNPAUSED
       )
-      ux.stats_gui(self.model, self.data, paused, 0.0)
+      ux.info_gui(self.model, self.data, paused, 0.0)
       imgui.End()
 
     # -- Status bar -----------------------------------------------------------

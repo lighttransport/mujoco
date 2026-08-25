@@ -2024,7 +2024,7 @@ TEST_F(XMLReaderTest, CameraInvalidFovyAndSensorsize) {
   std::array<char, 1024> error;
   MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
   EXPECT_THAT(m.get(), IsNull());
-  EXPECT_THAT(error.data(), HasSubstr("either 'fovy' or 'sensorsize'"));
+  EXPECT_THAT(error.data(), HasSubstr("at most one of 'fovy', 'sensorsize'"));
   EXPECT_THAT(error.data(), HasSubstr("line 6"));
 }
 
@@ -2081,8 +2081,8 @@ TEST_F(XMLReaderTest, InvalidInertialOrientation) {
   ASSERT_THAT(model.get(), IsNull());
   EXPECT_THAT(
       error.data(),
-      HasSubstr(
-          "fullinertia and inertial orientation cannot both be specified"));
+      HasSubstr("at most one of 'fullinertia', 'quat', 'axisangle', "
+                "'xyaxes', 'zaxis', 'euler' can be specified"));
 }
 
 TEST_F(XMLReaderTest, ReadShellParameter) {
@@ -2137,7 +2137,7 @@ TEST_F(XMLReaderTest, BuiltinAndFile) {
   MjModelPtr model = LoadModelFromString(xml, error.data(), error.size());
   ASSERT_THAT(model.get(), IsNull());
   EXPECT_THAT(error.data(),
-              HasSubstr("builtin mesh cannot be used with user vertex data"));
+              HasSubstr("at most one of 'builtin', 'vertex' can be specified"));
 }
 
 TEST_F(XMLReaderTest, MakePlateNoParameters) {
@@ -2422,7 +2422,9 @@ TEST_F(RelativeFrameSensorParsingTest, RefNameButNoType) {
   )";
   std::array<char, 1024> error;
   LoadModelFromString(xml, error.data(), error.size());
-  EXPECT_THAT(error.data(), HasSubstr("but reftype is missing"));
+  EXPECT_THAT(
+      error.data(),
+      HasSubstr("attributes 'reftype', 'refname' must be specified together"));
   EXPECT_THAT(error.data(), HasSubstr("line 8"));
 }
 
@@ -2440,7 +2442,9 @@ TEST_F(RelativeFrameSensorParsingTest, RefTypeButNoName) {
   )";
   std::array<char, 1024> error;
   LoadModelFromString(xml, error.data(), error.size());
-  EXPECT_THAT(error.data(), HasSubstr("attribute missing: 'refname'"));
+  EXPECT_THAT(
+      error.data(),
+      HasSubstr("attributes 'reftype', 'refname' must be specified together"));
   EXPECT_THAT(error.data(), HasSubstr("line 8"));
 }
 
@@ -2859,7 +2863,7 @@ TEST_F(ActuatorParseTest, IntvelocityCheckDefaultsIfNotSpecified) {
   EXPECT_DOUBLE_EQ(model->actuator_biasprm[2], 0.0);
 }
 
-TEST_F(ActuatorParseTest, IntvelocityNoActrangeThrowsError) {
+TEST_F(ActuatorParseTest, IntvelocityNoActrangeIsValid) {
   static constexpr char xml[] = R"(
   <mujoco>
     <worldbody>
@@ -2875,9 +2879,9 @@ TEST_F(ActuatorParseTest, IntvelocityNoActrangeThrowsError) {
   )";
   std::array<char, 1024> error;
   MjModelPtr model = LoadModelFromString(xml, error.data(), error.size());
-  ASSERT_THAT(model.get(), IsNull());
-  EXPECT_THAT(error.data(), HasSubstr("invalid actrange for actuator"));
-  EXPECT_THAT(error.data(), HasSubstr("line 10"));
+  ASSERT_THAT(model.get(), NotNull()) << error.data();
+  // actlimited resolves to false when no actrange is provided
+  EXPECT_EQ(model->actuator_actlimited[0], 0);
 }
 
 TEST_F(ActuatorParseTest, IntvelocityDefaultsPropagate) {
@@ -3145,7 +3149,7 @@ TEST_F(ActuatorParseTest, DCMotorInheritedDefaults) {
   <mujoco>
     <default>
       <dcmotor motorconst="1.0" resistance="1.0" controller="2.0 0.5 0.1 10.0 5.0 12.0"
-      saturation="0 0 0" inductance="0 0.01" input="velocity"/>
+      saturation="0 0 0" inductance="0 0.01" input="pos vel"/>
     </default>
     <worldbody>
       <body>
@@ -3178,8 +3182,9 @@ TEST_F(ActuatorParseTest, DCMotorInheritedDefaults) {
   // check Vmax in gainprm[7]
   EXPECT_MJTNUM_EQ(model->actuator_gainprm[7], 12.0);
 
-  // check input mode in gainprm[8]
-  EXPECT_MJTNUM_EQ(model->actuator_gainprm[8], 2.0);
+  // check setpoint input block (gainprm[8] is retired)
+  EXPECT_MJTNUM_EQ(model->actuator_gainprm[8], 0.0);
+  EXPECT_EQ(model->actuator_ctrlnum[0], 2);
 
   // check inductance (te) in dynprm[0]
   EXPECT_MJTNUM_EQ(model->actuator_dynprm[0], 0.01);
@@ -3195,7 +3200,7 @@ TEST_F(ActuatorParseTest, DCMotorControllerFull) {
       </body>
     </worldbody>
     <actuator>
-      <dcmotor joint="jnt" motorconst="0.05" resistance="2.0"
+      <dcmotor joint="jnt" motorconst="0.05" resistance="2.0" input="pos vel"
                controller="1.0 2.0 3.0 4.0 5.0 6.0"/>
     </actuator>
   </mujoco>
@@ -3563,7 +3568,9 @@ TEST_F(SensorParseTest, UserObjTypeNoName) {
   std::array<char, 1024> error;
   MjModelPtr model = LoadModelFromString(xml, error.data(), error.size());
   ASSERT_THAT(model.get(), IsNull());
-  EXPECT_THAT(error.data(), HasSubstr("objtype 'site' given but"));
+  EXPECT_THAT(
+      error.data(),
+      HasSubstr("attributes 'objtype', 'objname' must be specified together"));
   EXPECT_THAT(error.data(), HasSubstr("line 4"));
 }
 
@@ -3578,7 +3585,9 @@ TEST_F(SensorParseTest, UserObjNameNoType) {
   std::array<char, 1024> error;
   MjModelPtr model = LoadModelFromString(xml, error.data(), error.size());
   ASSERT_THAT(model.get(), IsNull());
-  EXPECT_THAT(error.data(), HasSubstr("objname 'kevin' given but"));
+  EXPECT_THAT(
+      error.data(),
+      HasSubstr("attributes 'objtype', 'objname' must be specified together"));
   EXPECT_THAT(error.data(), HasSubstr("line 4"));
 }
 

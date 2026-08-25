@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <mujoco/experimental/platform/hal/renderer.h>
+#include <mujoco/experimental/platform/hal/filament_renderer.h>
 
 #include <cstddef>
 #include <memory>
@@ -32,7 +32,7 @@ namespace mujoco::python {
 
 class Renderer {
  public:
-  using RendererImpl = mujoco::platform::Renderer;
+  using RendererImpl = mujoco::platform::FilamentRenderer;
   using GraphicsMode = mujoco::platform::GraphicsMode;
 
   Renderer(const std::string& graphics_mode_str) {
@@ -55,10 +55,11 @@ class Renderer {
     std::vector<std::byte> pixels(width * height * 3);
     {
       py::gil_scoped_release no_gil;
-      impl_->Render(
-          model.get(), data.get(), perturb ? perturb.value().get() : nullptr,
-          camera ? camera.value().get() : nullptr,
-          vis_option ? vis_option.value().get() : nullptr, width, height, pixels);
+      impl_->Render(model.get(), data.get(),
+                    perturb ? perturb.value().get() : nullptr,
+                    camera ? camera.value().get() : nullptr,
+                    vis_option ? vis_option.value().get() : nullptr, width,
+                    height, pixels);
     }
     return pybind11::bytes((const char*)pixels.data(), pixels.size());
   }

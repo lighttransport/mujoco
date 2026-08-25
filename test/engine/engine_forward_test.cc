@@ -16,7 +16,6 @@
 
 #include "src/engine/engine_forward.h"
 
-#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -69,6 +68,7 @@ using ::testing::Pointwise;
 using ::testing::_;
 using ::testing::Gt;
 using ::testing::HasSubstr;
+using ::testing::IsNull;
 using ::testing::Ne;
 using ::testing::NotNull;
 
@@ -464,128 +464,32 @@ TEST_F(ImplicitIntegratorTest, EnergyConservation) {
   mj_deleteModel(model);
 }
 
-// Energy and angmom conservation for free body with implicitfast (IMR)
-TEST_F(ImplicitIntegratorTest, ConservationMidpoint) {
-  // aligned: CoM at joint origin
+// free-body local solve: implicitfast matches implicit exactly for a standalone
+// free body
+TEST_F(ImplicitIntegratorTest, FreeBodyMatchesImplicit) {
+  // damped free body in vacuum
   static constexpr char xml1[] = R"(
   <mujoco>
-    <option integrator="implicitfast" timestep="0.01">
-      <flag energy="enable" gravity="disable"/>
-    </option>
+    <option timestep="0.005"/>
     <worldbody>
-      <body>
-        <freejoint/>
-        <geom type="box" size=".1 .2 .3" mass="1" euler="10 20 30"/>
+      <body pos="0.1 -0.2 0.5" euler="20 -30 40">
+        <joint type="free" damping="0.1"/>
+        <geom type="box" size=".1 .2 .3" mass="2" pos=".04 -.02 .03" euler="10 20 30"/>
       </body>
     </worldbody>
   </mujoco>
   )";
 
-  // auto-aligned: CoM at joint origin
+  // free body in fluid with wind, ellipsoid fluid model (asymmetric lift
+  // derivatives)
   static constexpr char xml2[] = R"(
   <mujoco>
-    <option integrator="implicitfast" timestep="0.01">
-      <flag energy="enable" gravity="disable"/>
-    </option>
+    <option timestep="0.005" density="1.2" viscosity="0.002" wind="1 2 3"/>
     <worldbody>
-      <body>
-        <freejoint align="true"/>
-        <geom type="box" size=".1 .2 .3" mass="1" euler="10 20 30" pos=".03 .02 .01"/>
-      </body>
-    </worldbody>
-  </mujoco>
-  )";
-
-  // non-aligned: CoM offset from joint origin
-  static constexpr char xml3[] = R"(
-  <mujoco>
-    <option integrator="implicitfast" timestep="0.01">
-      <flag energy="enable" gravity="disable"/>
-    </option>
-    <worldbody>
-      <body>
-        <freejoint/>
-        <geom type="box" size=".1 .2 .3" mass="1" euler="10 20 30" pos=".03 .02 .01"/>
-      </body>
-    </worldbody>
-  </mujoco>
-  )";
-  int xml_idx = 1;
-  for (auto xml : {xml1, xml2, xml3}) {
-    SCOPED_TRACE(testing::Message() << "XML case " << xml_idx++);
-    char error[1024];
-    MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
-    ASSERT_THAT(model.get(), NotNull()) << error;
-    MjDataPtr data = MakeData(model);
-
-    const int nstep = 500;
-    mjtNum energy_drift[2], angmom_drift[2];  // [0]=midpoint, [1]=rk4
-
-    for (int integrator : {mjINT_IMPLICITFAST, mjINT_RK4}) {
-      int idx = (integrator == mjINT_IMPLICITFAST) ? 0 : 1;
-      model->opt.integrator = integrator;
-
-      // reset
-      mj_resetData(model.get(), data.get());
-      data->qvel[3] = 1.0;
-      data->qvel[4] = 2.0;
-      data->qvel[5] = 3.0;
-      mj_forward(model.get(), data.get());
-      mjtNum initial_energy = data->energy[1];
-      mjtNum initial_angmom[3];
-      mj_subtreeVel(model.get(), data.get());
-      mju_copy3(initial_angmom, data->subtree_angmom);
-
-      for (int i = 0; i < nstep; i++) {
-        mj_step(model.get(), data.get());
-      }
-
-      energy_drift[idx] = fabs(data->energy[1] - initial_energy);
-      mj_subtreeVel(model.get(), data.get());
-      mjtNum angmom_err[3];
-      mju_sub3(angmom_err, data->subtree_angmom, initial_angmom);
-      angmom_drift[idx] = mju_norm3(angmom_err);
-    }
-
-    // midpoint should conserve energy better than RK4 (double only)
-#ifndef mjUSESINGLE
-    EXPECT_LT(energy_drift[0], energy_drift[1]);
-#endif
-
-    // both should conserve angular momentum well
-    EXPECT_LT(angmom_drift[0], MjTol(1e-3, 1e-2));
-    EXPECT_LT(angmom_drift[1], MjTol(1e-3, 1e-2));
-  }
-}
-
-// verify second-order convergence of midpoint integration
-TEST_F(ImplicitIntegratorTest, MidpointConvergenceOrder) {
-  // aligned: CoM at joint origin
-  static constexpr char xml1[] = R"(
-  <mujoco>
-    <option integrator="implicitfast">
-      <flag gravity="disable"/>
-    </option>
-    <worldbody>
-      <body>
-        <freejoint/>
-        <geom type="box" size=".1 .2 .3" mass="1" euler="10 20 30"/>
-      </body>
-    </worldbody>
-  </mujoco>
-  )";
-
-  // non-aligned: CoM offset from joint origin
-  static constexpr char xml2[] = R"(
-  <mujoco>
-    <option integrator="implicitfast">
-      <flag gravity="disable"/>
-    </option>
-    <worldbody>
-      <body>
-        <freejoint/>
-        <geom type="box" size=".1 .2 .3" mass="1" euler="10 20 30"
-              pos=".05 .03 .02"/>
+      <body pos="0.1 -0.2 0.5" euler="20 -30 40">
+        <joint type="free"/>
+        <geom type="ellipsoid" size=".1 .2 .3" mass="2" pos=".04 -.02 .03"
+              fluidshape="ellipsoid"/>
       </body>
     </worldbody>
   </mujoco>
@@ -597,302 +501,282 @@ TEST_F(ImplicitIntegratorTest, MidpointConvergenceOrder) {
     char error[1024];
     MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
     ASSERT_THAT(model.get(), NotNull()) << error;
+    MjDataPtr d1 = MakeData(model);
+    MjDataPtr d2 = MakeData(model);
+    mjModel* m = model.get();
 
-    mjtNum T = 1.0;
-    mjtNum h_coarse = 0.02;
-    mjtNum quat_coarse[4], quat_fine[4], quat_ref[4];
+    // tumbling initial velocity
+    mj_resetData(m, d1.get());
+    d1->qvel[3] = 5;
+    d1->qvel[4] = -3;
+    d1->qvel[5] = 2;
 
-    auto run = [&](mjtNum h, mjtNum quat_out[4]) {
-      model->opt.timestep = h;
-      MjDataPtr data = MakeData(model);
+    // step both integrators from identical states, re-synchronizing each step
+    // to avoid chaotic divergence of tumbling trajectories
+    int nstate = mj_stateSize(m, mjSTATE_INTEGRATION);
+    std::vector<mjtNum> state(nstate);
+    for (int i = 0; i < 50; i++) {
+      mj_getState(m, d1.get(), state.data(), mjSTATE_INTEGRATION);
+      mj_setState(m, d2.get(), state.data(), mjSTATE_INTEGRATION);
 
-      data->qvel[3] = 1.0;
-      data->qvel[4] = 2.0;
-      data->qvel[5] = 3.0;
+      m->opt.integrator = mjINT_IMPLICITFAST;
+      mj_step(m, d1.get());
+      m->opt.integrator = mjINT_IMPLICIT;
+      mj_step(m, d2.get());
 
-      int nstep = (int)(T / h + 0.5);
-      for (int i = 0; i < nstep; i++) {
-        mj_step(model.get(), data.get());
-      }
-
-      mju_copy4(quat_out, data->qpos + 3);
-    };
-
-    run(h_coarse, quat_coarse);
-    run(h_coarse / 2, quat_fine);
-    run(h_coarse / 16, quat_ref);
-
-    // quaternion distance: ||quat - quat_ref|| (handles sign ambiguity)
-    auto quat_dist = [](const mjtNum a[4], const mjtNum b[4]) -> mjtNum {
-      mjtNum pos = 0, neg = 0;
-      for (int i = 0; i < 4; i++) {
-        pos += (a[i] - b[i]) * (a[i] - b[i]);
-        neg += (a[i] + b[i]) * (a[i] + b[i]);
-      }
-      return mju_sqrt(mju_min(pos, neg));
-    };
-
-    mjtNum err_coarse = quat_dist(quat_coarse, quat_ref);
-    mjtNum err_fine = quat_dist(quat_fine, quat_ref);
-
-    // second-order: error ratio should be ~4 when halving timestep
-    mjtNum ratio = err_coarse / err_fine;
-    EXPECT_GT(ratio, 3.5);
-    EXPECT_LT(ratio, 4.5);
-  }
-}
-
-// verify that Newton iteration in mj_midpoint converges quickly (aligned case)
-TEST_F(ImplicitIntegratorTest, MidpointNewtonConvergence) {
-  // inertia ratios: symmetric, mildly asymmetric, extremely asymmetric
-  mjtNum inertias[][3] = {
-      {1.0, 1.0, 1.0},
-      {1.0, 2.0, 3.0},
-      {0.01, 1.0, 100.0},
-      {1.0, 1.0, 1000.0},
-  };
-
-  mjtNum timesteps[] = {0.001, 0.01, 0.1};
-
-  mjtNum velocities[][3] = {
-      {1.0, 2.0, 3.0},
-      {100.0, 0.0, 0.0},
-      {10.0, 10.0, 10.0},
-      {0.01, 0.01, 100.0},
-  };
-
-  mjtNum q_identity[4] = {1, 0, 0, 0};
-  mjtNum torques[][3] = {
-      {0, 0, 0},
-      {10.0, 20.0, 30.0},
-      {100.0, 0.0, 0.0},
-      {0.0, 0.0, 100.0},
-  };
-
-  int max_iter = 0;
-  int total_iter = 0;
-  int ncases = 0;
-
-  for (auto& I : inertias) {
-    for (mjtNum h : timesteps) {
-      for (auto& w : velocities) {
-        for (auto& tau : torques) {
-          mjtNum vel[6] = {0, 0, 0, w[0], w[1], w[2]};
-          mjtNum tau_ext[6] = {0, 0, 0, tau[0], tau[1], tau[2]};
-          mjtNum v_new[6];
-          mjtNum ipos[3] = {0, 0, 0};
-          int niter = mj_midpoint(1.0, I, ipos, q_identity, q_identity, vel,
-                                  tau_ext, NULL, h, v_new);
-          EXPECT_LT(niter, 10)
-              << "Failed for I=(" << I[0] << "," << I[1] << "," << I[2] << ")"
-              << " h=" << h << " w=(" << w[0] << "," << w[1] << "," << w[2]
-              << ")"
-              << " tau=(" << tau[0] << "," << tau[1] << "," << tau[2] << ")";
-          max_iter = std::max(max_iter, niter);
-          total_iter += niter;
-          ncases++;
-        }
+      for (int k = 0; k < m->nv; k++) {
+        EXPECT_NEAR(d1->qvel[k], d2->qvel[k], MjTol(1e-14, 1e-6))
+            << "step " << i << " dof " << k;
       }
     }
   }
-
-  EXPECT_LE(max_iter, 4);
-  EXPECT_LT((mjtNum)total_iter / ncases, 2.0);
 }
 
-// verify that Newton iteration in mj_midpoint converges quickly (non-aligned)
-TEST_F(ImplicitIntegratorTest, MidpointFullNewtonConvergence) {
-  mjtNum masses[] = {0.1, 1.0, 10.0};
-
-  mjtNum inertias[][3] = {
-      {1.0, 1.0, 1.0},
-      {1.0, 2.0, 3.0},
-      {0.01, 1.0, 100.0},
-  };
-
-  mjtNum offsets[][3] = {
-      {0.1, 0.0, 0.0},
-      {0.05, 0.03, 0.02},
-      {0.0, 0.0, 0.5},
-  };
-
-  mjtNum timesteps[] = {0.001, 0.01, 0.1};
-
-  mjtNum velocities[][6] = {
-      {1.0, 0.0, 0.0, 1.0, 2.0, 3.0},
-      {0.0, 0.0, 0.0, 10.0, 10.0, 10.0},
-      {5.0, 5.0, 5.0, 0.01, 0.01, 100.0},
-  };
-
-  mjtNum q_identity[4] = {1, 0, 0, 0};
-  mjtNum forces[][6] = {
-      {0, 0, 0, 0, 0, 0},
-      {10.0, 20.0, 30.0, 1.0, 2.0, 3.0},
-  };
-
-  int max_iter = 0;
-  int total_iter = 0;
-  int ncases = 0;
-
-  for (mjtNum mass : masses) {
-    for (auto& I : inertias) {
-      for (auto& r : offsets) {
-        for (mjtNum h : timesteps) {
-          for (auto& vel : velocities) {
-            for (auto& frc : forces) {
-              mjtNum v_new[6];
-              int niter = mj_midpoint(mass, I, r, q_identity, q_identity, vel,
-                                      frc, NULL, h, v_new);
-              EXPECT_LT(niter, 10)
-                  << "Failed for mass=" << mass << " I=(" << I[0] << "," << I[1]
-                  << "," << I[2] << ")"
-                  << " r=(" << r[0] << "," << r[1] << "," << r[2] << ")"
-                  << " h=" << h;
-              max_iter = std::max(max_iter, niter);
-              total_iter += niter;
-              ncases++;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  EXPECT_LE(max_iter, 6);
-  EXPECT_LT((mjtNum)total_iter / ncases, 3.0);
-}
-
-// verify midpoint eligibility: compare with/without invdiscrete
-//   if trajectories differ, midpoint was applied
-//   if trajectories match, midpoint was skipped
-TEST_F(ImplicitIntegratorTest, MidpointEligibility) {
-  // free body with asymmetric inertia, optionally near a plane
+// free-body local solve: spinning free bodies do not gain energy in vacuum
+TEST_F(ImplicitIntegratorTest, FreeBodyGyroStable) {
   static constexpr char xml[] = R"(
   <mujoco>
-    <option integrator="implicitfast" timestep="0.01">
-      <flag energy="enable"/>
+    <option integrator="implicitfast" timestep="0.005">
+      <flag energy="enable" gravity="disable"/>
     </option>
     <worldbody>
-      <geom type="plane" size="5 5 0.1"/>
-      <body name="free" pos="0 0 2">
+      <body>
         <freejoint/>
-        <geom type="ellipsoid" size="0.3 0.2 0.1" mass="1"/>
+        <geom type="box" size=".1 .2 .3" mass="1"/>
       </body>
     </worldbody>
   </mujoco>
   )";
 
   char error[1024];
-  MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
-  ASSERT_THAT(m.get(), NotNull()) << error;
-  MjDataPtr d1 = MakeData(m);
-  MjDataPtr d2 = MakeData(m);
-  int nsteps = 50;
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
 
-  auto spin_and_compare = [&](const char* label, bool expect_midpoint) {
-    mj_resetData(m.get(), d1.get());
-    mj_resetData(m.get(), d2.get());
-    d1->qvel[3] = d2->qvel[3] = 5;
-    d1->qvel[4] = d2->qvel[4] = 3;
-    d1->qvel[5] = d2->qvel[5] = 1;
+  // middle-axis tumble and fast principal-axis spin
+  static constexpr mjtNum qvel0[2][3] = {{0.05, 5, 0.05}, {20, 0.05, 0.05}};
 
-    // d1: midpoint enabled (default)
-    m->opt.enableflags &= ~mjENBL_INVDISCRETE;
-    for (int i = 0; i < nsteps; i++) mj_step(m.get(), d1.get());
+  for (int c = 0; c < 2; c++) {
+    SCOPED_TRACE(testing::Message() << "velocity case " << c);
+    mj_resetData(m, d);
+    mju_copy3(d->qvel + 3, qvel0[c]);
+    mj_forward(m, d);
+    mjtNum initial_energy = d->energy[1];
 
-    // d2: midpoint disabled
-    m->opt.enableflags |= mjENBL_INVDISCRETE;
-    mj_resetData(m.get(), d2.get());
-    d2->qvel[3] = 5;
-    d2->qvel[4] = 3;
-    d2->qvel[5] = 1;
-    for (int i = 0; i < nsteps; i++) mj_step(m.get(), d2.get());
-    m->opt.enableflags &= ~mjENBL_INVDISCRETE;
-
-    // compare angular velocities
-    mjtNum diff = 0;
-    for (int k = 3; k < 6; k++) {
-      mjtNum d = d1->qvel[k] - d2->qvel[k];
-      diff += d * d;
+    // 100 simulated seconds
+    for (int i = 0; i < 20000; i++) {
+      mj_step(m, d);
+      ASSERT_LT(d->energy[1], 1.01 * initial_energy)
+          << "energy gain at step " << i;
     }
-    if (expect_midpoint) {
-      EXPECT_GT(diff, 1e-6) << label << ": expected midpoint to be applied";
-    } else {
-      EXPECT_LT(diff, 1e-20) << label << ": expected midpoint to be skipped";
-    }
-  };
-
-  // case 1: free body in vacuum, implicitfast -> midpoint applied
-  m->opt.integrator = mjINT_IMPLICITFAST;
-  m->opt.density = 0;
-  m->opt.viscosity = 0;
-  spin_and_compare("vacuum+implicitfast", true);
-
-  // case 2: implicit integrator -> midpoint NOT applied
-  m->opt.integrator = mjINT_IMPLICIT;
-  spin_and_compare("vacuum+implicit", false);
-
-  // case 3: fluid (nonzero density) -> midpoint NOT applied
-  m->opt.integrator = mjINT_IMPLICITFAST;
-  m->opt.density = 1.2;
-  spin_and_compare("fluid+implicitfast", false);
-  m->opt.density = 0;
-
-  // case 4: fluid (nonzero viscosity) -> midpoint NOT applied
-  m->opt.viscosity = 0.001;
-  spin_and_compare("viscosity+implicitfast", false);
-  m->opt.viscosity = 0;
-
-  // case 5: body with active contacts -> midpoint NOT applied
-  // test both island-enabled and island-disabled branches
-  for (int disable_island = 0; disable_island < 2; disable_island++) {
-    m->opt.integrator = mjINT_IMPLICITFAST;
-    if (disable_island) {
-      m->opt.disableflags |= mjDSBL_ISLAND;
-    } else {
-      m->opt.disableflags &= ~mjDSBL_ISLAND;
-    }
-
-    mj_resetData(m.get(), d1.get());
-    mj_resetData(m.get(), d2.get());
-    d1->qpos[2] = d2->qpos[2] = 0.05;
-    d1->qvel[3] = d2->qvel[3] = 5;
-    d1->qvel[4] = d2->qvel[4] = 3;
-    d1->qvel[5] = d2->qvel[5] = 1;
-
-    // verify contacts are active
-    mj_forward(m.get(), d1.get());
-    ASSERT_GT(d1->ncon, 0) << "body should be in contact with the plane";
-
-    // single step with midpoint enabled
-    mj_resetData(m.get(), d1.get());
-    d1->qpos[2] = 0.05;
-    d1->qvel[3] = 5;
-    d1->qvel[4] = 3;
-    d1->qvel[5] = 1;
-    m->opt.enableflags &= ~mjENBL_INVDISCRETE;
-    mj_step(m.get(), d1.get());
-
-    // single step with midpoint disabled
-    mj_resetData(m.get(), d2.get());
-    d2->qpos[2] = 0.05;
-    d2->qvel[3] = 5;
-    d2->qvel[4] = 3;
-    d2->qvel[5] = 1;
-    m->opt.enableflags |= mjENBL_INVDISCRETE;
-    mj_step(m.get(), d2.get());
-    m->opt.enableflags &= ~mjENBL_INVDISCRETE;
-
-    mjtNum diff = 0;
-    for (int k = 0; k < m->nv; k++) {
-      mjtNum d = d1->qvel[k] - d2->qvel[k];
-      diff += d * d;
-    }
-    EXPECT_LT(diff, 1e-20) << "contact (island "
-                           << (disable_island ? "disabled" : "enabled")
-                           << "): expected midpoint to be skipped";
   }
-  m->opt.disableflags &= ~mjDSBL_ISLAND;
+}
+
+// free-body local solve: applies to bodies in contact
+TEST_F(ImplicitIntegratorTest, FreeBodyGyroStableContact) {
+  // spinning ellipsoid on an inclined plane, as in gyroscopic.xml
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option integrator="implicitfast" timestep="0.002"/>
+    <worldbody>
+      <geom type="plane" size="5 5 .1" euler="0 15 0"/>
+      <body pos="0 0 .2">
+        <freejoint/>
+        <geom type="ellipsoid" size=".05 .1 .15" mass="1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+
+  mj_resetData(m, d);
+  d->qvel[3] = 30;
+  mjtNum initial_speed = mju_norm(d->qvel, m->nv);
+
+  int ncon_total = 0;
+  for (int i = 0; i < 5000; i++) {
+    mj_step(m, d);
+    ncon_total += d->ncon;
+    ASSERT_LT(mju_norm(d->qvel, m->nv), 2 * initial_speed)
+        << "speed gain at step " << i;
+  }
+
+  // the body was in contact while spinning
+  EXPECT_GT(ncon_total, 1000);
+}
+
+// free-body local solve: energy of a tumbling free body never increases and is
+// only mildly damped; angular momentum drift is bounded
+TEST_F(ImplicitIntegratorTest, FreeBodyConservation) {
+  // aligned: CoM at joint origin
+  static constexpr char xml1[] = R"(
+  <mujoco>
+    <option integrator="implicitfast" timestep="0.01">
+      <flag energy="enable" gravity="disable"/>
+    </option>
+    <worldbody>
+      <body>
+        <freejoint/>
+        <geom type="box" size=".1 .2 .3" mass="1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
+  // non-aligned: CoM offset from joint origin
+  static constexpr char xml2[] = R"(
+  <mujoco>
+    <option integrator="implicitfast" timestep="0.01">
+      <flag energy="enable" gravity="disable"/>
+    </option>
+    <worldbody>
+      <body>
+        <freejoint/>
+        <geom type="box" size=".1 .2 .3" mass="1" euler="10 20 30" pos=".03 .02 .01"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
+  int xml_idx = 1;
+  for (auto xml : {xml1, xml2}) {
+    SCOPED_TRACE(testing::Message() << "XML case " << xml_idx++);
+    char error[1024];
+    MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+    ASSERT_THAT(model.get(), NotNull()) << error;
+    MjDataPtr data = MakeData(model);
+    mjModel* m = model.get();
+    mjData* d = data.get();
+
+    mj_resetData(m, d);
+    d->qvel[3] = 1.0;
+    d->qvel[4] = 2.0;
+    d->qvel[5] = 3.0;
+    mj_forward(m, d);
+    mjtNum initial_energy = d->energy[1];
+    mjtNum initial_angmom[3];
+    mj_subtreeVel(m, d);
+    mju_copy3(initial_angmom, d->subtree_angmom);
+
+    for (int i = 0; i < 500; i++) {
+      mj_step(m, d);
+
+      // energy never increases (small tolerance for rounding)
+      ASSERT_LT(d->energy[1], initial_energy * (1 + MjTol(1e-9, 1e-4)))
+          << "energy gain at step " << i;
+    }
+
+    // implicit damping of tumbling is mild: measured E_end/E0 = 0.93
+    EXPECT_GT(d->energy[1], 0.7 * initial_energy);
+
+    // angular momentum drift is bounded: measured 5e-3
+    mj_subtreeVel(m, d);
+    mjtNum angmom_err[3];
+    mju_sub3(angmom_err, d->subtree_angmom, initial_angmom);
+    EXPECT_LT(mju_norm3(angmom_err), 0.05);
+  }
+}
+
+// gyroscopic instability: Euler gains energy where implicitfast does not
+TEST_F(ImplicitIntegratorTest, FreeBodyEulerGainsImplicitfastDissipates) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.01">
+      <flag energy="enable" gravity="disable"/>
+    </option>
+    <worldbody>
+      <body>
+        <freejoint/>
+        <geom type="box" size=".1 .2 .3" mass="1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mjModel* m = model.get();
+  mjData* d = data.get();
+
+  mjtNum energy_end[2];
+  for (int integrator : {mjINT_EULER, mjINT_IMPLICITFAST}) {
+    m->opt.integrator = integrator;
+    mj_resetData(m, d);
+    d->qvel[3] = 1.0;
+    d->qvel[4] = 2.0;
+    d->qvel[5] = 3.0;
+    mj_forward(m, d);
+    mjtNum initial_energy = d->energy[1];
+    for (int i = 0; i < 500; i++) {
+      mj_step(m, d);
+    }
+    energy_end[integrator == mjINT_IMPLICITFAST] =
+        d->energy[1] / initial_energy;
+  }
+
+  // Euler gains energy (measured: 1.09), implicitfast does not
+  EXPECT_GT(energy_end[0], 1.01);
+  EXPECT_LT(energy_end[1], 1.0);
+}
+
+// the invdiscrete flag has no effect on forward dynamics
+TEST_F(ImplicitIntegratorTest, InvdiscreteForwardNoop) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.005"/>
+    <worldbody>
+      <geom type="plane" size="2 2 .1"/>
+      <body pos="0 0 .3">
+        <joint type="free" damping="0.1"/>
+        <geom type="box" size=".1 .2 .3" mass="2" pos=".03 .02 .01"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr d1 = MakeData(model);
+  MjDataPtr d2 = MakeData(model);
+  mjModel* m = model.get();
+
+  for (int integrator : {mjINT_IMPLICITFAST, mjINT_IMPLICIT}) {
+    m->opt.integrator = integrator;
+
+    mj_resetData(m, d1.get());
+    d1->qvel[3] = 5;
+    d1->qvel[5] = 2;
+    mj_resetData(m, d2.get());
+    d2->qvel[3] = 5;
+    d2->qvel[5] = 2;
+
+    for (int i = 0; i < 200; i++) {
+      m->opt.enableflags &= ~mjENBL_INVDISCRETE;
+      mj_step(m, d1.get());
+      m->opt.enableflags |= mjENBL_INVDISCRETE;
+      mj_step(m, d2.get());
+    }
+    m->opt.enableflags &= ~mjENBL_INVDISCRETE;
+
+    // trajectories are bit-identical
+    for (int k = 0; k < m->nq; k++) {
+      EXPECT_EQ(d1->qpos[k], d2->qpos[k]) << "qpos " << k;
+    }
+    for (int k = 0; k < m->nv; k++) {
+      EXPECT_EQ(d1->qvel[k], d2->qvel[k]) << "qvel " << k;
+    }
+  }
 }
 
 // model with degenerate translational inertia
@@ -1570,63 +1454,58 @@ TEST_F(ActuatorTest, DampRatioTendon) {
 
 using DCMotorTest = MujocoTest;
 
-TEST_F(DCMotorTest, IntVelocityEquivalence) {
+// A stateless dcmotor with setpoint inputs matches <pid> exactly, for any
+// motor constant and resistance: the torque-space controller commands
+// kp*(qref - l) + kd*(vref - ldot) and the tau->V map compensates back-EMF.
+TEST_F(DCMotorTest, SetpointMatchesPid) {
   static constexpr char xml[] = R"(
   <mujoco>
-    <option integrator="implicit"/>
+    <option timestep="0.001" integrator="implicitfast">
+      <flag contact="disable" gravity="disable"/>
+    </option>
     <worldbody>
-      <body pos="0 0 0">
+      <body>
         <joint name="slide1" type="slide" axis="1 0 0"/>
-        <geom size=".1"/>
+        <geom size="0.1" mass="1"/>
       </body>
-      <body pos="0 1 0">
+      <body>
         <joint name="slide2" type="slide" axis="1 0 0"/>
-        <geom size=".1"/>
+        <geom size="0.1" mass="1"/>
       </body>
     </worldbody>
     <actuator>
-      <!--
-        Equivalence mapping:
-        intvelocity force: F = kp * \int(ctrl - v) - kv * v
-        dcmotor force:     F = (V*K - K^2*v) / R
-        where V = ki * \int(ctrl - v)     (since kp=0, kd=0)
-
-        Setting K=1, R=0.2, ki=2 yields:
-        F = (2 * \int(ctrl - v) - v) / 0.2
-          = 10 * \int(ctrl - v) - 5 * v
-
-        This perfectly matches intvelocity with kp=10, kv=5.
-      -->
-      <intvelocity name="intvel" joint="slide1" kp="10" kv="5" actrange="-0.01 0.01"/>
-      <dcmotor name="dcmotor" joint="slide2" motorconst="1" resistance="0.2" input="velocity" controller="0 2 0 0 0.01"/>
+      <pid name="pid" joint="slide1" kp="10" kv="5"/>
+      <dcmotor name="dcmotor" joint="slide2" motorconst="0.05" resistance="2.0"
+               input="pos vel" controller="10 0 5"/>
     </actuator>
   </mujoco>
   )";
   char error[1024];
   MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
   ASSERT_THAT(model.get(), NotNull()) << error;
+
+  // both actuators own [pos, vel] blocks
+  ASSERT_EQ(model->nu, 4);
   MjDataPtr data = MakeData(model);
 
-  // Apply a time-varying velocity command
+  // time-varying position and velocity commands, identical for both
   while (data->time < 1.0) {
-    data->ctrl[0] = mju_sin(20 * data->time);
-    data->ctrl[1] = mju_sin(20 * data->time);
+    mjtNum qref = mju_sin(5 * data->time);
+    mjtNum vref = mju_cos(3 * data->time);
+    data->ctrl[0] = data->ctrl[2] = qref;
+    data->ctrl[1] = data->ctrl[3] = vref;
     mj_step(model.get(), data.get());
 
-    // Both actuators should integrate identical states
-    EXPECT_MJTNUM_EQ(data->act[0], data->act[1]);
+    EXPECT_NEAR(data->qpos[0], data->qpos[1], MjTol(1e-14, 1e-6));
+    EXPECT_NEAR(data->qvel[0], data->qvel[1], MjTol(1e-14, 1e-6));
 
-    // Both bodies should move identically
-    EXPECT_NEAR(data->qpos[0], data->qpos[1], MjTol(1e-14, 1e-7));
-    EXPECT_NEAR(data->qvel[0], data->qvel[1], MjTol(1e-14, 1e-7));
-    EXPECT_NEAR(data->qacc[0], data->qacc[1], MjTol(1e-14, 1e-6));
-
-    // Both actuators should produce identical force
+    // recompute forces at the post-step state before comparing: identical, the
+    // tau->V map cancels back-EMF so there is no extra damping to account for
+    mj_forward(model.get(), data.get());
     EXPECT_NEAR(data->actuator_force[0], data->actuator_force[1],
-                MjTol(1e-14, 1e-6));
+                MjTol(1e-13, 1e-5));
   }
 }
-
 TEST_F(DCMotorTest, StatelessSteadyState) {
   static constexpr char xml[] = R"(
   <mujoco>
@@ -1645,6 +1524,9 @@ TEST_F(DCMotorTest, StatelessSteadyState) {
   MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
   ASSERT_THAT(model.get(), NotNull()) << error;
   MjDataPtr data = MakeData(model);
+
+  // the dcmotor ff input is the terminal voltage, named accordingly
+  EXPECT_STREQ(mj_actuatorInputName(model.get(), 0, 0), "voltage");
 
   double K = 0.05;
   double R = 2.0;
@@ -1844,6 +1726,206 @@ TEST_F(DCMotorTest, LuGreViscousFriction) {
               MjTol(1e-12, 1e-5));
 }
 
+// the LuGre bristle must integrate the velocity of its own transmission:
+// placing a multi-output (SO3) actuator before the DC motor, so that the
+// motor's actuator id and output address diverge, must not change the
+// bristle dynamics
+TEST_F(DCMotorTest, LuGreBristleVelocityOrderInvariance) {
+  static constexpr char xml_dc_first[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint name="hinge"/>
+        <geom size="1"/>
+      </body>
+      <body pos="3 0 0">
+        <joint name="ball" type="ball"/>
+        <geom size="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <dcmotor name="dc" joint="hinge" motorconst="0.05" resistance="2.0"
+               lugre="100 0.5 0.5 0.8 0.5"/>
+      <orientation name="so3" joint="ball" kp="1"/>
+    </actuator>
+  </mujoco>
+  )";
+  static constexpr char xml_so3_first[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint name="hinge"/>
+        <geom size="1"/>
+      </body>
+      <body pos="3 0 0">
+        <joint name="ball" type="ball"/>
+        <geom size="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <orientation name="so3" joint="ball" kp="1"/>
+      <dcmotor name="dc" joint="hinge" motorconst="0.05" resistance="2.0"
+               lugre="100 0.5 0.5 0.8 0.5"/>
+    </actuator>
+  </mujoco>
+  )";
+  char error[1024];
+
+  // reference: DC motor first, actuator id == output address
+  MjModelPtr model = LoadModelFromString(xml_dc_first, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  int dc = mj_name2id(model.get(), mjOBJ_ACTUATOR, "dc");
+  data->qvel[model->jnt_dofadr[mj_name2id(model.get(), mjOBJ_JOINT, "hinge")]] =
+      1;
+  mj_step(model.get(), data.get());
+  double z_dc_first = data->act[model->actuator_actadr[dc]];
+
+  // reordered: the SO3 actuator has 3 outputs, so the DC motor now has
+  // actuator id 1 but output address 3
+  model = LoadModelFromString(xml_so3_first, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  data = MakeData(model);
+  dc = mj_name2id(model.get(), mjOBJ_ACTUATOR, "dc");
+  ASSERT_EQ(model->actuator_outadr[dc], 3);
+  data->qvel[model->jnt_dofadr[mj_name2id(model.get(), mjOBJ_JOINT, "hinge")]] =
+      1;
+  mj_step(model.get(), data.get());
+  double z_so3_first = data->act[model->actuator_actadr[dc]];
+
+  // the bristle state saw the same spinning hinge in both models
+  EXPECT_NE(z_dc_first, 0);
+  EXPECT_MJTNUM_EQ(z_so3_first, z_dc_first);
+}
+
+// A dcmotor with input="none" has no controls and acts as a passive device:
+// LuGre friction, cogging and back-EMF braking with the terminals shorted.
+TEST_F(DCMotorTest, PassiveNoInputs) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint name="joint"/>
+        <geom size="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <dcmotor joint="joint" motorconst="0.05" resistance="2.0" input="none"
+               damping="0.01" lugre="100 1 0.5 0.7 10"/>
+    </actuator>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+
+  // no controls at all, one actuator, one bristle state
+  EXPECT_EQ(model->nu, 0);
+  EXPECT_EQ(model->nactuator, 1);
+  EXPECT_EQ(model->actuator_ctrlnum[0], 0);
+  ASSERT_EQ(model->actuator_actnum[0], 1);
+
+  // same force as a voltage-commanded motor with u = 0: shorted terminals
+  double sigma1 = 1;
+  double K = 0.05, R = 2.0;
+  double omega = 2.0;
+  data->qvel[0] = omega;
+  mj_forward(model.get(), data.get());
+
+  double electrical_force = K / R * (0 - K * omega);
+  double z = data->act[model->actuator_actadr[0]];
+  double z_dot = data->act_dot[model->actuator_actadr[0]];
+  double lugre_force = 100 * z + sigma1 * z_dot;
+  EXPECT_NEAR(data->actuator_force[0], electrical_force - lugre_force,
+              MjTol(1e-12, 1e-5));
+
+  // the model steps with an empty ctrl vector: friction brakes the joint
+  for (int i = 0; i < 100; i++) {
+    mj_step(model.get(), data.get());
+  }
+  EXPECT_GT(data->act[model->actuator_actadr[0]], 0);
+  EXPECT_LT(data->qvel[0], omega);
+}
+
+// input="none" validation: dcmotor-only, incompatible with slew and ki.
+TEST_F(DCMotorTest, NoInputsCompileErrors) {
+  char error[1024];
+
+  // pid does not accept input="none"
+  static constexpr char pid_xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint name="joint"/>
+        <geom size="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <pid joint="joint" kp="1" input="none"/>
+    </actuator>
+  </mujoco>
+  )";
+  MjModelPtr model = LoadModelFromString(pid_xml, error, sizeof(error));
+  EXPECT_THAT(model.get(), IsNull());
+  EXPECT_THAT(error, HasSubstr("subset"));
+
+  // slew rate limiting requires an input
+  static constexpr char slew_xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint name="joint"/>
+        <geom size="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <dcmotor joint="joint" motorconst="0.05" resistance="2.0" input="none"
+               controller="0 0 0 4.0 0 0"/>
+    </actuator>
+  </mujoco>
+  )";
+  model = LoadModelFromString(slew_xml, error, sizeof(error));
+  EXPECT_THAT(model.get(), IsNull());
+  EXPECT_THAT(error, HasSubstr("slew"));
+
+  // the "voltage" keyword is dcmotor-only
+  static constexpr char voltage_xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint name="joint"/>
+        <geom size="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <pid joint="joint" kp="1" input="voltage"/>
+    </actuator>
+  </mujoco>
+  )";
+  model = LoadModelFromString(voltage_xml, error, sizeof(error));
+  EXPECT_THAT(model.get(), IsNull());
+
+  // integral gain requires the pos input
+  static constexpr char ki_xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint name="joint"/>
+        <geom size="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <dcmotor joint="joint" motorconst="0.05" resistance="2.0" input="vel ff"
+               controller="0 2.0 0 0 0 0"/>
+    </actuator>
+  </mujoco>
+  )";
+  model = LoadModelFromString(ki_xml, error, sizeof(error));
+  EXPECT_THAT(model.get(), IsNull());
+  EXPECT_THAT(error, HasSubstr("pos input"));
+}
+
 TEST_F(DCMotorTest, ThermalRiseAndFall) {
   static constexpr char xml[] = R"(
   <mujoco>
@@ -1976,7 +2058,7 @@ TEST_F(DCMotorTest, ThermalAffectsForceWithController) {
     </worldbody>
     <actuator>
       <dcmotor joint="joint" motorconst="0.05" resistance="2.0"
-               input="position" controller="1.0 1.0 0 5.0 0"
+               input="pos vel" controller="1.0 1.0 0 5.0 0"
                thermal="0.1 0.1 0 0.004 25 25"/>
     </actuator>
   </mujoco>
@@ -1991,7 +2073,7 @@ TEST_F(DCMotorTest, ThermalAffectsForceWithController) {
   int adr = model->actuator_actadr[0];
   int temp_adr = adr + 2;  // temperature is slot 2
 
-  double K = 0.05, R = 2.0, alpha = 0.004;
+  double R = 2.0, alpha = 0.004;
   double dT = 50;
   data->act[adr] = 1.0;      // slew state = ctrl: no rate-limiting applied
   data->act[adr + 1] = 0.0;  // integral state x_I = 0
@@ -2000,11 +2082,11 @@ TEST_F(DCMotorTest, ThermalAffectsForceWithController) {
   mj_forward(model.get(), data.get());
 
   // u_eff = ctrl = 1.0 (no slew applied since act[slew] == ctrl)
-  // V = kp*(u_eff - length) + ki*x_I - kd*omega = 1.0*1.0 + 1.0*0.0 - 0*0 = 1.0
-  // R(T) = 2.0 * (1 + 0.004 * 50) = 2.4
-  // stateless (no te): force = K/R(T) * V = 0.05/2.4 * 1.0
+  // torque command tau = kp*(u_eff - length) = 1.0; the tau->V map uses the
+  // nameplate resistance, so the hot motor under-delivers by R/R(T):
+  // V = R/K * tau = 40, force = K/R(T) * V = (R/R(T)) * tau
   double R_hot = R * (1 + alpha * dT);
-  EXPECT_NEAR(data->actuator_force[0], K / R_hot * 1.0, MjTol(1e-12, 1e-5));
+  EXPECT_NEAR(data->actuator_force[0], R / R_hot * 1.0, MjTol(1e-12, 1e-5));
 }
 
 TEST_F(DCMotorTest, StatelessPositionMode) {
@@ -2018,7 +2100,7 @@ TEST_F(DCMotorTest, StatelessPositionMode) {
       </body>
     </worldbody>
     <actuator>
-      <dcmotor joint="joint" input="position" controller="2.0 0 0.5 0 0"
+      <dcmotor joint="joint" input="pos vel" controller="2.0 0 0.5 0 0"
                motorconst="0.05" resistance="2.0"/>
     </actuator>
   </mujoco>
@@ -2028,21 +2110,23 @@ TEST_F(DCMotorTest, StatelessPositionMode) {
   ASSERT_THAT(model.get(), NotNull()) << error;
   MjDataPtr data = MakeData(model);
 
+  // setpoint inputs are named
+  EXPECT_STREQ(mj_actuatorInputName(model.get(), 0, 0), "pos");
+  EXPECT_STREQ(mj_actuatorInputName(model.get(), 0, 1), "vel");
+
   // Position target 5.0, current pos 0.0, current vel 0.0
   data->ctrl[0] = 5.0;
   mj_forward(model.get(), data.get());
 
-  // V = Kp * (u - theta) = 2.0 * 5.0 = 10.0
-  // force = K / R * V + bias = (0.05 / 2.0) * 10.0 + 0 = 0.25
-  EXPECT_NEAR(data->actuator_force[0], 0.25, MjTol(1e-12, 1e-5));
+  // torque-space controller with back-EMF compensation: force = kp*(qref - l)
+  // force = 2.0 * 5.0 = 10.0, exactly
+  EXPECT_NEAR(data->actuator_force[0], 10.0, MjTol(1e-12, 1e-5));
 
   // Velocity penalty
   data->qvel[0] = 2.0;
   mj_forward(model.get(), data.get());
-  // V = 10.0 - Kd * omega = 10.0 - (0.5 * 2.0) = 9.0
-  // bias = - K^2 / R * omega = -0.0025 / 2.0 * 2.0 = -0.0025
-  // force = K / R * V + bias = 0.225 - 0.0025 = 0.2225
-  EXPECT_NEAR(data->actuator_force[0], 0.2225, MjTol(1e-12, 1e-5));
+  // force = kp*(qref - l) - kd*omega = 10.0 - 0.5*2.0 = 9.0: no back-EMF droop
+  EXPECT_NEAR(data->actuator_force[0], 9.0, MjTol(1e-12, 1e-5));
 }
 
 TEST_F(DCMotorTest, StatelessVelocityMode) {
@@ -2056,7 +2140,7 @@ TEST_F(DCMotorTest, StatelessVelocityMode) {
       </body>
     </worldbody>
     <actuator>
-      <dcmotor joint="joint" input="velocity" controller="3.0 0 0 0 0"
+      <dcmotor joint="joint" input="pos vel" controller="0 0 3.0 0 0"
                motorconst="0.05" resistance="2.0"/>
     </actuator>
   </mujoco>
@@ -2066,15 +2150,13 @@ TEST_F(DCMotorTest, StatelessVelocityMode) {
   ASSERT_THAT(model.get(), NotNull()) << error;
   MjDataPtr data = MakeData(model);
 
-  // Velocity target 4.0, current vel 1.0
-  data->ctrl[0] = 4.0;
+  // Velocity target 4.0 (second input), current vel 1.0
+  data->ctrl[1] = 4.0;
   data->qvel[0] = 1.0;
   mj_forward(model.get(), data.get());
 
-  // V = Kp * (u - omega) = 3.0 * (4.0 - 1.0) = 9.0
-  // bias = - K^2 / R * omega = -0.0025 / 2.0 * 1.0 = -0.00125
-  // force = K / R * V + bias = (0.05 / 2.0) * 9.0 - 0.00125 = 0.22375
-  EXPECT_NEAR(data->actuator_force[0], 0.22375, MjTol(1e-12, 1e-5));
+  // force = kd * (vref - omega) = 3.0 * (4.0 - 1.0) = 9.0, exactly
+  EXPECT_NEAR(data->actuator_force[0], 9.0, MjTol(1e-12, 1e-5));
 }
 
 TEST_F(DCMotorTest, StatefulPositionMode) {
@@ -2088,7 +2170,7 @@ TEST_F(DCMotorTest, StatefulPositionMode) {
       </body>
     </worldbody>
     <actuator>
-      <dcmotor joint="joint" input="position" controller="2.0 0.5 0.1 10.0 5.0"
+      <dcmotor joint="joint" input="pos vel" controller="2.0 0.5 0.1 10.0 5.0"
                motorconst="0.05" resistance="2.0"/>
     </actuator>
   </mujoco>
@@ -2120,11 +2202,9 @@ TEST_F(DCMotorTest, StatefulPositionMode) {
   // PI error: error = u_eff - length = 1.01 - 0.0 = 1.01
   EXPECT_NEAR(data->act_dot[adr + 1], 1.01, MjTol(1e-12, 1e-5));
 
-  // V = Kp(u_eff - length) + Ki * x_I - Kd * omega
-  // V = 2.0 * 1.01 + 0.5 * 2.0 - 0.1 * 0.5 = 2.97
-  // bias = - K^2/R * omega = -(0.05)^2 / 2.0 * 0.5 = -0.000625
-  // force = K/R * V + bias = 0.025 * 2.97 - 0.000625 = 0.073625
-  EXPECT_NEAR(data->actuator_force[0], 0.073625, MjTol(1e-12, 1e-5));
+  // force = kp * (u_eff - length) + ki * x_I - kd * omega
+  //       = 2.0 * 1.01 + 0.5 * 2.0 - 0.1 * 0.5 = 2.97, exactly
+  EXPECT_NEAR(data->actuator_force[0], 2.97, MjTol(1e-12, 1e-5));
 }
 
 TEST_F(DCMotorTest, StatefulPositionWithCurrentMode) {
@@ -2138,7 +2218,7 @@ TEST_F(DCMotorTest, StatefulPositionWithCurrentMode) {
       </body>
     </worldbody>
     <actuator>
-      <dcmotor joint="joint" input="position" controller="2.0 0.5 0.1 10.0 5.0"
+      <dcmotor joint="joint" input="pos vel" controller="2.0 0.5 0.1 10.0 5.0"
                motorconst="0.05" resistance="2.0" inductance="1.0"/>
     </actuator>
   </mujoco>
@@ -2170,16 +2250,16 @@ TEST_F(DCMotorTest, StatefulPositionWithCurrentMode) {
   // PI error: error = u_eff - length = 1.01
   EXPECT_NEAR(data->act_dot[adr + 1], 1.01, MjTol(1e-12, 1e-5));
 
-  // Voltage computation:
-  // V = Kp(u_eff - length) + Ki * x_I - Kd * omega
-  // V = 2.0 * 1.01 + 0.5 * 2.0 - 0.1 * 0.5 = 2.97
+  // torque command: tau = kp * (u_eff - length) + ki * x_I - kd * omega
+  //                      = 2.0 * 1.01 + 0.5 * 2.0 - 0.1 * 0.5 = 2.97
+  // tau->V map with back-EMF compensation:
+  // V = R/K * tau + K * omega = 2.0/0.05 * 2.97 + 0.05 * 0.5 = 118.825
 
   // Current filter:
   // t_e = L / R = 1.0 / 2.0 = 0.5
   // di/dt = (V/R - K/R * omega - i) / t_e
-  // di/dt = (2.97/2.0 - 0.05/2.0 * 0.5 - 0.5) / 0.5
-  // di/dt = (1.485 - 0.0125 - 0.5) / 0.5 = 0.9725 / 0.5 = 1.945
-  EXPECT_NEAR(data->act_dot[adr + 2], 1.945, MjTol(1e-12, 1e-5));
+  // di/dt = (118.825/2.0 - 0.05/2.0 * 0.5 - 0.5) / 0.5 = 117.8
+  EXPECT_NEAR(data->act_dot[adr + 2], 117.8, MjTol(1e-12, 1e-4));
 
   // Force is K * next_activation (actearly is always on for DC motors)
   // Inline mj_nextActivation for te = 0.5
@@ -2200,7 +2280,7 @@ TEST_F(DCMotorTest, StatefulVelocityMode) {
       </body>
     </worldbody>
     <actuator>
-      <dcmotor joint="joint" input="velocity" controller="3.0 1.0 0 0 2.0"
+      <dcmotor joint="joint" input="pos vel" controller="3.0 1.0 0 0 2.0"
                motorconst="0.05" resistance="2.0"/>
     </actuator>
   </mujoco>
@@ -2217,28 +2297,23 @@ TEST_F(DCMotorTest, StatefulVelocityMode) {
   double x_I = 2.0;  // Exactly at Imax limit (Imax = 2.0)
   data->act[adr] = x_I;
 
-  // target vel 4.0, current vel 1.0
+  // position target 4.0, current pos 0, current vel 1.0 (kd = 0)
   data->ctrl[0] = 4.0;
   data->qvel[0] = 1.0;
   mj_forward(model.get(), data.get());
 
-  // integrate command directly: error = target = 4.0
-  // since x_I == Imax (2.0) and error (4.0) > 0, act_dot should be clamped to 0
+  // error = 4.0; since x_I == Imax (2.0) and error > 0, act_dot clamps to 0
   EXPECT_NEAR(data->act_dot[adr], 0.0, MjTol(1e-12, 1e-5));
 
-  // V = Kp * (u_eff - omega) + Ki * (x_I - length)
-  // V = 3.0 * (4.0 - 1.0) + 1.0 * (2.0 - 0.0) = 9.0 + 2.0 = 11.0
-  // bias = - K^2/R * omega = -(0.05)^2 / 2.0 * 1.0 = -0.00125
-  // force = K/R * V + bias = 0.025 * 11.0 - 0.00125 = 0.275 - 0.00125 = 0.27375
-  EXPECT_NEAR(data->actuator_force[0], 0.27375, MjTol(1e-12, 1e-5));
+  // force = kp * (qref - l) + ki * x_I = 3.0 * (4.0 - 0.0) + 1.0 * 2.0 = 14.0
+  EXPECT_NEAR(data->actuator_force[0], 14.0, MjTol(1e-12, 1e-5));
 
   // repeat with non-zero joint position
   data->qpos[0] = 1.5;
   mj_forward(model.get(), data.get());
 
-  // V = 3.0 * (4.0 - 1.0) + 1.0 * (2.0 - 1.5) = 9.0 + 0.5 = 9.5
-  // force = K/R * V + bias = 0.025 * 9.5 - 0.00125 = 0.2375 - 0.00125 = 0.23625
-  EXPECT_NEAR(data->actuator_force[0], 0.23625, MjTol(1e-12, 1e-5));
+  // force = 3.0 * (4.0 - 1.5) + 1.0 * 2.0 = 9.5
+  EXPECT_NEAR(data->actuator_force[0], 9.5, MjTol(1e-12, 1e-5));
 }
 
 TEST_F(DCMotorTest, CurrentPlusThermal) {
@@ -2348,7 +2423,7 @@ TEST_F(DCMotorTest, VoltageLimit) {
     </worldbody>
     <actuator>
       <dcmotor joint="joint" motorconst="0.05" resistance="2.0"
-               input="position" controller="1 0 0 0 0 10.0"/>
+               input="pos vel" controller="1 0 0 0 0 10.0"/>
     </actuator>
   </mujoco>
   )";
@@ -2383,7 +2458,7 @@ TEST_F(DCMotorTest, IntegralClamp) {
       </body>
     </worldbody>
     <actuator>
-      <dcmotor joint="joint" input="position" controller="2.0 0.5 0 0 5.0"
+      <dcmotor joint="joint" input="pos vel" controller="2.0 0.5 0 0 5.0"
                motorconst="0.05" resistance="2.0"/>
     </actuator>
   </mujoco>
@@ -3068,7 +3143,7 @@ TEST_F(ForwardTest, FlexTrilinearInstability) {
 TEST_F(ForwardTest, FlexDampingRigidMotion) {
   constexpr char xml[] = R"(
   <mujoco>
-      <option gravity="0 0 0" timestep="0.01" integrator="implicitfast"/>
+      <option gravity="0 0 0" timestep="0.01" integrator="implicitfast" solver="CG"/>
       <worldbody>
           <flexcomp name="flex" type="grid" count="3 3 3" spacing="0.1 0.1 0.1"
                     pos="0 0 0" euler="45 45 45" radius="0.01" dim="3" mass="1" dof="trilinear">
@@ -3119,7 +3194,7 @@ TEST_F(ForwardTest, FlexDampingRigidMotion) {
 TEST_F(ForwardTest, FlexParentCoupling) {
   static const char* const kXml = R"(
   <mujoco>
-    <option integrator="implicit" timestep="0.01"/>
+    <option integrator="implicit" timestep="0.01" solver="CG"/>
     <worldbody>
       <body name="parent" pos="0 0 0">
         <freejoint/>
@@ -3169,14 +3244,16 @@ TEST_F(ForwardTest, FlexParentCoupling) {
     if (diff > max_diff) max_diff = diff;
   }
 
-  EXPECT_LT(max_diff, MjTol(2e-5, 1.5e-2))
+  // implicit and explicit flex damping legitimately differ at
+  // O(h*damping*K/M) in this comparison
+  EXPECT_LT(max_diff, MjTol(5e-5, 1.5e-2))
       << "Implicit integrator should match Euler at small timestep";
 }
 
 TEST_F(ForwardTest, TrilinearPinnedParentWithFreejoint) {
   static constexpr char xml[] = R"(
   <mujoco>
-  <option integrator="implicitfast"/>
+  <option integrator="implicitfast" solver="CG"/>
   <worldbody>
     <body>
       <joint type="free"/>
@@ -3675,6 +3752,59 @@ TEST_F(ActuatorDampingTest, DampingVsKvGearScaling) {
 }
 
 // flex sheet dropping on a plane should not gain energy from implicit bending
+// Passive flex contact stiffness is far beyond the explicit limit (~50x) because its curvature is
+// carried by the metric. Both curvature and shift are needed; without the shift it rings apart.
+TEST_F(ImplicitIntegratorTest, PassiveFlexContactIsImplicit) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.002" integrator="implicitfast" solver="CG" iterations="400"/>
+    <worldbody>
+      <flexcomp name="lower" type="grid" dim="2" count="9 9 1" spacing=".04 .04 1"
+                radius=".004" mass=".3" pos="0 0 .2">
+        <contact selfcollide="auto" passive="true"/>
+        <elasticity young="1e5" poisson=".2" thickness="2e-3" elastic2d="both" damping="1e-4"/>
+        <pin id="0 8 72 80"/>
+      </flexcomp>
+      <flexcomp name="upper" type="grid" dim="2" count="5 5 1" spacing=".04 .04 1"
+                radius=".004" mass=".1" pos="0 0 .27">
+        <contact selfcollide="auto" passive="true"/>
+        <elasticity young="1e5" poisson=".2" thickness="2e-3" elastic2d="both" damping="1e-4"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(m, NotNull()) << error;
+  MjDataPtr d = MakeData(m);
+  const mjModel* model = m.get();
+  mjData* data = d.get();
+
+  // Physical peak speed is ~2 m/s; without the shift this scene reaches 143 m/s.
+  mjtNum vmax = 0;
+  for (int i = 0; i < 1000; i++) {
+    mj_step(model, data);
+    for (int j = 0; j < model->nv; j++) {
+      vmax = mju_max(vmax, mju_abs(data->qvel[j]));
+    }
+    ASSERT_FALSE(data->warning[mjWARN_BADQACC].number) << "diverged at step " << i;
+  }
+  EXPECT_LT(vmax, 4.0) << "peak speed " << vmax;
+
+  // Upper sheet must not pass through the lower one: check that its lowest vertex stays above
+  // the lower sheet's lowest point.
+  mjtNum lo[2] = {1e30, 1e30};
+  for (int k = 0; k < 2; k++) {
+    int f = mj_name2id(model, mjOBJ_FLEX, k ? "upper" : "lower");
+    for (int i = 0; i < model->flex_vertnum[f]; i++) {
+      lo[k] = mju_min(lo[k], data->flexvert_xpos[3*(model->flex_vertadr[f] + i) + 2]);
+    }
+  }
+  EXPECT_GT(lo[1], lo[0] - 0.01) << "upper sheet passed through: lowest z " << lo[1]
+                                 << " against the lower sheet's " << lo[0];
+
+}
+
 TEST_F(ImplicitIntegratorTest, FlexContactEnergy) {
   static constexpr char xml[] = R"(
   <mujoco>
@@ -3736,7 +3866,7 @@ TEST_F(ImplicitIntegratorTest, FlexContactEnergy) {
 TEST_F(ImplicitIntegratorTest, BendingDampingDecaysEnergy) {
   static constexpr char xml[] = R"(
   <mujoco>
-    <option gravity="0 0 0" timestep="0.001" integrator="implicitfast">
+    <option gravity="0 0 0" timestep="0.001" integrator="implicitfast" solver="CG">
       <flag energy="enable"/>
     </option>
     <worldbody>
@@ -3796,7 +3926,7 @@ TEST_F(ImplicitIntegratorTest, BendingDampingDecaysEnergy) {
 TEST_F(ImplicitIntegratorTest, InterpStretchEnergy) {
   static constexpr char xml[] = R"(
   <mujoco>
-    <option gravity="0 0 0" timestep="0.001" integrator="implicitfast">
+    <option gravity="0 0 0" timestep="0.001" integrator="implicitfast" solver="CG">
       <flag energy="enable"/>
     </option>
     <worldbody>
@@ -3841,5 +3971,49 @@ TEST_F(ImplicitIntegratorTest, InterpStretchEnergy) {
       << ", initial=" << initial_energy;
 }
 
+// with the implicit effective metric active, inverse dynamics must recover the
+// applied force (zero here): the forward solve is (M+B)*qacc = qfrc_smooth + c
+// + J'*f and the inverse adds the same B*qacc - c terms. This is the fwd/inv
+// consistency fence for the flex-CG dispatch.
+TEST_F(ForwardTest, GatedFlexInverseConsistency) {
+  static const char* const kXml = R"(
+  <mujoco>
+    <option solver="CG" integrator="implicitfast" tolerance="1e-14"/>
+    <worldbody>
+      <flexcomp name="cloth" type="grid" count="6 6 1" spacing="0.1 0.1 0.1"
+                radius=".01" dim="2" mass="1" pos="0 0 1">
+        <contact selfcollide="none" contype="0" conaffinity="0"/>
+        <elasticity young="1e4" poisson="0.3" thickness="0.01"
+                    elastic2d="both" damping="0.5"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(kXml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  int nv = model->nv;
+
+  // deform and settle a few steps under gravity
+  for (int i=0; i < nv; i++) {
+    data->qvel[i] = 0.1 * (mju_Halton(i, 3) - 0.5);
+  }
+  for (int step=0; step < 50; step++) {
+    mj_step(model.get(), data.get());
+  }
+
+  // forward then inverse at the same state
+  mj_forward(model.get(), data.get());
+  mj_inverse(model.get(), data.get());
+
+  // no applied forces: the inverse must return ~zero, at the scale of the
+  // passive forces
+  mjtNum scale = 1 + mju_norm(data->qfrc_passive, nv);
+  EXPECT_LT(mju_norm(data->qfrc_inverse, nv), 1e-6 * scale);
+}
+
 }  // namespace
+
 }  // namespace mujoco

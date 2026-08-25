@@ -52,6 +52,7 @@ def _collision_shim(
     # Model
     nworld: int,
     block_dim: mjwp_types.BlockDim,
+    flex_activelayers: wp.array[int],
     flex_conaffinity: wp.array[int],
     flex_condim: wp.array[int],
     flex_contype: wp.array[int],
@@ -60,22 +61,14 @@ def _collision_shim(
     flex_elemadr: wp.array[int],
     flex_elemdataadr: wp.array[int],
     flex_elemflexid: wp.array[int],
+    flex_elemlayer: wp.array[int],
     flex_elemnum: wp.array[int],
-    flex_evpair: wp.array[wp.vec2i],
-    flex_evpairadr: wp.array[int],
-    flex_evpairflexid: wp.array[int],
-    flex_evpairnum: wp.array[int],
     flex_friction: wp.array[wp.vec3],
     flex_gap: wp.array[float],
-    flex_internal: wp.array[int],
     flex_margin: wp.array[float],
     flex_priority: wp.array[int],
     flex_radius: wp.array[float],
     flex_selfcollide: wp.array[int],
-    flex_shell: wp.array[int],
-    flex_shelladr: wp.array[int],
-    flex_shelldataadr: wp.array[int],
-    flex_shellflexid: wp.array[int],
     flex_solimp: wp.array[mjwp_types.vec5],
     flex_solmix: wp.array[float],
     flex_solref: wp.array[wp.vec2],
@@ -84,7 +77,6 @@ def _collision_shim(
     flex_vertflexid: wp.array[int],
     flex_vertnum: wp.array[int],
     flexelem_geom_pair_filtered: wp.array[wp.vec2i],
-    flexshell_geom_pair_filtered: wp.array[wp.vec2i],
     flexvert_geom_pair_filtered: wp.array[wp.vec2i],
     geom_aabb: wp.array3d[wp.vec3],
     geom_bodyid: wp.array[int],
@@ -104,6 +96,8 @@ def _collision_shim(
     geom_solmix: wp.array2d[float],
     geom_solref: wp.array2d[wp.vec2],
     geom_type: wp.array[int],
+    has_3d_flex: bool,
+    has_ellipsoid_geom: bool,
     has_flex_selfcollide: bool,
     has_sdf_geom: bool,
     hfield_adr: wp.array[int],
@@ -111,7 +105,6 @@ def _collision_shim(
     hfield_ncol: wp.array[int],
     hfield_nrow: wp.array[int],
     hfield_size: wp.array[wp.vec4],
-    max_flex_dim: int,
     mesh_face: wp.array[wp.vec3i],
     mesh_faceadr: wp.array[int],
     mesh_graph: wp.array[int],
@@ -133,13 +126,12 @@ def _collision_shim(
     nbody: int,
     nflex: int,
     nflexelem: int,
-    nflexevpair: int,
     nflexvert: int,
     ngeom: int,
-    nmaxmeshdeg: int,
-    nmaxpolygon: int,
     nmesh: int,
+    nmeshdegmax: int,
     nmeshface: int,
+    npolygonmax: int,
     nxn_geom_pair_filtered: wp.array[wp.vec2i],
     nxn_pairid: wp.array[wp.vec2i],
     nxn_pairid_filtered: wp.array[wp.vec2i],
@@ -201,6 +193,7 @@ def _collision_shim(
   _d.efc = _e
   _d.contact = _c
   _m.block_dim = block_dim
+  _m.flex_activelayers = flex_activelayers
   _m.flex_conaffinity = flex_conaffinity
   _m.flex_condim = flex_condim
   _m.flex_contype = flex_contype
@@ -209,22 +202,14 @@ def _collision_shim(
   _m.flex_elemadr = flex_elemadr
   _m.flex_elemdataadr = flex_elemdataadr
   _m.flex_elemflexid = flex_elemflexid
+  _m.flex_elemlayer = flex_elemlayer
   _m.flex_elemnum = flex_elemnum
-  _m.flex_evpair = flex_evpair
-  _m.flex_evpairadr = flex_evpairadr
-  _m.flex_evpairflexid = flex_evpairflexid
-  _m.flex_evpairnum = flex_evpairnum
   _m.flex_friction = flex_friction
   _m.flex_gap = flex_gap
-  _m.flex_internal = flex_internal
   _m.flex_margin = flex_margin
   _m.flex_priority = flex_priority
   _m.flex_radius = flex_radius
   _m.flex_selfcollide = flex_selfcollide
-  _m.flex_shell = flex_shell
-  _m.flex_shelladr = flex_shelladr
-  _m.flex_shelldataadr = flex_shelldataadr
-  _m.flex_shellflexid = flex_shellflexid
   _m.flex_solimp = flex_solimp
   _m.flex_solmix = flex_solmix
   _m.flex_solref = flex_solref
@@ -233,7 +218,6 @@ def _collision_shim(
   _m.flex_vertflexid = flex_vertflexid
   _m.flex_vertnum = flex_vertnum
   _m.flexelem_geom_pair_filtered = flexelem_geom_pair_filtered
-  _m.flexshell_geom_pair_filtered = flexshell_geom_pair_filtered
   _m.flexvert_geom_pair_filtered = flexvert_geom_pair_filtered
   _m.geom_aabb = geom_aabb
   _m.geom_bodyid = geom_bodyid
@@ -253,6 +237,8 @@ def _collision_shim(
   _m.geom_solmix = geom_solmix
   _m.geom_solref = geom_solref
   _m.geom_type = geom_type
+  _m.has_3d_flex = has_3d_flex
+  _m.has_ellipsoid_geom = has_ellipsoid_geom
   _m.has_flex_selfcollide = has_flex_selfcollide
   _m.has_sdf_geom = has_sdf_geom
   _m.hfield_adr = hfield_adr
@@ -260,7 +246,6 @@ def _collision_shim(
   _m.hfield_ncol = hfield_ncol
   _m.hfield_nrow = hfield_nrow
   _m.hfield_size = hfield_size
-  _m.max_flex_dim = max_flex_dim
   _m.mesh_face = mesh_face
   _m.mesh_faceadr = mesh_faceadr
   _m.mesh_graph = mesh_graph
@@ -282,13 +267,12 @@ def _collision_shim(
   _m.nbody = nbody
   _m.nflex = nflex
   _m.nflexelem = nflexelem
-  _m.nflexevpair = nflexevpair
   _m.nflexvert = nflexvert
   _m.ngeom = ngeom
-  _m.nmaxmeshdeg = nmaxmeshdeg
-  _m.nmaxpolygon = nmaxpolygon
   _m.nmesh = nmesh
+  _m.nmeshdegmax = nmeshdegmax
   _m.nmeshface = nmeshface
+  _m.npolygonmax = npolygonmax
   _m.nxn_geom_pair_filtered = nxn_geom_pair_filtered
   _m.nxn_pairid = nxn_pairid
   _m.nxn_pairid_filtered = nxn_pairid_filtered
@@ -401,6 +385,27 @@ def _collision_jax_impl(m: types.Model, d: types.Data):
           'contact__worldid',
       ]),
       stage_in_argnames=set([
+          'body_awake',
+          'contact__dim',
+          'contact__dist',
+          'contact__efc_address',
+          'contact__elem',
+          'contact__flex',
+          'contact__frame',
+          'contact__friction',
+          'contact__geom',
+          'contact__geomcollisionid',
+          'contact__includemargin',
+          'contact__pos',
+          'contact__solimp',
+          'contact__solref',
+          'contact__solreffriction',
+          'contact__type',
+          'contact__vert',
+          'contact__worldid',
+          'flex_aabb_max',
+          'flex_aabb_min',
+          'flexvert_xpos',
           'geom_aabb',
           'geom_friction',
           'geom_gap',
@@ -413,6 +418,10 @@ def _collision_jax_impl(m: types.Model, d: types.Data):
           'geom_xmat',
           'geom_xpos',
           'hfield_data',
+          'nacon',
+          'ncollision',
+          'opt__ccd_tolerance',
+          'overflow',
           'pair_friction',
           'pair_gap',
           'pair_margin',
@@ -420,13 +429,37 @@ def _collision_jax_impl(m: types.Model, d: types.Data):
           'pair_solref',
           'pair_solreffriction',
       ]),
-      stage_out_argnames=set([]),
+      stage_out_argnames=set([
+          'contact__dim',
+          'contact__dist',
+          'contact__efc_address',
+          'contact__elem',
+          'contact__flex',
+          'contact__frame',
+          'contact__friction',
+          'contact__geom',
+          'contact__geomcollisionid',
+          'contact__includemargin',
+          'contact__pos',
+          'contact__solimp',
+          'contact__solref',
+          'contact__solreffriction',
+          'contact__type',
+          'contact__vert',
+          'contact__worldid',
+          'flex_aabb_max',
+          'flex_aabb_min',
+          'nacon',
+          'ncollision',
+          'overflow',
+      ]),
       graph_mode=m.opt._impl.graph_mode,
       has_side_effect=False,
   )
   out = jf(
       d.qpos.shape[0],
       m._impl.block_dim,
+      m._impl.flex_activelayers,
       m._impl.flex_conaffinity,
       m._impl.flex_condim,
       m._impl.flex_contype,
@@ -435,22 +468,14 @@ def _collision_jax_impl(m: types.Model, d: types.Data):
       m._impl.flex_elemadr,
       m._impl.flex_elemdataadr,
       m._impl.flex_elemflexid,
+      m._impl.flex_elemlayer,
       m._impl.flex_elemnum,
-      m._impl.flex_evpair,
-      m._impl.flex_evpairadr,
-      m._impl.flex_evpairflexid,
-      m._impl.flex_evpairnum,
       m._impl.flex_friction,
       m._impl.flex_gap,
-      m._impl.flex_internal,
       m._impl.flex_margin,
       m._impl.flex_priority,
       m._impl.flex_radius,
       m._impl.flex_selfcollide,
-      m._impl.flex_shell,
-      m._impl.flex_shelladr,
-      m._impl.flex_shelldataadr,
-      m._impl.flex_shellflexid,
       m._impl.flex_solimp,
       m._impl.flex_solmix,
       m._impl.flex_solref,
@@ -459,7 +484,6 @@ def _collision_jax_impl(m: types.Model, d: types.Data):
       m._impl.flex_vertflexid,
       m.flex_vertnum,
       m._impl.flexelem_geom_pair_filtered,
-      m._impl.flexshell_geom_pair_filtered,
       m._impl.flexvert_geom_pair_filtered,
       m.geom_aabb,
       m.geom_bodyid,
@@ -479,6 +503,8 @@ def _collision_jax_impl(m: types.Model, d: types.Data):
       m.geom_solmix,
       m.geom_solref,
       m.geom_type,
+      m._impl.has_3d_flex,
+      m._impl.has_ellipsoid_geom,
       m._impl.has_flex_selfcollide,
       m._impl.has_sdf_geom,
       m.hfield_adr,
@@ -486,7 +512,6 @@ def _collision_jax_impl(m: types.Model, d: types.Data):
       m.hfield_ncol,
       m.hfield_nrow,
       m.hfield_size,
-      m._impl.max_flex_dim,
       m.mesh_face,
       m.mesh_faceadr,
       m.mesh_graph,
@@ -508,13 +533,12 @@ def _collision_jax_impl(m: types.Model, d: types.Data):
       m.nbody,
       m.nflex,
       m._impl.nflexelem,
-      m._impl.nflexevpair,
       m._impl.nflexvert,
       m.ngeom,
-      m._impl.nmaxmeshdeg,
-      m._impl.nmaxpolygon,
       m.nmesh,
+      m._impl.nmeshdegmax,
       m.nmeshface,
+      m._impl.npolygonmax,
       m._impl.nxn_geom_pair_filtered,
       m._impl.nxn_pairid,
       m._impl.nxn_pairid_filtered,

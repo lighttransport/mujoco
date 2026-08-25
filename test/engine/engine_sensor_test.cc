@@ -354,7 +354,7 @@ TEST_F(RelativeFrameSensorTest, FrameVelGeneral) {
   )";
   MjModelPtr model = LoadModelFromString(xml);
   MjDataPtr data = MakeData(model);
-  mjtNum dt = 1e-6;  // timestep used for finite differencing
+  mjtNum dt = MjTol(1e-6, 1e-3);  // timestep used for finite differencing
 
   // set (arbitrary) joint velocities and call forward dynamics
   data->qvel[0] = 1;
@@ -391,8 +391,8 @@ TEST_F(RelativeFrameSensorTest, FrameVelGeneral) {
   mju_quat2Vel(angvel_findiff, dquat, dt);
 
   // compare analytic and finite-differenced relative velocities
-  EXPECT_THAT(linvel, Pointwise(MjNear(10 * dt, 0.15), linvel_findiff));
-  EXPECT_THAT(angvel, Pointwise(MjNear(10 * dt, 0.2), angvel_findiff));
+  EXPECT_THAT(linvel, Pointwise(MjNear(10 * dt, 1.5e-2), linvel_findiff));
+  EXPECT_THAT(angvel, Pointwise(MjNear(10 * dt, 2e-3), angvel_findiff));
 }
 
 // ------------------------- general sensor tests  -----------------------------
@@ -698,9 +698,9 @@ TEST_F(SensorTest, BadContact) {
       {"geom1='sphere1' geom2='sphere2' num='-3'",
        "'num' must be positive in sensor"},
       {"geom1='sphere1' geom2='sphere2' site='site'",
-       "at most one of (geom1, body1, subtree1, site) can be specified"},
+       "at most one of 'geom1', 'body1', 'subtree1', 'site' can be specified"},
       {"geom2='sphere1' body2='body'",
-       "at most one of (geom2, body2, subtree2) can be specified"},
+       "at most one of 'geom2', 'body2', 'subtree2' can be specified"},
   };
 
   for (const auto& test : test_cases) {

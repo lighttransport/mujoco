@@ -234,6 +234,7 @@ typedef enum mjtTrn {             // type of actuator transmission
   mjTRN_TENDON,                   // force on tendon
   mjTRN_SITE,                     // force on site
   mjTRN_BODY,                     // adhesion force on a body's geoms
+  mjTRN_SO3,                      // torque on a relative orientation (3 force outputs)
 
   mjTRN_UNDEFINED     = 1000      // undefined transmission type
 } mjtTrn;
@@ -246,6 +247,7 @@ typedef enum mjtDyn {             // type of actuator dynamics
   mjDYN_FILTEREXACT,              // linear filter: da/dt = (u-a) / tau, with exact integration
   mjDYN_MUSCLE,                   // piecewise linear filter with two time constants
   mjDYN_DCMOTOR,                  // DC motor electrical dynamics
+  mjDYN_PID,                      // PID controller states: slew, integral
   mjDYN_USER                      // user-defined dynamics type
 } mjtDyn;
 
@@ -255,6 +257,8 @@ typedef enum mjtGain {            // type of actuator gain
   mjGAIN_AFFINE,                  // const + kp*length + kv*velocity
   mjGAIN_MUSCLE,                  // muscle FLV curve computed by mju_muscleGain()
   mjGAIN_DCMOTOR,                 // DC motor gain: K or K/R
+  mjGAIN_SO3,                     // geodesic servo on an SO3 transmission: force = kp * log(error)
+  mjGAIN_PID,                     // PID controller: position and velocity setpoint inputs
   mjGAIN_USER                     // user-defined gain type
 } mjtGain;
 
@@ -264,8 +268,24 @@ typedef enum mjtBias {            // type of actuator bias
   mjBIAS_AFFINE,                  // const + kp*length + kv*velocity
   mjBIAS_MUSCLE,                  // muscle passive force computed by mju_muscleBias()
   mjBIAS_DCMOTOR,                 // DC motor bias: back-EMF, cogging, LuGre friction
+  mjBIAS_SO3,                     // damping term of the SO3 geodesic servo
   mjBIAS_USER                     // user-defined bias type
 } mjtBias;
+
+
+typedef enum mjtCtrlChart {       // so3 input signature (actuator_ctrlspec): orientation chart
+  mjCHART_EXPMAP      = 1,        // exponential-map orientation target: 3 controls
+  mjCHART_QUAT        = 2         // quaternion orientation target: 4 controls
+} mjtCtrlChart;
+
+
+typedef enum mjtCtrlInput {       // servo input signature (actuator_ctrlspec): present-input bits
+  mjINPUT_POS         = 1,        // position setpoint input
+  mjINPUT_VEL         = 2,        // velocity setpoint input
+  mjINPUT_FF          = 4,        // feedforward input, in the actuator's output space
+  mjINPUT_VOLTAGE     = 8,        // raw terminal voltage input (dcmotor)
+  mjINPUT_NONE        = 16        // explicitly no inputs: purely passive (dcmotor)
+} mjtCtrlInput;
 
 
 typedef enum mjtObj {             // type of MujoCo object

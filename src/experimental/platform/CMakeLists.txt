@@ -19,16 +19,21 @@ set(MUJOCO_PLATFORM_TARGET_NAME mujoco_platform)
 add_library(${MUJOCO_PLATFORM_TARGET_NAME} STATIC)
 
 target_sources(${MUJOCO_PLATFORM_TARGET_NAME}
-    PUBLIC
+    PRIVATE
         helpers.cc
         helpers.h
+        resources.cc
+        resources.h
         sys_utils.cc
         sys_utils.h
+        hal/classic_renderer.cc
+        hal/classic_renderer.h
         hal/egl_utils.cc
         hal/egl_utils.h
+        hal/filament_renderer.cc
+        hal/filament_renderer.h
         hal/graphics_mode.cc
         hal/graphics_mode.h
-        hal/renderer.cc
         hal/renderer.h
         hal/window.cc
         hal/window.h
@@ -42,12 +47,12 @@ target_sources(${MUJOCO_PLATFORM_TARGET_NAME}
         sim/step_control.h
         ux/enum_utils.h
         ux/file_dialog.h
+        ux/fonts.cc
+        ux/fonts.h
         ux/gui.cc
         ux/gui.h
         ux/gui_spec.cc
         ux/gui_spec.h
-        ux/imgui_bridge.cc
-        ux/imgui_bridge.h
         ux/imgui_widgets.cc
         ux/imgui_widgets.h
         ux/interaction.cc
@@ -58,11 +63,12 @@ target_sources(${MUJOCO_PLATFORM_TARGET_NAME}
         ux/plugin.h
         ux/spec_editor.cc
         ux/spec_editor.h
+        ux/well_tempered.h
 )
 
 if(NOT WIN32)
   target_sources(${MUJOCO_PLATFORM_TARGET_NAME}
-      PUBLIC
+      PRIVATE
           ux/object_launcher_plugin.cc
   )
 endif()
@@ -70,33 +76,34 @@ endif()
 if(APPLE)
     set_source_files_properties(hal/window_osx.mm PROPERTIES
         COMPILE_FLAGS "-x objective-c++")
-    target_sources(${MUJOCO_PLATFORM_TARGET_NAME} PUBLIC
+    target_sources(${MUJOCO_PLATFORM_TARGET_NAME} PRIVATE
         hal/window_osx.mm
         ux/file_dialog_cocoa.mm
     )
 elseif(UNIX AND NOT APPLE)
-    target_sources(${MUJOCO_PLATFORM_TARGET_NAME} PUBLIC
+    target_sources(${MUJOCO_PLATFORM_TARGET_NAME} PRIVATE
         ux/file_dialog_zenity.cc
     )
 elseif(WIN32)
-    target_sources(${MUJOCO_PLATFORM_TARGET_NAME} PUBLIC
+    target_sources(${MUJOCO_PLATFORM_TARGET_NAME} PRIVATE
         ux/file_dialog_win.cc
     )
 else()
-    target_sources(${MUJOCO_PLATFORM_TARGET_NAME} PUBLIC
+    target_sources(${MUJOCO_PLATFORM_TARGET_NAME} PRIVATE
         ux/file_dialog.cc
     )
 endif()
 
 target_include_directories(${MUJOCO_PLATFORM_TARGET_NAME}
-    PUBLIC
+    PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/src
 )
 
-include(third_party_deps/dear_imgui)
-include(third_party_deps/implot)
 include(third_party_deps/sdl2)
+include(third_party_deps/dear_imgui)
+mujoco_add_dear_imgui_sdl2_backend()
+include(third_party_deps/implot)
 include(third_party_deps/libwebp)
 
 target_link_libraries(${MUJOCO_PLATFORM_TARGET_NAME}

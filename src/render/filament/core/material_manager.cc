@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string_view>
 
 #include <filament/Color.h>
 #include <filament/Material.h>
@@ -194,10 +195,10 @@ MaterialManager::MaterialType MaterialManager::GetMaterialType(
       return ObjectManager::kPhong2dUv;
     }
   } else {
+    // Reached only by a mesh without texture coordinates. Meshes are not planar
+    // reflectors, so reflectance has no reflect variant here.
     if (material.color[3] < 1.0f) {
       return ObjectManager::kPhong2dFade;
-    } else if (material.reflectance > 0) {
-      return ObjectManager::kPhong2dReflect;
     } else {
       return ObjectManager::kPhong2d;
     }
@@ -236,7 +237,11 @@ MaterialManager::MaterialKey MaterialManager::PrepareMaterialInstance(
   return key;
 }
 
-filament::MaterialInstance* MaterialManager::GetInstance(MaterialKey key) {
+const filament::MaterialInstance* MaterialManager::GetInstance(MaterialKey key) {
+  if (key == 0) {
+    return GetEngine()->getDefaultMaterial()->getDefaultInstance();
+  }
+
   auto it = instances_.find(key);
   if (it == instances_.end()) {
     return nullptr;

@@ -110,7 +110,7 @@ string(REPLACE ";" " " EMCC_PHYSICS_LINKER_FLAGS_STR "${EMCC_PHYSICS_LINKER_FLAG
 # stl_decoder.
 set(MUJOCO_WASM_LINK_LIBRARIES
     -Wl,--whole-archive mujoco -Wl,--no-whole-archive
-    ccd lodepng tinyxml2 qhullstatic_r
+    ccd tinyxml2 qhullstatic_r
 )
 
 # --- Main WASM bindings target ---

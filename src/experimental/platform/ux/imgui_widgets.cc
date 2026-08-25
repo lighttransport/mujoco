@@ -226,8 +226,7 @@ void ImGui_SpecElementTable::operator()(const char* label, mjtByte& val,
 }
 
 void ImGui_SpecElementTable::operator()(const char* label, bool& val,
-                                        const bool& ref,
-                                        const char* tooltip) {
+                                        const bool& ref, const char* tooltip) {
   Label(label, tooltip);
   Input(val, ref);
 }
@@ -344,13 +343,33 @@ bool ImGui_Slider(const char* name, mjtNum* value, mjtNum min, mjtNum max) {
   return res;
 }
 
+bool ImGui_SliderLog(const char* name, mjtNum* value, mjtNum min, mjtNum max) {
+  constexpr ImGuiDataType type = sizeof(mjtNum) == sizeof(double)
+                                     ? ImGuiDataType_Double
+                                     : ImGuiDataType_Float;
+  return ImGui::SliderScalar(name, type, value, &min, &max, "%.3g",
+                             ImGuiSliderFlags_Logarithmic);
+}
+
+bool ImGui_ResetButton(const char* id, const char* icon,
+                       const char* tooltip) {
+  const float size = ImGui::GetFrameHeight();
+  ImGui::SameLine();
+  ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - size);
+  ImGui::PushID(id);
+  const bool clicked = ImGui::SmallButton(icon);
+  ImGui::PopID();
+  ImGui::SetItemTooltip("%s", tooltip);
+  return clicked;
+}
+
 bool ImGui_BeginHSplit(const char* id, float* height, bool* open) {
   const ImVec2 region = ImGui::GetContentRegionAvail();
-  if (*height < 0) {
+  if (*height < 0 && region.y > 0) {
     *height = region.y / 2;
   }
   // If the split is closed, use the full region height.
-  const float h = *open ? *height : region.y;
+  const float h = *open ? std::max(0.0f, *height) : region.y;
   return ImGui::BeginChild(id, ImVec2(0, h), 0);
 }
 
@@ -550,8 +569,8 @@ void SetNextWindowPosInside(OverlayPos pos, ImVec4 rect) {
 
 }  // namespace
 
-bool BeginOverlay(const char* id, OverlayPos pos, ImVec4 rect,
-                  float min_width, float alpha) {
+bool BeginOverlay(const char* id, OverlayPos pos, ImVec4 rect, float min_width,
+                  float alpha) {
   SetNextWindowPosInside(pos, rect);
 
   if (min_width > 0.0f) {
@@ -574,8 +593,8 @@ void EndOverlay() {
 }
 
 void TextOverlay(const char* id, OverlayPos pos, ImVec4 workspace_rect,
-                 const char* text, ImVec4 color, float font_scale,
-                 float alpha, float min_width) {
+                 const char* text, ImVec4 color, float font_scale, float alpha,
+                 float min_width) {
   float scale = ImGui::GetWindowDpiScale();
   float padding = 30.0f * scale;
   float max_width = std::max(0.0f, workspace_rect.z - 20.0f);
@@ -590,8 +609,8 @@ void TextOverlay(const char* id, OverlayPos pos, ImVec4 workspace_rect,
     if (font_scale != 1.0f) {
       ImGui::SetWindowFontScale(font_scale);
     }
-    bool has_color = color.x != 0 || color.y != 0 || color.z != 0 ||
-                     color.w != 0;
+    bool has_color =
+        color.x != 0 || color.y != 0 || color.z != 0 || color.w != 0;
     if (has_color) {
       ImGui::PushStyleColor(ImGuiCol_Text, color);
     }

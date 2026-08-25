@@ -30,6 +30,7 @@
 #include <implot.h>
 #include <mujoco/mujoco.h>
 #include "experimental/platform/ux/enum_utils.h"
+#include "experimental/platform/ux/well_tempered.h"
 
 namespace mujoco::platform {
 
@@ -44,18 +45,36 @@ inline float GetStableAvailWidth() {
 
   // Walk up past child windows to the actual panel that owns the scrollbar.
   ImGuiWindow* scroll_owner = window;
-  while (scroll_owner &&
-         (scroll_owner->Flags & ImGuiWindowFlags_ChildWindow) &&
+  while (scroll_owner && (scroll_owner->Flags & ImGuiWindowFlags_ChildWindow) &&
          scroll_owner->ParentWindow) {
     scroll_owner = scroll_owner->ParentWindow;
   }
 
-  if (scroll_owner &&
-      !(scroll_owner->Flags & ImGuiWindowFlags_NoScrollbar) &&
+  if (scroll_owner && !(scroll_owner->Flags & ImGuiWindowFlags_NoScrollbar) &&
       !scroll_owner->ScrollbarY) {
     avail_x -= ImGui::GetStyle().ScrollbarSize;
   }
   return avail_x;
+}
+
+// Draws one line of text horizontally centered in the current window.
+inline void CenteredLine(const char* text, const ImVec4* color = nullptr) {
+  ImGui::SetCursorPosX(ImMax(
+      0.0f, (ImGui::GetWindowWidth() - ImGui::CalcTextSize(text).x) * 0.5f));
+  if (color != nullptr) {
+    ImGui::TextColored(*color, "%s", text);
+  } else {
+    ImGui::TextUnformatted(text);
+  }
+}
+
+// Large centered banner text.
+inline void CenteredBanner(const char* text, const ImVec4& color) {
+  ImGui::SetWindowFontScale(1.6f);
+  ImGui::SetCursorPosX(ImMax(
+      0.0f, (ImGui::GetWindowWidth() - ImGui::CalcTextSize(text).x) * 0.5f));
+  ImGui::TextColored(color, "%s", text);
+  ImGui::SetWindowFontScale(1.0f);
 }
 
 // FontAwesome icon codes.
@@ -160,9 +179,7 @@ struct ScopedStyle {
     return *this;
   }
 
-  ScopedStyle& Font(ScopedFont font) {
-    return Font(static_cast<int>(font));
-  }
+  ScopedStyle& Font(ScopedFont font) { return Font(static_cast<int>(font)); }
 
   ScopedStyle& Color(ImGuiCol col, ImColor color) {
     ImGui::PushStyleColor(col, (ImU32)color);
@@ -460,6 +477,15 @@ void ImGui_EndHSplit(bool open);
 // ImGui Slider that supports both float and double types.
 bool ImGui_Slider(const char* name, mjtNum* value, mjtNum min, mjtNum max);
 
+// Logarithmic slider; the geometric mean of min and max sits mid-slider.
+// Ctrl+Click values typed by the user may exceed [min, max].
+bool ImGui_SliderLog(const char* name, mjtNum* value, mjtNum min, mjtNum max);
+
+// Small right-aligned reset button on the current line; returns true when
+// clicked. Use after a widget to give it a visible reset affordance.
+bool ImGui_ResetButton(const char* id, const char* icon = ICON_FA_UNDO,
+                       const char* tooltip = "Reset");
+
 template <typename T>
 bool ImGui_Checkbox(const char* name, T& value) {
   static_assert(std::is_integral<T>());
@@ -526,6 +552,8 @@ struct ImGuiOpts {
   std::optional<T> step_fast;
   std::optional<float> width;
   const char* format = std::is_floating_point_v<T> ? "%.3g" : "%d";
+  // ImGui_LogStepper only: the ladder's bottom rung is 0 below this value.
+  std::optional<T> zero_below;
 };
 
 // A compile-time wrapper around ImGui::InputScalarN. This is useful because
@@ -579,6 +607,56 @@ bool ImGui_InputN(const char* name, T* value, int num, ImGuiOpts<T> opts = {}) {
 template <typename T>
 bool ImGui_Input(const char* name, T* value, ImGuiOpts<T> opts = {}) {
   return ImGui_InputN(name, value, 1, opts);
+}
+
+// A numeric input whose - / + buttons step through a "well-tempered" logarithmic
+// ladder (see WellTemperedStep): round numbers spaced evenly in log space that
+// close each decade on a power of ten. Typed edits are applied on enter or focus
+// change, like ImGui_Input. Suited to quantities spanning several orders of
+// magnitude, such as the simulation timestep. The buttons auto-repeat when held.
+template <typename T>
+bool ImGui_LogStepper(const char* name, T* value, ImGuiOpts<T> opts = {}) {
+  const float button = ImGui::GetFrameHeight();
+  const float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+  float input_width = ImGui::CalcItemWidth() - 2 * (button + spacing);
+  if (input_width < 1) input_width = 1;
+
+  const double zero_below =
+      opts.zero_below ? static_cast<double>(*opts.zero_below) : 0.0;
+  auto clamp = [&](T v) {
+    if (opts.min && v < *opts.min) v = *opts.min;
+    if (opts.max && v > *opts.max) v = *opts.max;
+    return v;
+  };
+
+  bool changed = false;
+  ImGui::PushID(name);
+
+  // Lay out like ImGui's own InputScalar stepper: the field, then the - / +
+  // buttons to its right, then the label.
+  ImGuiOpts<T> field = opts;
+  field.step = std::nullopt;  // suppress ImGui's own linear step buttons
+  field.step_fast = std::nullopt;
+  field.width = input_width;
+  if (ImGui_InputN("##value", value, 1, field)) changed = true;
+
+  ImGui::PushButtonRepeat(true);
+  ImGui::SameLine(0, spacing);
+  if (ImGui::Button("-", ImVec2(button, button))) {
+    *value = clamp(static_cast<T>(WellTemperedStep(*value, -1, zero_below)));
+    changed = true;
+  }
+  ImGui::SameLine(0, spacing);
+  if (ImGui::Button("+", ImVec2(button, button))) {
+    *value = clamp(static_cast<T>(WellTemperedStep(*value, +1, zero_below)));
+    changed = true;
+  }
+  ImGui::PopButtonRepeat();
+
+  ImGui::SameLine(0, spacing);
+  ImGui::TextUnformatted(name);
+  ImGui::PopID();
+  return changed;
 }
 
 // Returns true if the given chord is has _just_ been pressed in this frame.
@@ -643,8 +721,8 @@ inline bool ImGui_ColorButtonEx(const char* label, bool active, ImColor color,
 
   // Draw border.
   if (s.FrameBorderSize > 0) {
-    dl->AddRect(pos, max, ImGui::GetColorU32(ImGuiCol_Border),
-                s.FrameRounding, corners, s.FrameBorderSize);
+    dl->AddRect(pos, max, ImGui::GetColorU32(ImGuiCol_Border), s.FrameRounding,
+                corners, s.FrameBorderSize);
   }
 
   // Draw label centered.
