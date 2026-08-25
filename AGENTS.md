@@ -41,3 +41,6 @@ Native tests use GoogleTest, Python bindings use `absltest`/`pytest`, and Unity 
 
 ## Commit & Pull Request Guidelines
 Recent commits use short, imperative, sentence-case subjects such as `Add test for geom and mesh plugin attributes.` Keep commits focused. For non-trivial work, coordinate first per `CONTRIBUTING.md`. Pull requests should be small, include passing tests, resolve compiler warnings, and explain the change, affected platforms, and any linked issue. Add screenshots when UI-facing behavior changes.
+
+## Git Remote Operations
+Do not run `git push` (including as part of a combined command) without the user's explicit permission in the current request. Creating local commits and fetching remotes are allowed when they are in scope, but always report pending commits and ask before publishing them.
