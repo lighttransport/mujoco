@@ -988,5 +988,80 @@ TEST_F(SupportTest, InitSensorDelay) {
   EXPECT_NEAR(val, 0.6, 1e-6);
 }
 
+TEST_F(SupportTest, InsideSite) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <asset>
+      <mesh name="box_mesh"
+            vertex="-0.2 -0.3 -0.4
+                     0.2 -0.3 -0.4
+                     0.2  0.3 -0.4
+                    -0.2  0.3 -0.4
+                    -0.2 -0.3  0.4
+                     0.2 -0.3  0.4
+                     0.2  0.3  0.4
+                    -0.2  0.3  0.4"/>
+      <mesh name="octa_mesh"
+            vertex=" 1  0  0
+                    -1  0  0
+                     0  1  0
+                     0 -1  0
+                     0  0  1
+                     0  0 -1"/>
+    </asset>
+    <worldbody>
+      <site name="sph" type="sphere" size="0.5" pos="1 0 0"/>
+      <site name="box" type="box" size="0.5 0.5 0.5" pos="0 1 0"/>
+      <site name="msh" type="mesh" mesh="box_mesh" pos="0 0 1"/>
+      <site name="oct" type="mesh" mesh="octa_mesh" pos="0 0 0"/>
+    </worldbody>
+  </mujoco>
+  )";
+  MjModelPtr model = LoadModelFromString(xml);
+  ASSERT_THAT(model.get(), NotNull());
+  mjData* data = mj_makeData(model.get());
+  mj_forward(model.get(), data);
+
+  int sph_id = mj_name2id(model.get(), mjOBJ_SITE, "sph");
+  int box_id = mj_name2id(model.get(), mjOBJ_SITE, "box");
+  int msh_id = mj_name2id(model.get(), mjOBJ_SITE, "msh");
+  int oct_id = mj_name2id(model.get(), mjOBJ_SITE, "oct");
+
+  // sphere tests
+  mjtNum pt_inside_sph[3] = {1.2, 0, 0};
+  mjtNum pt_outside_sph[3] = {1.6, 0, 0};
+  EXPECT_EQ(mj_insideSite(model.get(), data, sph_id, pt_inside_sph), 1);
+  EXPECT_EQ(mj_insideSite(model.get(), data, sph_id, pt_outside_sph), 0);
+
+  // box tests
+  mjtNum pt_inside_box[3] = {0.3, 1.3, -0.3};
+  mjtNum pt_outside_box[3] = {0.6, 1.0, 0};
+  EXPECT_EQ(mj_insideSite(model.get(), data, box_id, pt_inside_box), 1);
+  EXPECT_EQ(mj_insideSite(model.get(), data, box_id, pt_outside_box), 0);
+
+  // box mesh tests
+  mjtNum pt_inside_msh[3] = {0.1, -0.2, 1.3};
+  mjtNum pt_outside_msh[3] = {0.3, 0, 1.0};
+  mjtNum pt_far_msh[3] = {10.0, 10.0, 10.0};
+  EXPECT_EQ(mj_insideSite(model.get(), data, msh_id, pt_inside_msh), 1);
+  EXPECT_EQ(mj_insideSite(model.get(), data, msh_id, pt_outside_msh), 0);
+  EXPECT_EQ(mj_insideSite(model.get(), data, msh_id, pt_far_msh), 0);
+
+  // octahedron mesh tests: inside hull, inside AABB but outside hull, outside
+  // AABB
+  mjtNum pt_inside_oct[3] = {0.2, 0.2, 0.2};
+  mjtNum pt_in_aabb_out_hull[3] = {0.6, 0.6, 0.0};
+  mjtNum pt_out_aabb_x[3] = {1.1, 0.0, 0.0};
+  mjtNum pt_out_aabb_y[3] = {0.0, 1.1, 0.0};
+  mjtNum pt_out_aabb_z[3] = {0.0, 0.0, 1.1};
+  EXPECT_EQ(mj_insideSite(model.get(), data, oct_id, pt_inside_oct), 1);
+  EXPECT_EQ(mj_insideSite(model.get(), data, oct_id, pt_in_aabb_out_hull), 0);
+  EXPECT_EQ(mj_insideSite(model.get(), data, oct_id, pt_out_aabb_x), 0);
+  EXPECT_EQ(mj_insideSite(model.get(), data, oct_id, pt_out_aabb_y), 0);
+  EXPECT_EQ(mj_insideSite(model.get(), data, oct_id, pt_out_aabb_z), 0);
+
+  mj_deleteData(data);
+}
+
 }  // namespace
 }  // namespace mujoco

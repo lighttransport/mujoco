@@ -1655,6 +1655,11 @@ void mj_initSensorHistory_wrapper(const MjModel& m, MjData& d, int id, const Num
   mj_initSensorHistory(m.get(), d.get(), id, times_.data(), values_.data(), phase);
 }
 
+int mj_insideSite_wrapper(const MjModel& m, const MjData& d, int siteid, const NumberArray& point) {
+  UNPACK_ARRAY(mjtNum, point);
+  return mj_insideSite(m.get(), d.get(), siteid, point_.data());
+}
+
 void mj_integratePos_wrapper(const MjModel& m, const val& qpos, const NumberArray& qvel, mjtNum dt) {
   UNPACK_VALUE(mjtNum, qpos);
   UNPACK_ARRAY(mjtNum, qvel);
@@ -4042,6 +4047,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .value("mjENBL_INVDISCRETE", mjENBL_INVDISCRETE)
     .value("mjENBL_SLEEP", mjENBL_SLEEP)
     .value("mjENBL_DIAGEXACT", mjENBL_DIAGEXACT)
+    .value("mjENBL_IPC", mjENBL_IPC)
     .value("mjNENABLE", mjNENABLE);
   enum_<mjtEq>("mjtEq")
     .value("mjEQ_CONNECT", mjEQ_CONNECT)
@@ -4141,7 +4147,8 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .value("mjINT_EULER", mjINT_EULER)
     .value("mjINT_RK4", mjINT_RK4)
     .value("mjINT_IMPLICIT", mjINT_IMPLICIT)
-    .value("mjINT_IMPLICITFAST", mjINT_IMPLICITFAST);
+    .value("mjINT_IMPLICITFAST", mjINT_IMPLICITFAST)
+    .value("mjINT_DISCRETE", mjINT_DISCRETE);
   enum_<mjtItem>("mjtItem")
     .value("mjITEM_END", mjITEM_END)
     .value("mjITEM_SECTION", mjITEM_SECTION)
@@ -4633,8 +4640,21 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("efm_K_val", &MjData::efm_K_val)
     .property("efm_L", &MjData::efm_L)
     .property("efm_active", &MjData::efm_active, &MjData::set_efm_active)
+    .property("efm_aid", &MjData::efm_aid)
+    .property("efm_ak", &MjData::efm_ak)
+    .property("efm_as", &MjData::efm_as)
     .property("efm_c", &MjData::efm_c)
+    .property("efm_ca", &MjData::efm_ca)
+    .property("efm_ck", &MjData::efm_ck)
+    .property("efm_con_ind", &MjData::efm_con_ind)
+    .property("efm_con_val", &MjData::efm_con_val)
+    .property("efm_diag", &MjData::efm_diag)
     .property("efm_dofid", &MjData::efm_dofid)
+    .property("efm_fluid", &MjData::efm_fluid)
+    .property("efm_sdiag", &MjData::efm_sdiag)
+    .property("efm_tid", &MjData::efm_tid)
+    .property("efm_tk", &MjData::efm_tk)
+    .property("efm_ts", &MjData::efm_ts)
     .property("energy", &MjData::energy)
     .property("eq_active", &MjData::eq_active)
     .property("flexedge_J", &MjData::flexedge_J)
@@ -4643,6 +4663,8 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("flexelem_aabb", &MjData::flexelem_aabb)
     .property("flexelem_krot", &MjData::flexelem_krot)
     .property("flexvert_J", &MjData::flexvert_J)
+    .property("flexvert_conage", &MjData::flexvert_conage)
+    .property("flexvert_lambda", &MjData::flexvert_lambda)
     .property("flexvert_length", &MjData::flexvert_length)
     .property("flexvert_xpos", &MjData::flexvert_xpos)
     .property("flg_energypos", &MjData::flg_energypos, &MjData::set_flg_energypos)
@@ -4698,8 +4720,11 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("ncon", &MjData::ncon, &MjData::set_ncon)
     .property("ne", &MjData::ne, &MjData::set_ne)
     .property("nefc", &MjData::nefc, &MjData::set_nefc)
+    .property("nefmA", &MjData::nefmA, &MjData::set_nefmA)
     .property("nefmK", &MjData::nefmK, &MjData::set_nefmK)
     .property("nefmL", &MjData::nefmL, &MjData::set_nefmL)
+    .property("nefmT", &MjData::nefmT, &MjData::set_nefmT)
+    .property("nefmcon", &MjData::nefmcon, &MjData::set_nefmcon)
     .property("nefmdof", &MjData::nefmdof, &MjData::set_nefmdof)
     .property("nf", &MjData::nf, &MjData::set_nf)
     .property("nidof", &MjData::nidof, &MjData::set_nidof)
@@ -5326,6 +5351,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("sensor_user", &MjModel::sensor_user)
     .property("signature", &MjModel::signature, &MjModel::set_signature)
     .property("site_bodyid", &MjModel::site_bodyid)
+    .property("site_dataid", &MjModel::site_dataid)
     .property("site_group", &MjModel::site_group)
     .property("site_matid", &MjModel::site_matid)
     .property("site_pos", &MjModel::site_pos)
@@ -5993,6 +6019,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("group", &MjsSite::group, &MjsSite::set_group)
     .property("info", &MjsSite::info, &MjsSite::set_info, reference())
     .property("material", &MjsSite::material, &MjsSite::set_material, reference())
+    .property("meshname", &MjsSite::meshname, &MjsSite::set_meshname, reference())
     .property("pos", &MjsSite::pos)
     .property("quat", &MjsSite::quat)
     .property("rgba", &MjsSite::rgba)
@@ -6333,6 +6360,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
   function("mj_implicit", &mj_implicit_wrapper);
   function("mj_initCtrlHistory", &mj_initCtrlHistory_wrapper);
   function("mj_initSensorHistory", &mj_initSensorHistory_wrapper);
+  function("mj_insideSite", &mj_insideSite_wrapper);
   function("mj_integratePos", &mj_integratePos_wrapper);
   function("mj_invConstraint", &mj_invConstraint_wrapper);
   function("mj_invPosition", &mj_invPosition_wrapper);

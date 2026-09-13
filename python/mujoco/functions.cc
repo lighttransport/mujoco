@@ -1574,6 +1574,7 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
   Def<traits::mju_Halton>(pymodule);
   // Skipped: mju_strncpy (doesn't make sense in Python)
   Def<traits::mju_sigmoid>(pymodule);
+  Def<traits::mj_insideSite>(pymodule);
 
   // Derivatives
   Def<traits::mjd_transitionFD>(

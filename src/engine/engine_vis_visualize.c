@@ -1119,6 +1119,14 @@ static void addSiteGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
     // construct geom
     mjv_initGeom(thisgeom, m->site_type[i], m->site_size+3*i,
                   d->site_xpos+3*i, d->site_xmat+9*i, NULL);
+    thisgeom->dataid = m->site_dataid[i];
+
+    // set texcoord
+    if (m->site_type[i] == mjGEOM_MESH &&
+        m->site_dataid[i] >= 0 &&
+        m->mesh_texcoordadr[m->site_dataid[i]] >= 0) {
+      thisgeom->texcoord = 1;
+    }
 
     // set material if given
     setMaterial(m, thisgeom, m->site_matid[i], m->site_rgba+4*i, vopt->flags);
@@ -1136,6 +1144,14 @@ static void addSiteGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
     // vopt->label
     if (vopt->label == mjLABEL_SITE) {
       makeLabel(m, mjOBJ_SITE, i, thisgeom->label);
+    }
+
+    // mesh: 2*i is original, 2*i+1 is convex hull
+    if (m->site_type[i] == mjGEOM_MESH) {
+      thisgeom->dataid *= 2;
+      if (m->mesh_graphadr[m->site_dataid[i]] >= 0 && vopt->flags[mjVIS_CONVEXHULL]) {
+        thisgeom->dataid += 1;
+      }
     }
 
     releaseGeom(&thisgeom, scn);

@@ -16,7 +16,7 @@
 #define MUJOCO_MUJOCO_H_
 
 // header version; should match the library version as returned by mj_version()
-#define mjVERSION_HEADER 3012001
+#define mjVERSION_HEADER 3013001
 
 // needed to define size_t, fabs and log10
 #include <stdlib.h>
@@ -639,6 +639,9 @@ MJAPI void mj_objectAcceleration(const mjModel* m, const mjData* d,
 // Nullable: fromto
 MJAPI mjtNum mj_geomDistance(const mjModel* m, mjData* d, int geom1, int geom2, mjtNum distmax,
                              mjtNum fromto[6]);
+
+// Return 1 if point is inside a site (convex hull for meshes), 0 otherwise.
+MJAPI int mj_insideSite(const mjModel* m, const mjData* d, int siteid, const mjtNum point[3]);
 
 // Extract 6D force:torque given contact id, in the contact frame.
 MJAPI void mj_contactForce(const mjModel* m, const mjData* d, int id, mjtNum result[6]);

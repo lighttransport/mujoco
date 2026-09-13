@@ -90,6 +90,9 @@ void mj_xfrcAccumulate(const mjModel* m, mjData* d, mjtNum* qfrc);
 MJAPI mjtNum mj_geomDistance(const mjModel* m, mjData* d, int geom1, int geom2, mjtNum distmax,
                              mjtNum fromto[6]);
 
+// return 1 if point is inside a site (convex hull for meshes), 0 otherwise
+MJAPI int mj_insideSite(const mjModel* m, const mjData* d, int siteid, const mjtNum point[3]);
+
 // compute velocity by finite-differencing two positions
 MJAPI void mj_differentiatePos(const mjModel* m, mjtNum* qvel, mjtNum dt,
                                const mjtNum* qpos1, const mjtNum* qpos2);

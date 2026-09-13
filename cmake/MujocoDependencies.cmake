@@ -19,7 +19,7 @@ set(MUJOCO_DEP_VERSION_tinyxml2
     CACHE STRING "Version of `tinyxml2` to be fetched."
 )
 set(MUJOCO_DEP_VERSION_tinyobjloader
-    1421a10d6ed9742f5b2c1766d22faa6cfbc56248
+    2945a967c5303b2c8c14174117c45f3302591150
     CACHE STRING "Version of `tinyobjloader` to be fetched."
 )
 set(MUJOCO_DEP_VERSION_MarchingCubeCpp
@@ -44,7 +44,7 @@ set(MUJOCO_DEP_VERSION_Eigen3
 )
 
 set(MUJOCO_DEP_VERSION_abseil
-    5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a # LTS 20260526.0
+    2065f4ded0558c6f89fee67c8e5228feb4eb960e # LTS 20260817.0
     CACHE STRING "Version of `abseil` to be fetched."
 )
 

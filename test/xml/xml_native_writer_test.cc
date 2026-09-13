@@ -16,7 +16,7 @@
 
 #include <memory>
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-#include <unistd.h>
+  #include <unistd.h>
 #endif
 
 #include <array>
@@ -897,6 +897,28 @@ TEST_F(XMLWriterTest, SaveDefaultMass) {
   EXPECT_THAT(content, HasSubstr("mass=\"1\""));
 }
 
+TEST_F(XMLWriterTest, SaveMeshSite) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <asset>
+      <mesh name="example"
+        vertex="0 0 0  1 0 0  0 1 0  0 0 1"
+        face="2 0 3  0 1 3  1 2 3  0 2 1" />
+    </asset>
+    <worldbody>
+      <body>
+        <site name="s1" type="mesh" mesh="example"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  MjModelPtr model = LoadModelFromString(xml);
+  EXPECT_THAT(model.get(), NotNull());
+  std::string content = SaveAndReadXml(model.get());
+  EXPECT_THAT(content, HasSubstr("type=\"mesh\""));
+  EXPECT_THAT(content, HasSubstr("mesh=\"example\""));
+}
+
 TEST_F(XMLWriterTest, UsesTwoSpaces) {
   static constexpr char xml[] = R"(
   <mujoco>
@@ -1772,6 +1794,34 @@ TEST_F(XMLWriterTest, WritesDefaultClassJointPosAxis) {
   ASSERT_THAT(model.get(), NotNull());
   std::string saved_xml = SaveAndReadXml(model.get());
   EXPECT_THAT(saved_xml, HasSubstr("<joint pos=\"1 2 3\" axis=\"0 1 0\"/>"));
+}
+
+TEST_F(XMLWriterTest, MeshSiteRoundTripPreservesFrame) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <asset>
+      <mesh name="m" vertex="-1 -1 -1  1 -1 -1  1 1 -1  -1 1 -1  -1 -1 1  1 -1 1  1 1 1  -1 1 1"
+            refpos="1 2 3" refquat="0 1 0 0"/>
+    </asset>
+    <worldbody>
+      <site name="s" type="mesh" mesh="m" pos="4 5 6" quat="1 0 0 0"/>
+    </worldbody>
+  </mujoco>
+  )";
+  MjModelPtr model = LoadModelFromString(xml);
+  ASSERT_THAT(model.get(), NotNull());
+
+  std::string saved_xml = SaveAndReadXml(model.get());
+  MjModelPtr reloaded = LoadModelFromString(saved_xml);
+  ASSERT_THAT(reloaded.get(), NotNull());
+
+  EXPECT_NEAR(model->site_pos[0], reloaded->site_pos[0], 1e-6);
+  EXPECT_NEAR(model->site_pos[1], reloaded->site_pos[1], 1e-6);
+  EXPECT_NEAR(model->site_pos[2], reloaded->site_pos[2], 1e-6);
+  EXPECT_NEAR(model->site_quat[0], reloaded->site_quat[0], 1e-6);
+  EXPECT_NEAR(model->site_quat[1], reloaded->site_quat[1], 1e-6);
+  EXPECT_NEAR(model->site_quat[2], reloaded->site_quat[2], 1e-6);
+  EXPECT_NEAR(model->site_quat[3], reloaded->site_quat[3], 1e-6);
 }
 
 }  // namespace

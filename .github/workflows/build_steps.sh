@@ -197,6 +197,12 @@ configure_samples() {
 }
 
 
+build_samples() {
+    echo "Building samples..."
+    cmake --build . --config=Release ${CMAKE_BUILD_ARGS}
+}
+
+
 configure_simulate() {
     echo "Configuring simulate..."
     # See configure_samples: keep the default IPO/LTO for this small build.
@@ -386,29 +392,7 @@ test_mjx() {
 }
 
 
-notify_team_chat() {
-    CHATMSG="$(cat <<-'EOF' | python3
-import json
-import os
-env = lambda x: os.getenv(x, '')
-data = dict(
-    result=env('JOB_URL'),
-    job=env('CHATMSG_JOB_ID'),
-    commit=env('GITHUB_SHA')[:6],
-    name=env('CHATMSG_AUTHOR_NAME').replace('```', ''),
-    email=env('CHATMSG_AUTHOR_EMAIL'),
-    msg=env('CHATMSG_COMMIT_MESSAGE').replace('```', '')
-)
-text = '<{result}|*FAILURE*>: job `{job}` commit `{commit}`\n```Author: {name} <{email}>\n\n{msg}```'.format(**data)
-print(json.dumps({'text' : text}))
-EOF
-)" &&
 
-    curl "$GCHAT_API_URL&threadKey=$GITHUB_SHA&messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" \
-    -X POST \
-    -H "Content-Type: application/json" \
-    --data-raw "${CHATMSG}"
-}
 
 
 build_mujoco_live() {

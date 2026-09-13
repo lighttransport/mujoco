@@ -24,7 +24,7 @@ set(MSVC_INCREMENTAL_DEFAULT ON)
 
 project(
   mujoco_samples
-  VERSION 3.12.1
+  VERSION 3.13.1
   DESCRIPTION "MuJoCo samples binaries"
   HOMEPAGE_URL "https://mujoco.org"
 )
@@ -128,6 +128,16 @@ if(MUJOCO_USE_FILAMENT)
     Threads::Threads
   )
   target_link_options(render PRIVATE ${MUJOCO_SAMPLE_LINK_OPTIONS})
+
+  # Deploy Filament assets (compiled shaders, IBL) next to the binary so the
+  # Filament backend can load them at runtime.
+  add_dependencies(render mujoco_filament_assets)
+  add_custom_command(
+    TARGET render POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      ${CMAKE_BINARY_DIR}/src/render/filament/assets
+      $<TARGET_FILE_DIR:render>/assets
+    COMMENT "Deploying Filament assets for render sample")
 endif()
 
 if(APPLE AND MUJOCO_BUILD_MACOS_FRAMEWORKS)

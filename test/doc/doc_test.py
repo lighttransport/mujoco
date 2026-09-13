@@ -16,22 +16,31 @@
 
 import os
 import re
-
 import sys
-import unittest as googletest
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
-sys.path.insert(0, os.path.join(_REPO_ROOT, 'doc', 'generate'))
-import generate_api_header
-import generate_default_table
-import generate_dmcontrol
-import generate_functions
-import generate_mjcf_map
-import generate_mjcf_table
-import generate_read_table
-import generate_schema
-import generate_xsd
-import mjcf_schema
+
+_DOC_GEN = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../doc/generate')
+)
+sys.path.insert(0, _DOC_GEN)
+try:
+  import resource_loader  # pyrefly: ignore[missing-import]
+  import generate_api_header  # pyrefly: ignore[missing-import]
+  import generate_default_table  # pyrefly: ignore[missing-import]
+  import generate_dmcontrol  # pyrefly: ignore[missing-import]
+  import generate_functions  # pyrefly: ignore[missing-import]
+  import generate_mjcf_map  # pyrefly: ignore[missing-import]
+  import generate_mjcf_table  # pyrefly: ignore[missing-import]
+  import generate_read_table  # pyrefly: ignore[missing-import]
+  import generate_schema  # pyrefly: ignore[missing-import]
+  import generate_xsd  # pyrefly: ignore[missing-import]
+  import mjcf_schema  # pyrefly: ignore[missing-import]
+except ImportError:
+  raise
+
+try:
+  from absl.testing import absltest as googletest
+except ImportError:
+  import unittest as googletest  # pyrefly: ignore[missing-import]
 
 # Functions in headers that are intentionally not in functions.rst.
 _FUNCTIONS_TO_SKIP = set()
@@ -78,7 +87,8 @@ _EXTRA_DOCUMENTED_TYPES = {
 
 def _get_path(*path_parts: str) -> str:
   """Returns absolute path for a repository-relative path."""
-  return os.path.join(_REPO_ROOT, *path_parts)
+  rel_path = '/'.join(path_parts)
+  return str(resource_loader.resolve_path(rel_path))
 
 
 def _check_up_to_date(test_case, rel_path, generated_content):
@@ -328,6 +338,50 @@ class DocTest(googletest.TestCase):
     if errors:
       msg = 'APItypes.rst mismatches:\n' + '\n'.join(errors)
       self.fail(msg)
+
+  def test_mjdata_xmacro_fields(self):
+    """Checks that every mjData field appears in the mjData X macros."""
+    with open(
+        _get_path('include', 'mujoco', 'mjdata.h'), encoding='utf-8'
+    ) as f:
+      header = f.read()
+    with open(
+        _get_path('include', 'mujoco', 'mjxmacro.h'), encoding='utf-8'
+    ) as f:
+      xmacro = f.read()
+
+    # fields of struct mjData_, one declaration per line
+    body = re.search(
+        r'typedef struct mjData_ \{(.*?)\n\} mjData;', header, re.S
+    ).group(1)
+    fields = []
+    for line in body.split('\n'):
+      line = line.split('//')[0].strip()
+      match = re.match(r'^[\w ]+?[\s\*]+(\w+)(\[[^\]]*\])*;$', line)
+      if match:
+        fields.append(match.group(1))
+    self.assertGreater(len(fields), 100)
+
+    # the second argument of every X entry in the MJDATA_* macros
+    xmacro_fields = set()
+    for macro in re.finditer(
+        r'#define MJDATA_\w*((?:[^\n]*\\\n)*[^\n]*)', xmacro
+    ):
+      for entry in re.finditer(r'\bX\w*\s*\(\s*[^,]+,\s*(\w+)', macro.group(1)):
+        xmacro_fields.add(entry.group(1))
+
+    # buffer and arena are the allocations that the pointer fields index into,
+    # signature is the model's compilation signature: not simulation data.
+    # threadlock is an internal runtime flag for thread dispatch.
+    excluded = {'buffer', 'arena', 'signature', 'threadlock'}
+    missing = [
+        f for f in fields if f not in xmacro_fields and f not in excluded
+    ]
+    self.assertEqual(
+        missing, [], 'mjData fields missing from the X macros in mjxmacro.h'
+    )
+    unknown = sorted(xmacro_fields - set(fields))
+    self.assertEqual(unknown, [], 'X macro entries that are not mjData fields')
 
   def test_element_constraints_diamond_inheritance(self):
     con = mjcf_schema.Constraint(

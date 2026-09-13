@@ -77,11 +77,13 @@ TEST_F(MujocoTest, ReadsGeomNames) {
   ASSERT_THAT(model.get(), NotNull()) << error.data();
 
   // Check the geoms have been loaded with the right names
-  int collision_box_id = mj_name2id(model.get(), mjtObj::mjOBJ_GEOM, "collision_box");
+  int collision_box_id =
+      mj_name2id(model.get(), mjtObj::mjOBJ_GEOM, "collision_box");
   ASSERT_GE(collision_box_id, 0);
   EXPECT_EQ(model->geom_type[collision_box_id], mjtGeom::mjGEOM_BOX);
 
-  int visual_sphere_id = mj_name2id(model.get(), mjtObj::mjOBJ_GEOM, "visual_sphere");
+  int visual_sphere_id =
+      mj_name2id(model.get(), mjtObj::mjOBJ_GEOM, "visual_sphere");
   ASSERT_GE(visual_sphere_id, 0);
   EXPECT_EQ(model->geom_type[visual_sphere_id], mjtGeom::mjGEOM_SPHERE);
 }
@@ -115,7 +117,8 @@ TEST_F(MujocoTest, CanLoadUrdfWithNonUniqueNamesCollisionBeforeVisual) {
 
   // Check the collision geom gets its name from the URDF. The visual sphere
   // should not have a name to avoid duplicates.
-  int collision_box_id = mj_name2id(model.get(), mjtObj::mjOBJ_GEOM, "shared_name");
+  int collision_box_id =
+      mj_name2id(model.get(), mjtObj::mjOBJ_GEOM, "shared_name");
   ASSERT_GE(collision_box_id, 0);
   EXPECT_EQ(model->geom_type[collision_box_id], mjtGeom::mjGEOM_BOX);
 }
@@ -149,7 +152,8 @@ TEST_F(MujocoTest, CanLoadUrdfWithNonUniqueNamesVisualBeforeCollision) {
 
   // Check the visual geom gets its name from the URDF. The collision geom
   // should not have a name to avoid duplicates.
-  int visual_sphere_id = mj_name2id(model.get(), mjtObj::mjOBJ_GEOM, "shared_name");
+  int visual_sphere_id =
+      mj_name2id(model.get(), mjtObj::mjOBJ_GEOM, "shared_name");
   ASSERT_GE(visual_sphere_id, 0);
   EXPECT_EQ(model->geom_type[visual_sphere_id], mjtGeom::mjGEOM_SPHERE);
 }
@@ -229,12 +233,13 @@ TEST_F(MujocoTest, ReadsJointTypes) {
   std::vector<mjtJoint> expected_joint_types = {
       mjtJoint::mjJNT_FREE, mjtJoint::mjJNT_HINGE, mjtJoint::mjJNT_BALL,
       mjtJoint::mjJNT_SLIDE};
-  std::vector<std::vector<float>> expected_axis = {
-    {0.0, 0.0, 1.0}, {0.707107, 0.0, -0.707107}, {0.0, 0.0, 1.0},
-    {0.0, 0.0, 1.0}
-  };
+  std::vector<std::vector<float>> expected_axis = {{0.0, 0.0, 1.0},
+                                                   {0.707107, 0.0, -0.707107},
+                                                   {0.0, 0.0, 1.0},
+                                                   {0.0, 0.0, 1.0}};
   for (int i = 0; i < joint_names.size(); ++i) {
-    int id = mj_name2id(model.get(), mjtObj::mjOBJ_JOINT, joint_names[i].c_str());
+    int id =
+        mj_name2id(model.get(), mjtObj::mjOBJ_JOINT, joint_names[i].c_str());
     EXPECT_EQ(model->jnt_type[id], expected_joint_types[i]);
     EXPECT_NEAR(model->jnt_axis[3 * id], expected_axis[i][0], eps);
     EXPECT_NEAR(model->jnt_axis[3 * id + 1], expected_axis[i][1], eps);
@@ -304,6 +309,93 @@ TEST_F(MujocoTest, RepeatedMeshName) {
   EXPECT_STREQ(mjs_getName(mesh2->element)->c_str(), "mesh2");
 
   mj_deleteSpec(spec);
+}
+
+TEST_F(MujocoTest, MimicBecomesJointEquality) {
+  // gripper with mirrored fingers: right_joint = -1 * left_joint + 0.02. the
+  // target joint is declared after the joint that mimics it, on purpose
+  static constexpr char urdf[] = R"(
+  <robot name="gripper">
+    <mujoco><option gravity="0 0 0"/></mujoco>
+    <link name="base">
+      <inertial><mass value="1"/>
+        <inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <link name="left_finger">
+      <inertial><mass value="0.1"/>
+        <inertia ixx="1e-4" iyy="1e-4" izz="1e-4" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <link name="right_finger">
+      <inertial><mass value="0.1"/>
+        <inertia ixx="1e-4" iyy="1e-4" izz="1e-4" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <joint name="right_joint" type="prismatic">
+      <parent link="base"/><child link="right_finger"/><axis xyz="1 0 0"/>
+      <dynamics damping="1"/>
+      <mimic joint="left_joint" multiplier="-1" offset="0.02"/>
+    </joint>
+    <joint name="left_joint" type="prismatic">
+      <parent link="base"/><child link="left_finger"/><axis xyz="1 0 0"/>
+      <dynamics damping="1"/>
+    </joint>
+  </robot>)";
+
+  std::array<char, 1024> error;
+  MjModelPtr model = LoadModelFromString(urdf, error.data(), error.size());
+  ASSERT_THAT(model.get(), NotNull()) << error.data();
+
+  ASSERT_EQ(model->neq, 1);
+  EXPECT_EQ(model->eq_type[0], mjEQ_JOINT);
+  int right = mj_name2id(model.get(), mjOBJ_JOINT, "right_joint");
+  int left = mj_name2id(model.get(), mjOBJ_JOINT, "left_joint");
+  EXPECT_EQ(model->eq_obj1id[0], right);
+  EXPECT_EQ(model->eq_obj2id[0], left);
+  EXPECT_MJTNUM_EQ(model->eq_data[0], 0.02);  // offset
+  EXPECT_EQ(model->eq_data[1], -1.0);         // multiplier
+
+  // simulate from a driver displacement and check the follower tracks
+  // q_right = -1 * q_left + 0.02
+  MjDataPtr data = MakeData(model);
+  data->qpos[model->jnt_qposadr[left]] = 0.03;
+  while (data->time < 2) {
+    mj_step(model.get(), data.get());
+  }
+  mjtNum q_left = data->qpos[model->jnt_qposadr[left]];
+  mjtNum q_right = data->qpos[model->jnt_qposadr[right]];
+  EXPECT_NEAR(q_right, -1.0 * q_left + 0.02, 1e-4);
+}
+
+TEST_F(MujocoTest, MimicTargetingIncompatibleJointIsIgnored) {
+  // a <mimic> pointing at a fixed joint used to load with the mimic dropped;
+  // it must still load rather than turn into a hard failure
+  static constexpr char urdf[] = R"(
+  <robot name="robot">
+    <link name="base">
+      <inertial><mass value="1"/>
+        <inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <link name="a">
+      <inertial><mass value="0.1"/>
+        <inertia ixx="1e-4" iyy="1e-4" izz="1e-4" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <link name="b">
+      <inertial><mass value="0.1"/>
+        <inertia ixx="1e-4" iyy="1e-4" izz="1e-4" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <joint name="mover" type="prismatic">
+      <parent link="base"/><child link="a"/><axis xyz="1 0 0"/>
+      <mimic joint="welded"/>
+    </joint>
+    <joint name="welded" type="fixed">
+      <parent link="a"/><child link="b"/>
+    </joint>
+  </robot>)";
+
+  std::array<char, 1024> error;
+  mock_warning_handler.ExpectWarnings("<mimic> on joint 'mover' ignored");
+  MjModelPtr model = LoadModelFromString(urdf, error.data(), error.size());
+  ASSERT_THAT(model.get(), NotNull()) << error.data();
+  EXPECT_EQ(model->neq, 0);
 }
 
 }  // namespace

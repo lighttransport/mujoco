@@ -43,8 +43,8 @@
 
 //-------------------------- Constants -------------------------------------------------------------
 
- #define mjVERSION 3012001
-#define mjVERSIONSTRING "3.12.1"
+ #define mjVERSION 3013001
+#define mjVERSIONSTRING "3.13.1"
 
 // names of disable flags
 const char* mjDISABLESTRING[mjNDISABLE] = {
@@ -78,7 +78,8 @@ const char* mjENABLESTRING[mjNENABLE] = {
   "Fwdinv",
   "InvDiscrete",
   "Sleep",
-  "DiagExact"
+  "DiagExact",
+  "IPC"
 };
 
 
@@ -598,6 +599,54 @@ mjtNum mj_geomDistance(const mjModel* m, mjData* d, int geom1, int geom2, mjtNum
   }
 
   return dist;
+}
+
+
+// return 1 if point is inside a site (convex hull for meshes), 0 otherwise
+int mj_insideSite(const mjModel* m, const mjData* d, int siteid, const mjtNum point[3]) {
+  int type = m->site_type[siteid];
+  const mjtNum* pos = d->site_xpos + 3*siteid;
+  const mjtNum* mat = d->site_xmat + 9*siteid;
+  const mjtNum* size = m->site_size + 3*siteid;
+
+  if (type == mjGEOM_MESH) {
+    int meshid = m->site_dataid[siteid];
+    if (meshid < 0) {
+      return 0;
+    }
+    int pn = m->mesh_polynum[meshid];
+    if (pn <= 0) {
+      return 0;
+    }
+
+    // rotate into local frame
+    mjtNum vec[3], plocal[3];
+    mju_sub3(vec, point, pos);
+    mju_mulMatTVec3(plocal, mat, vec);
+
+    // check bounding box
+    if (mju_abs(plocal[0]) > size[0] ||
+        mju_abs(plocal[1]) > size[1] ||
+        mju_abs(plocal[2]) > size[2]) {
+      return 0;
+    }
+
+    // check convex hull polygon face planes
+    const float* vbase = m->mesh_vert + 3*m->mesh_vertadr[meshid];
+    int polyadr = m->mesh_polyadr[meshid];
+    for (int p=0; p < pn; p++) {
+      const mjtNum* pnl = m->mesh_polynormal + 3*(polyadr + p);
+      const float* v0 = vbase + 3*m->mesh_polyvert[m->mesh_polyvertadr[polyadr + p]];
+      mjtNum c = pnl[0]*v0[0] + pnl[1]*v0[1] + pnl[2]*v0[2];
+      mjtNum dd = pnl[0]*plocal[0] + pnl[1]*plocal[1] + pnl[2]*plocal[2] - c;
+      if (dd > 0) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+
+  return mju_insidePrimitive(pos, mat, size, (mjtGeom)type, point);
 }
 
 

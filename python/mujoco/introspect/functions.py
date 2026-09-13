@@ -3819,6 +3819,37 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Return smallest signed distance between two geoms and optionally segment from geom1 to geom2.',  # pylint: disable=line-too-long
      )),
+    ('mj_insideSite',
+     FunctionDecl(
+         name='mj_insideSite',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='m',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjModel', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='d',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjData', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='siteid',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='point',
+                 type=ArrayType(
+                     inner_type=ValueType(name='mjtNum', is_const=True),
+                     extents=(3,),
+                 ),
+             ),
+         ),
+         doc='Return 1 if point is inside a site (convex hull for meshes), 0 otherwise.',  # pylint: disable=line-too-long
+     )),
     ('mj_contactForce',
      FunctionDecl(
          name='mj_contactForce',

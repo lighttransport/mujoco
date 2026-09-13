@@ -112,10 +112,17 @@ typedef struct mjData_ {
   int     nl;                // number of limit constraints
   int     nefc;              // number of constraints
   int     nJ;                // number of non-zeros in constraint Jacobian
+
+  // effective metric: per-step activity flag and sizes, set by mjd_effBuild
   int     efm_active;        // implicit effective metric M+K is active (see mjd_effBuild)
   int     nefmK;             // number of non-zeros in effective-stiffness CSR
+  int     nefmcon;           // packed length of the contact rank-1 rows
+  int     nefmT;             // number of tendons with terms in the metric
+  int     nefmA;             // number of actuators with terms in the metric
   int     nefmdof;           // number of 3x3 blocks in the effective-metric preconditioner
   int     nefmL;             // size of the effective-metric block storage (9*nefmdof)
+
+  // variable sizes, continued
   int     nY;                // number of non-zeros in constraint inverse inertia square root
   int     nA;                // number of non-zeros in constraint inverse inertia matrix
   int     nisland;           // number of detected constraint islands
@@ -212,6 +219,10 @@ typedef struct mjData_ {
   mjtNum* flexvert_length;   // flex vertex lengths                              (nflexvert x 2)
   mjtNum* bvh_aabb_dyn;      // global bounding box (center, size)               (nbvhdynamic x 6)
 
+  // AL contact state carried across steps (flag ipc, not in mjtState)
+  mjtNum* flexvert_lambda;   // flex contact multiplier                          (nflexvert x 1)
+  int*    flexvert_conage;   // flex contact age: <0 loaded, >0 steps since      (nflexvert x 1)
+
   // computed by mj_fwdPosition/mj_tendon
   int*    ten_wrapadr;       // start address of tendon's path                   (ntendon x 1)
   int*    ten_wrapnum;       // number of wrap points in path                    (ntendon x 1)
@@ -292,7 +303,7 @@ typedef struct mjData_ {
   mjtNum* qacc_smooth;       // unconstrained acceleration                       (nv x 1)
 
   // computed by mj_fwdConstraint/mj_inverse
-  mjtNum* qfrc_constraint;   // constraint force                                 (nv x 1)
+  mjtNum* qfrc_constraint;   // constraint force (flag ipc: incl. flex contact)  (nv x 1)
 
   // computed by mj_inverse
   mjtNum* qfrc_inverse;      // net external force; should equal:
@@ -376,13 +387,26 @@ typedef struct mjData_ {
   mjtNum* efc_vel;           // velocity in constraint space: J*qvel             (nefc x 1)
   mjtNum* efc_aref;          // reference pseudo-acceleration                    (nefc x 1)
 
-  // computed by mj_fwdPosition/mj_invPosition when the implicit effective metric M+K is active
+  // computed when the implicit effective metric M+K is active
   mjtNum* efm_c;             // smooth-force shift h*K*qvel                      (nv x 1)
+  mjtNum* efm_diag;          // effective-metric diagonal h*D + h^2*K            (nv x 1)
+  mjtNum* efm_ck;            // diagonal stiffness h*k, for the smooth shift     (nv x 1)
+  mjtNum* efm_sdiag;         // diagonal additions to M in the backbone          (nv x 1)
+  mjtNum* efm_fluid;         // fluid drag blocks in M's sparsity pattern        (nC x 1)
+  int*    efm_tid;           // ids of tendons with terms in the metric          (ntendon x 1)
+  mjtNum* efm_ts;            // tendon metric scale h^2*k + h*b, tid indexed     (ntendon x 1)
+  mjtNum* efm_tk;            // tendon stiffness h*k for shift, tid indexed      (ntendon x 1)
+  int*    efm_aid;           // ids of actuators with terms in the metric        (nactuator x 1)
+  mjtNum* efm_as;            // actuator metric scale h^2*gp + h*gv, aid indexed (nactuator x 1)
+  mjtNum* efm_ak;            // actuator stiffness h*gp, aid indexed             (nactuator x 1)
+  mjtNum* efm_ca;            // actuation-stage smooth-force shift               (nv x 1)
   int*    efm_K_rownnz;      // effective-stiffness CSR row nonzeros             (nv x 1)
   int*    efm_K_rowadr;      // effective-stiffness CSR row addresses            (nv x 1)
   int*    efm_K_colind;      // effective-stiffness CSR column indices           (nefmK x 1)
   mjtNum* efm_K_val;         // effective-stiffness CSR values                   (nefmK x 1)
   int*    efm_dofid;         // block k -> dof address of its vertex triple      (nefmdof x 1)
+  int*    efm_con_ind;       // contact rows, packed [nnz, conid, colind...]     (nefmcon x 1)
+  mjtNum* efm_con_val;       // contact rows, packed [scale, force, val...]      (nefmcon x 1)
   mjtNum* efm_L;             // factored 3x3 diagonal blocks of M+K              (nefmL x 1)
 
   //-------------------- arena-allocated: POSITION, VELOCITY, CONTROL/ACCELERATION dependent
@@ -815,6 +839,7 @@ typedef struct mjModel_ {
   // sites
   int*      site_type;            // geom type for rendering (mjtGeom)        (nsite x 1)
   int*      site_bodyid;          // id of site's body                        (nsite x 1)
+  int*      site_dataid;          // id of site's mesh; -1: none              (nsite x 1)
   int*      site_matid;           // material id for rendering; -1: none      (nsite x 1)
   int*      site_group;           // group for visibility                     (nsite x 1)
   mjtByte*  site_sameframe;       // same frame as body (mjtSameframe)        (nsite x 1)
@@ -1641,6 +1666,8 @@ typedef struct mjrfMaterial_ {
   const mjrfTexture* orm_texture;         // occlusion/roughness/metallic texture (RGB8)
   const mjrfTexture* emissive_texture;    // emissive texture (RGB8)
   const mjrfTexture* reflection_texture;  // reflection texture, for internal use only
+  float reflection_normal[3];      // mirror normal, gates reflection to front face (internal)
+  float reflection_view_proj[16];  // main camera view-proj for reflection UV mapping (internal)
 } mjrfMaterial;
 typedef struct mjrfRenderableParams_ {
   mjtBool cast_shadows;                 // if true, casts shadows
@@ -1956,6 +1983,7 @@ typedef struct mjsSite_ {          // site specification
   float rgba[4];                   // rgba when material is omitted
 
   // other
+  mjString* meshname;              // mesh attached to site
   mjDoubleVec* userdata;           // user data
   mjString* info;                  // message appended to compiler errors
 } mjsSite;
@@ -2390,8 +2418,9 @@ typedef enum mjtEnableBit {       // enable optional feature bitflags
   mjENBL_INVDISCRETE  = 1<<3,     // discrete-time inverse dynamics
   mjENBL_SLEEP        = 1<<4,     // sleeping
   mjENBL_DIAGEXACT    = 1<<5,     // exact diagonal of constraint inertia
+  mjENBL_IPC          = 1<<6,     // IPC flex contact mode of the discrete integrator
 
-  mjNENABLE           = 6         // number of enable flags
+  mjNENABLE           = 7         // number of enable flags
 } mjtEnableBit;
 typedef enum mjtJoint {           // type of degree of freedom
   mjJNT_FREE          = 0,        // global position and orientation (quat)       (7)
@@ -2470,7 +2499,8 @@ typedef enum mjtIntegrator {      // integrator mode
   mjINT_EULER         = 0,        // semi-implicit Euler
   mjINT_RK4,                      // 4th-order Runge Kutta
   mjINT_IMPLICIT,                 // implicit in velocity
-  mjINT_IMPLICITFAST              // implicit in velocity, no rne derivative
+  mjINT_IMPLICITFAST,             // implicit in velocity, no rne derivative
+  mjINT_DISCRETE                  // discrete step map: constraint solve in the effective metric
 } mjtIntegrator;
 typedef enum mjtCone {            // type of friction cone
   mjCONE_PYRAMIDAL     = 0,       // pyramidal
@@ -3450,7 +3480,8 @@ const char* mjENABLESTRING[mjNENABLE] = {
   "Fwdinv",
   "InvDiscrete",
   "Sleep",
-  "DiagExact"
+  "DiagExact",
+  "IPC"
 };
 const char* mjTIMERSTRING[mjNTIMER]= {
   "step",
@@ -3589,9 +3620,15 @@ void mjrf_defaultLightParams(mjrfLightParams* params);
 mjrfLight* mjrf_createLight(mjrfContext* ctx, const mjrfLightParams* params);
 void mjrf_destroyLight(mjrfLight* light);
 void mjrf_setLightEnabled(mjrfLight* light, mjtBool enabled);
-void mjrf_setLightIntensity(mjrfLight* light, float intensity);
-void mjrf_setLightShadowMapSize(mjrfLight* light, int map_size);
+void mjrf_setLightShadowsEnabled(mjrfLight* light, mjtBool enabled);
 void mjrf_setLightColor(mjrfLight* light, const float color[3]);
+void mjrf_setLightIntensity(mjrfLight* light, float intensity);
+void mjrf_setLightRange(mjrfLight* light, float range);
+void mjrf_setLightCutoffAngle(mjrfLight* light, float cutoff);
+void mjrf_setLightSoftness(mjrfLight* light, float softness);
+void mjrf_setLightBulbRadius(mjrfLight* light, float radius);
+void mjrf_setLightBlurWidth(mjrfLight* light, float blur_width);
+void mjrf_setLightShadowMapSize(mjrfLight* light, int map_size);
 void mjrf_setLightTransform(mjrfLight* light, const float position[3], const float direction[3]);
 int mjrf_getLightType(const mjrfLight* light);
 void mjrf_defaultMaterial(mjrfMaterial* material);
@@ -3786,6 +3823,7 @@ void mj_objectAcceleration(const mjModel* m, const mjData* d,
                            int objtype, int objid, mjtNum res[6], int flg_local);
 mjtNum mj_geomDistance(const mjModel* m, mjData* d, int geom1, int geom2, mjtNum distmax,
                        mjtNum fromto[6]);
+int mj_insideSite(const mjModel* m, const mjData* d, int siteid, const mjtNum point[3]);
 void mj_contactForce(const mjModel* m, const mjData* d, int id, mjtNum result[6]);
 void mj_differentiatePos(const mjModel* m, mjtNum* qvel, mjtNum dt,
                          const mjtNum* qpos1, const mjtNum* qpos2);

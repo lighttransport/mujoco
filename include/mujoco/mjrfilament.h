@@ -280,14 +280,32 @@ void mjrf_destroyLight(mjrfLight* light);
 // Enables or disables the light.
 void mjrf_setLightEnabled(mjrfLight* light, mjtBool enabled);
 
-// Sets the intensity of the light, in candela.
-void mjrf_setLightIntensity(mjrfLight* light, float intensity);
-
-// Sets the resolution of the light's shadow map, in texels.
-void mjrf_setLightShadowMapSize(mjrfLight* light, int map_size);
+// Enables or disables whether or not the light casts shadows.
+void mjrf_setLightShadowsEnabled(mjrfLight* light, mjtBool enabled);
 
 // Sets the RGB color of the light.
 void mjrf_setLightColor(mjrfLight* light, const float color[3]);
+
+// Sets the intensity of the light, in candela.
+void mjrf_setLightIntensity(mjrfLight* light, float intensity);
+
+// Sets the effective range of the light, in meters.
+void mjrf_setLightRange(mjrfLight* light, float range);
+
+// Sets the cutoff angle of the light, in degrees. Only used for spot lights.
+void mjrf_setLightCutoffAngle(mjrfLight* light, float cutoff);
+
+// Sets the softness of the light, in the range [0, 1]. Only used for spot lights.
+void mjrf_setLightSoftness(mjrfLight* light, float softness);
+
+// Sets the radius of the light bulb.
+void mjrf_setLightBulbRadius(mjrfLight* light, float radius);
+
+// Sets the width of the blur applied to the light's shadow map, in texels.
+void mjrf_setLightBlurWidth(mjrfLight* light, float blur_width);
+
+// Sets the resolution of the light's shadow map, in texels.
+void mjrf_setLightShadowMapSize(mjrfLight* light, int map_size);
 
 // Sets the position and direction of the light.
 void mjrf_setLightTransform(mjrfLight* light, const float position[3], const float direction[3]);
@@ -321,6 +339,8 @@ typedef struct mjrfMaterial_ {
   const mjrfTexture* orm_texture;         // occlusion/roughness/metallic texture (RGB8)
   const mjrfTexture* emissive_texture;    // emissive texture (RGB8)
   const mjrfTexture* reflection_texture;  // reflection texture, for internal use only
+  float reflection_normal[3];      // mirror normal, gates reflection to front face (internal)
+  float reflection_view_proj[16];  // main camera view-proj for reflection UV mapping (internal)
 } mjrfMaterial;
 
 // Initializes the mjrfMaterial to default values.

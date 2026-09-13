@@ -170,6 +170,7 @@ enum integrator : mjtIntegrator {
   RK4            = mjINT_RK4
   implicit       = mjINT_IMPLICIT
   implicitfast   = mjINT_IMPLICITFAST
+  discrete       = mjINT_DISCRETE
 }
 
 enum cone : mjtCone {
@@ -460,7 +461,7 @@ group actuator_dynamics {
 
 group transmission {
   joint              : ref<joint> (nodefault)
-  jointinparent      : string (nodefault)
+  jointinparent      : ref<joint> (nodefault)
   tendon             : ref<tendon> (nodefault)
   slidersite         : ref<site> (nodefault)
   cranksite          : ref<site> (nodefault)
@@ -626,6 +627,7 @@ element flag {
   invdiscrete        : enum<enable> = disable
   sleep              : enum<enable> = disable
   diagexact          : enum<enable> = disable
+  ipc                : enum<enable> = disable
 }
 
 
@@ -1072,9 +1074,10 @@ element site : mjsSite {
   class              : ref<default>
   type               : enum<geomtype> = sphere
   group              : int
-  pos                : double[3] = {0, 0, 0}
+  pos                : double[3] = {0, 0, 0} (writing=custom)  # saved in the mesh-corrected frame
   use orientation
   material           : ref<material>
+  mesh               : ref<mesh> (field=meshname)
   size               : double[1..3] = {0.005, 0.005, 0.005} (writing=custom)  # saved length is type-dependent
   fromto             : double[6] (writing=custom)  # compile directive: saved as pos/quat/size
   rgba               : float[4] = {0.5, 0.5, 0.5, 1}
@@ -1200,6 +1203,7 @@ element composite_site (xml=site) {
   size               : double[1..3]
   material           : ref<material>
   rgba               : float[4]
+  mesh               : ref<mesh> (field=meshname)
 }
 
 element flexcomp {
@@ -1641,7 +1645,7 @@ element muscle : mjsActuator {
   forcerange         : double[2]
   use actuator_dynamics
   joint              : ref<joint> (nodefault)
-  jointinparent      : string (nodefault)
+  jointinparent      : ref<joint> (nodefault)
   tendon             : ref<tendon> (nodefault)
   slidersite         : ref<site> (nodefault)
   cranksite          : ref<site> (nodefault)
@@ -1693,7 +1697,7 @@ element actuator_plugin : mjsActuator (xml=plugin) {
   actrange           : double[2]
   use actuator_dynamics
   joint              : ref<joint>
-  jointinparent      : string
+  jointinparent      : ref<joint>
   site               : ref<site>
   actdim             : int = -1
   dyntype            : enum<dyn> = none
@@ -2115,6 +2119,7 @@ element tactile : mjsSensor {
   interp             : enum<interp>
   delay              : double
   interval           : double[1..2]
+  cutoff             : double
   user               : double[]
 }
 
@@ -2156,12 +2161,12 @@ element custom {
 element numeric : mjsNumeric {
   name               : id<numeric> (required)
   size               : int
-  data               : string
+  data               : double[]
 }
 
 element text : mjsText {
   name               : id<text> (required)
-  data               : string (required)
+  data               : string
 }
 
 element tuple : mjsTuple {

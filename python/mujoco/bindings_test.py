@@ -114,8 +114,10 @@ TEST_XML_TEXTURE = r"""
 @contextlib.contextmanager
 def temporary_callback(setter, callback):
   setter(callback)
-  yield
-  setter(None)
+  try:
+    yield
+  finally:
+    setter(None)
 
 
 class MuJoCoBindingsTest(parameterized.TestCase):
@@ -1077,7 +1079,7 @@ Euler integrator, semi-implicit in velocity.
     self.assertEqual(mujoco.mjtEnableBit.mjENBL_OVERRIDE, 1 << 0)
     self.assertEqual(mujoco.mjtEnableBit.mjENBL_ENERGY, 1 << 1)
     self.assertEqual(mujoco.mjtEnableBit.mjENBL_FWDINV, 1 << 2)
-    self.assertEqual(mujoco.mjtEnableBit.mjNENABLE, 6)
+    self.assertEqual(mujoco.mjtEnableBit.mjNENABLE, 7)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_PLANE, 0)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_HFIELD, 1)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_SPHERE, 2)
@@ -1281,6 +1283,34 @@ Euler integrator, semi-implicit in velocity.
         TypeError, 'callback is not an Optional[Callable]'
     ):
       mujoco.set_mjcb_time(1)
+
+  def test_mjcb_time_restore_default(self):
+    timer_step = mujoco.mjtTimer.mjTIMER_STEP
+    call_count = 0
+
+    def custom_timer():
+      nonlocal call_count
+      call_count += 1
+      return 0.0
+
+    with temporary_callback(mujoco.set_mjcb_time, custom_timer):
+      mujoco.mj_step(self.model, self.data)
+      # Both of these establish the baseline for the assertions after the
+      # restore: the custom timer is being called, and it keeps the accumulated
+      # duration at exactly zero.
+      self.assertGreater(call_count, 0)
+      self.assertEqual(self.data.timer[timer_step].duration, 0.0)
+
+    # Leaving the context calls set_mjcb_time(None), which must restore the
+    # default timer rather than clear it. No MjData is constructed after the
+    # restore -- self.data already exists -- so nothing can install a timer
+    # lazily on the way past, and a nonzero duration below can only come from
+    # set_mjcb_time(None) itself.
+    self.assertIsNone(mujoco.get_mjcb_time())
+    call_count_at_restore = call_count
+    mujoco.mj_step(self.model, self.data)
+    self.assertEqual(call_count, call_count_at_restore)
+    self.assertGreater(self.data.timer[timer_step].duration, 0.0)
 
   def test_mjcb_sensor(self):
 
@@ -2032,6 +2062,123 @@ Euler integrator, semi-implicit in velocity.
                 name, str(e)
             )
         )
+
+  def test_mj_inside_site_sphere(self):
+    xml = r"""
+    <mujoco>
+      <worldbody>
+        <site name="sphere_site" type="sphere" size="0.5" pos="1 0 0"/>
+      </worldbody>
+    </mujoco>
+    """
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, 'sphere_site')
+
+    # Point at the center of the site: should be inside
+    self.assertEqual(mujoco.mj_insideSite(model, data, site_id, [1, 0, 0]), 1)
+
+    # Point just inside the site boundary
+    self.assertEqual(
+        mujoco.mj_insideSite(model, data, site_id, [1.4, 0, 0]), 1
+    )
+
+    # Point outside the site
+    self.assertEqual(mujoco.mj_insideSite(model, data, site_id, [2, 0, 0]), 0)
+
+    # Point far away
+    self.assertEqual(
+        mujoco.mj_insideSite(model, data, site_id, [10, 10, 10]), 0
+    )
+
+  def test_mj_inside_site_box(self):
+    xml = r"""
+    <mujoco>
+      <worldbody>
+        <site name="box_site" type="box" size="0.5 0.5 0.5" pos="0 0 0"/>
+      </worldbody>
+    </mujoco>
+    """
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, 'box_site')
+
+    # Point at origin: inside
+    self.assertEqual(mujoco.mj_insideSite(model, data, site_id, [0, 0, 0]), 1)
+
+    # Point at corner (just inside): inside
+    self.assertEqual(
+        mujoco.mj_insideSite(model, data, site_id, [0.4, 0.4, 0.4]), 1
+    )
+
+    # Point outside along x
+    self.assertEqual(
+        mujoco.mj_insideSite(model, data, site_id, [1.0, 0, 0]), 0
+    )
+
+  def test_mj_inside_site_mesh(self):
+    xml = r"""
+    <mujoco>
+      <asset>
+        <mesh name="box_mesh"
+              vertex="-0.1 -0.1 -0.1
+                       0.1 -0.1 -0.1
+                       0.1  0.1 -0.1
+                      -0.1  0.1 -0.1
+                      -0.1 -0.1  0.1
+                       0.1 -0.1  0.1
+                       0.1  0.1  0.1
+                      -0.1  0.1  0.1"/>
+      </asset>
+      <worldbody>
+        <site name="mesh_site" type="mesh" mesh="box_mesh" pos="1 0 0"/>
+      </worldbody>
+    </mujoco>
+    """
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, 'mesh_site')
+
+    # Point at the center of the mesh site: inside
+    self.assertEqual(mujoco.mj_insideSite(model, data, site_id, [1, 0, 0]), 1)
+
+    # Point outside mesh site (to the left)
+    self.assertEqual(mujoco.mj_insideSite(model, data, site_id, [0, 0, 0]), 0)
+
+    # Point outside mesh site (to the right)
+    self.assertEqual(mujoco.mj_insideSite(model, data, site_id, [2, 0, 0]), 0)
+
+  def test_mj_inside_site_kwargs(self):
+    xml = r"""
+    <mujoco>
+      <worldbody>
+        <site name="sphere_site" type="sphere" size="1.0" pos="0 0 0"/>
+      </worldbody>
+    </mujoco>
+    """
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    # Test that keyword arguments work
+    result = mujoco.mj_insideSite(
+        m=model,
+        d=data,
+        siteid=0,
+        point=[0, 0, 0],
+    )
+    self.assertEqual(result, 1)
+
+    # Test with numpy array
+    point = np.array([0.5, 0.5, 0.5], dtype=DTYPE)
+    result = mujoco.mj_insideSite(model, data, 0, point)
+    self.assertEqual(result, 1)
 
 
 if __name__ == '__main__':

@@ -15,6 +15,9 @@
 #ifndef MUJOCO_INCLUDE_MJSAN_H_
 #define MUJOCO_INCLUDE_MJSAN_H_
 
+#include <mujoco/mjdata.h>
+#include <mujoco/mjexport.h>
+
 // Define ADDRESS_SANITIZER if implied by other macros.
 #if !defined(ADDRESS_SANITIZER)
   #if defined(__SANITIZE_ADDRESS__)
@@ -54,15 +57,17 @@
 extern "C" {
 #endif
 
-void mj__markStack(mjData*) __attribute__((noinline));
-static inline __attribute__((always_inline)) void mj_markStack(mjData* d) {
+MJAPI void mj__markStack(mjData*) __attribute__((noinline));
+__attribute__((always_inline))
+static inline void mj_markStack(mjData* d) {
   __asm__ volatile("" ::: "memory");
   mj__markStack(d);
   __asm__ volatile("" ::: "memory");
 }
 
-void mj__freeStack(mjData*) __attribute__((noinline));
-static inline __attribute__((always_inline)) void mj_freeStack(mjData* d) {
+MJAPI void mj__freeStack(mjData*) __attribute__((noinline));
+__attribute__((always_inline))
+static inline void mj_freeStack(mjData* d) {
   __asm__ volatile("" ::: "memory");
   mj__freeStack(d);
   __asm__ volatile("" ::: "memory");

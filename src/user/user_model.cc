@@ -486,6 +486,9 @@ mjCModel& mjCModel::operator+=(const mjCModel& other) {
   // update pointers to local elements
   PointToLocal();
 
+  // reprocess lists to ensure ordering matches compiled model after attach
+  ProcessLists(/*checkrepeat=*/false);
+
   // update signature after we updated the tree lists and we updated the pointers
   spec.element->signature = Signature();
   return *this;
@@ -1838,17 +1841,27 @@ void mjCModel::IndexAssets(bool discard) {
     }
   }
 
-  // materials referenced in sites
+  // materials and meshes referenced in sites
   for (int i = 0; i < sites_.size(); i++) {
     mjCSite* site = sites_[i];
 
+    // find mesh by name
+    if (!site->get_meshname().empty()) {
+      mjCMesh* mesh = static_cast<mjCMesh*>(FindObject(mjOBJ_MESH, site->get_meshname()));
+      if (mesh) {
+        site->mesh = mesh;
+      } else {
+        throw mjCError(site, "mesh '%s' not found in site %d", site->get_meshname().c_str(), i);
+      }
+    }
+
     // find material by name
-    if (!site->material_.empty()) {
+    if (!site->get_material().empty()) {
       mjCBase* material = FindObject(mjOBJ_MATERIAL, site->get_material());
       if (material) {
         site->matid = material->id;
       } else {
-        throw mjCError(site, "material '%s' not found in site %d", site->material_.c_str(), i);
+        throw mjCError(site, "material '%s' not found in site %d", site->get_material().c_str(), i);
       }
     }
   }
@@ -2852,6 +2865,7 @@ void mjCModel::CopyTree(mjModel* m) {
       // set site fields
       m->site_type[sid]   = ps->type;
       m->site_bodyid[sid] = ps->body->id;
+      m->site_dataid[sid] = ps->mesh ? ps->mesh->id : -1;
       m->site_matid[sid]  = ps->matid;
       m->site_group[sid]  = ps->group;
       mjuu_copyvec(m->site_size + 3 * sid, ps->size, 3);
@@ -3546,6 +3560,14 @@ void mjCModel::CopyObjects(mjModel* m) {
     // set interpolation type: positive = volumetric, negative = shell mode
     m->flex_interp[i] = pfl->spec.elastic2d ? -pfl->spec.order : pfl->spec.order;
 
+    if (m->flex_passive[i] && (m->flex_rigid[i] || m->flex_interp[i] || m->flex_dim[i] < 2)) {
+      AddWarning("flex '" +
+                     pfl->name +
+                     "' has passive contact, which is not supported for rigid, "
+                     "interpolated or 1D flexes: attribute ignored",
+                 pfl);
+    }
+
     // set cell count for multi-cell finite cell method
     m->flex_cellnum[3 * i + 0] = pfl->spec.cellcount[0];
     m->flex_cellnum[3 * i + 1] = pfl->spec.cellcount[1];
@@ -4027,7 +4049,7 @@ void mjCModel::FinalizeSimple(mjModel* m) {
   int count = 0;
   for (int i = nv - 1; i >= 0; i--) {
     if (m->body_simple[m->dof_bodyid[i]]) {
-      count++;    // increment counter
+      count++;  // increment counter
     } else {
       count = 0;  // reset
     }
@@ -5048,6 +5070,12 @@ void mjCModel::TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs) {
   // any geom references the mesh
   for (mjCMesh* mesh : meshes_) {
     if (mesh->spec.inertia == mjMESH_INERTIA_CONVEX) { mesh->SetNeedHull(true); }
+  }
+
+  for (int i = 0; i < sites_.size(); i++) {
+    if (sites_[i]->mesh && sites_[i]->spec.type == mjGEOM_MESH) {
+      sites_[i]->mesh->SetNeedHull(true);
+    }
   }
 
   // automatically set nuser fields

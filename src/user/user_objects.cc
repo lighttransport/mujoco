@@ -3991,7 +3991,9 @@ mjCSite::mjCSite(mjCModel* _model, mjCDef* _def) {
   // clear internal variables
   body  = 0;
   matid = -1;
+  mesh  = 0;
   spec_material_.clear();
+  spec_meshname_.clear();
   spec_userdata_.clear();
 
   // reset to default if given
@@ -4030,9 +4032,11 @@ void mjCSite::PointToLocal() {
   spec.element  = static_cast<mjsElement*>(this);
   spec.info     = &info;
   spec.material = &spec_material_;
+  spec.meshname = &spec_meshname_;
   spec.userdata = &spec_userdata_;
   userdata      = nullptr;
   material      = nullptr;
+  meshname      = nullptr;
 }
 
 
@@ -4041,6 +4045,7 @@ void mjCSite::CopyFromSpec() {
 
   userdata_ = spec_userdata_;
   material_ = spec_material_;
+  meshname_ = spec_meshname_;
 }
 
 
@@ -4049,6 +4054,15 @@ void mjCSite::NameSpace(const mjCModel* m) {
   if (!spec_material_.empty() && model != m) {
     spec_material_ = m->prefix + spec_material_ + m->suffix;
   }
+  if (!spec_meshname_.empty() && model != m) {
+    spec_meshname_ = m->prefix + spec_meshname_ + m->suffix;
+  }
+}
+
+
+const std::string& mjCSite::get_material() const {
+  if (mesh && spec_material_.empty()) { return mesh->Material(); }
+  return spec_material_;
 }
 
 
@@ -4065,9 +4079,17 @@ void mjCSite::Compile(void) {
   // check type
   if (type < 0 || type >= mjNGEOMTYPES) { throw mjCError(this, "invalid type in site"); }
 
-  // do not allow meshes, hfields and planes
-  if (type == mjGEOM_MESH || type == mjGEOM_HFIELD || type == mjGEOM_PLANE) {
-    throw mjCError(this, "meshes, hfields and planes not allowed in site");
+  // do not allow hfields and planes
+  if (type == mjGEOM_HFIELD || type == mjGEOM_PLANE) {
+    throw mjCError(this, "hfields and planes not allowed in site");
+  }
+
+  // check mesh
+  if (type == mjGEOM_MESH && !mesh) {
+    throw mjCError(this, "mesh site '%s' (id = %d) must have valid meshid", name.c_str(), id);
+  }
+  if (type != mjGEOM_MESH && mesh) {
+    throw mjCError(this, "mesh can only be specified for mesh sites");
   }
 
   // 'fromto': compute pos, quat, size
@@ -4077,16 +4099,16 @@ void mjCSite::Compile(void) {
         type != mjGEOM_CYLINDER &&
         type != mjGEOM_ELLIPSOID &&
         type != mjGEOM_BOX) {
-      throw mjCError(this, "fromto requires capsule, cylinder, box or ellipsoid in geom");
+      throw mjCError(this, "fromto requires capsule, cylinder, box or ellipsoid in site");
     }
 
     // make sure pos is not defined; cannot use mjuu_defined because default is (0,0,0)
-    if (pos[0] || pos[1] || pos[2]) { throw mjCError(this, "both pos and fromto defined in geom"); }
+    if (pos[0] || pos[1] || pos[2]) { throw mjCError(this, "both pos and fromto defined in site"); }
 
     // size[1] = length (for capsule and cylinder)
     double vec[3] = {fromto[0] - fromto[3], fromto[1] - fromto[4], fromto[2] - fromto[5]};
     size[1]       = mjuu_normvec(vec, 3) / 2;
-    if (size[1] < mjEPS) { throw mjCError(this, "fromto points too close in geom"); }
+    if (size[1] < mjEPS) { throw mjCError(this, "fromto points too close in site"); }
 
     // adjust size for ellipsoid and box
     if (type == mjGEOM_ELLIPSOID || type == mjGEOM_BOX) {
@@ -4107,6 +4129,26 @@ void mjCSite::Compile(void) {
   else {
     const char* err = ResolveOrientation(quat, compiler->degree, compiler->eulerseq, alt);
     if (err) { throw mjCError(this, "orientation specification error '%s' in site %d", err, id); }
+  }
+
+  // mesh: accumulate frame, set size
+  if (mesh) {
+    if (mjuu_defined(fromto[0])) { throw mjCError(this, "fromto cannot be used with mesh site"); }
+
+    mjCMesh* pmesh     = mesh;
+    double   center[3] = {0, 0, 0};
+
+    double meshpos[3];
+    mjuu_rotVecQuat(meshpos, center, pmesh->GetQuatPtr());
+    mjuu_addtovec(meshpos, pmesh->GetPosPtr(), 3);
+
+    mjuu_frameaccum(pos, quat, meshpos, pmesh->GetQuatPtr());
+
+    const double* aamm = mesh->aamm();
+
+    size[0] = std::max(std::abs(aamm[0]), std::abs(aamm[3]));
+    size[1] = std::max(std::abs(aamm[1]), std::abs(aamm[4]));
+    size[2] = std::max(std::abs(aamm[2]), std::abs(aamm[5]));
   }
 
   // frame
