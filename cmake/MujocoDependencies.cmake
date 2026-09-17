@@ -102,7 +102,10 @@ endif()
 set(QHULL_ENABLE_TESTING OFF)
 # Patch changes in https://github.com/qhull/qhull/pull/173.patch
 set(QHULL_PATCH_COMMAND
-  git --git-dir=. -c core.autocrlf=false -c core.whitespace=cr-at-eol apply --verbose --whitespace=fix --ignore-space-change ${mujoco_SOURCE_DIR}/cmake/qhull-support-emscripten.patch
+  ${CMAKE_COMMAND}
+  -DSOURCE_DIR=.
+  -DPATCH_FILE=${mujoco_SOURCE_DIR}/cmake/qhull-support-emscripten.patch
+  -P ${mujoco_SOURCE_DIR}/cmake/apply-patch.cmake
 )
 
 findorfetch(
@@ -183,7 +186,10 @@ set(CCD_HIDE_ALL_SYMBOLS ON)
 
 # Patch changes in https://github.com/danfis/libccd/pull/83.patch
 set(CCD_PATCH_COMMAND
-  git --git-dir=. -c core.autocrlf=false -c core.whitespace=cr-at-eol apply --verbose --whitespace=fix --ignore-space-change ${mujoco_SOURCE_DIR}/cmake/ccd-support-emscripten.patch
+  ${CMAKE_COMMAND}
+  -DSOURCE_DIR=.
+  -DPATCH_FILE=${mujoco_SOURCE_DIR}/cmake/ccd-support-emscripten.patch
+  -P ${mujoco_SOURCE_DIR}/cmake/apply-patch.cmake
 )
 
 # update cmake_minimum_required version for compatibility with newer version of cmake

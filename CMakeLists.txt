@@ -39,7 +39,7 @@ enable_language(CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
-if(NOT EMSCRIPTEN)
+if(NOT EMSCRIPTEN AND BUILD_SHARED_LIBS)
   option(MUJOCO_BUILD_EXAMPLES "Build samples for MuJoCo" ON)
   option(MUJOCO_BUILD_SIMULATE "Build simulate library for MuJoCo" ON)
   option(MUJOCO_BUILD_STUDIO "Build studio library for MuJoCo" OFF)

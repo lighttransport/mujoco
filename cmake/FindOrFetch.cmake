@@ -113,7 +113,7 @@ if(NOT COMMAND FindOrFetch)
         )
         find_package(${_ARGS_PACKAGE_NAME} REQUIRED)
         message(CHECK_PASS "found")
-      elseif(NOT MUJOCO_ENABLE_FETCHCONTENT)
+      else()
         string(TOUPPER "${_ARGS_LIBRARY_NAME}" _ARGS_LIBRARY_NAME_UPPER)
         set(_ARGS_SOURCE_DIR "")
         if(DEFINED FETCHCONTENT_SOURCE_DIR_${_ARGS_LIBRARY_NAME})
@@ -122,12 +122,28 @@ if(NOT COMMAND FindOrFetch)
           set(_ARGS_SOURCE_DIR "${FETCHCONTENT_SOURCE_DIR_${_ARGS_LIBRARY_NAME_UPPER}}")
         endif()
 
+        # A caller-provided source directory is authoritative even when
+        # FetchContent is enabled for missing dependencies.  This keeps an
+        # offline/local dependency available without disabling fallback fetches
+        # for the other packages.
         if(NOT "${_ARGS_SOURCE_DIR}" STREQUAL "")
           message(CHECK_START
                   "mujoco::FindOrFetch: using local source for `${_ARGS_LIBRARY_NAME}`"
           )
           set(${_ARGS_LIBRARY_NAME}_SOURCE_DIR "${_ARGS_SOURCE_DIR}")
           set(${_ARGS_LIBRARY_NAME}_BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/${_ARGS_LIBRARY_NAME}-build")
+          if(_ARGS_PATCH_COMMAND)
+            execute_process(
+              COMMAND ${_ARGS_PATCH_COMMAND}
+              WORKING_DIRECTORY "${${_ARGS_LIBRARY_NAME}_SOURCE_DIR}"
+              RESULT_VARIABLE _lg_patch_result
+            )
+            if(NOT _lg_patch_result EQUAL 0)
+              message(FATAL_ERROR
+                "mujoco::FindOrFetch: patch failed for local `${_ARGS_LIBRARY_NAME}` source"
+              )
+            endif()
+          endif()
           if(NOT "${_ARGS_CUSTOM_CMAKE}" STREQUAL "")
             file(COPY
               "${_ARGS_CUSTOM_CMAKE}"
@@ -145,66 +161,66 @@ if(NOT COMMAND FindOrFetch)
             )
           endif()
           message(CHECK_PASS "found")
-        else()
+        elseif(NOT MUJOCO_ENABLE_FETCHCONTENT)
           message(CHECK_START
                   "mujoco::FindOrFetch: finding `${_ARGS_PACKAGE_NAME}` in system packages..."
           )
           find_package(${_ARGS_PACKAGE_NAME} REQUIRED)
           message(CHECK_PASS "found")
-        endif()
-      else()
-        set(USE_LOCAL_TARBALL FALSE)
-        if(MUJOCO_CMAKE_DEP_CACHE)
-          # Try to find versioned library tarball.
-          set(TARBALL_PATH "${MUJOCO_CMAKE_DEP_CACHE}/${_ARGS_LIBRARY_NAME}-${_ARGS_GIT_TAG}.tar.gz")
-          if(EXISTS "${TARBALL_PATH}")
-            set(USE_LOCAL_TARBALL TRUE)
-          endif()
-        endif()
-        if(_ARGS_PATCH_COMMAND)
-          set(_WRAPPED_PATCH_COMMAND ${CMAKE_COMMAND} -E env GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR} ${_ARGS_PATCH_COMMAND})
         else()
-          set(_WRAPPED_PATCH_COMMAND)
-        endif()
-
-        set(FETCHCONTENT_QUIET OFF)
-        if(USE_LOCAL_TARBALL)
-          message(STATUS "mujoco::FindOrFetch: Using package cache for ${_ARGS_LIBRARY_NAME}: ${TARBALL_PATH}")
-          FetchContent_Declare(
-            ${_ARGS_LIBRARY_NAME}
-            URL ${TARBALL_PATH}
-            PATCH_COMMAND ${_WRAPPED_PATCH_COMMAND}
-          )
-        else()
-          message(STATUS "mujoco::FindOrFetch: Using FetchContent for ${_ARGS_LIBRARY_NAME}: ${_ARGS_GIT_REPO}")
-          FetchContent_Declare(
-            ${_ARGS_LIBRARY_NAME}
-            GIT_REPOSITORY ${_ARGS_GIT_REPO}
-            GIT_TAG ${_ARGS_GIT_TAG}
-            GIT_SHALLOW FALSE
-            PATCH_COMMAND ${_WRAPPED_PATCH_COMMAND}
-            UPDATE_DISCONNECTED TRUE
-          )
-        endif()
-        if(${_ARGS_EXCLUDE_FROM_ALL})
-          FetchContent_GetProperties(${_ARGS_LIBRARY_NAME})
-          if(NOT ${${_ARGS_LIBRARY_NAME}_POPULATED})
-            FetchContent_Populate(${_ARGS_LIBRARY_NAME})
-            if(NOT "${_ARGS_CUSTOM_CMAKE}" STREQUAL "")
-              file(COPY
-                "${_ARGS_CUSTOM_CMAKE}"
-                DESTINATION "${${_ARGS_LIBRARY_NAME}_SOURCE_DIR}"
-              )
+          set(USE_LOCAL_TARBALL FALSE)
+          if(MUJOCO_CMAKE_DEP_CACHE)
+            # Try to find versioned library tarball.
+            set(TARBALL_PATH "${MUJOCO_CMAKE_DEP_CACHE}/${_ARGS_LIBRARY_NAME}-${_ARGS_GIT_TAG}.tar.gz")
+            if(EXISTS "${TARBALL_PATH}")
+              set(USE_LOCAL_TARBALL TRUE)
             endif()
-            add_subdirectory(
-              ${${_ARGS_LIBRARY_NAME}_SOURCE_DIR} ${${_ARGS_LIBRARY_NAME}_BINARY_DIR}
-              EXCLUDE_FROM_ALL
+          endif()
+          if(_ARGS_PATCH_COMMAND)
+            set(_WRAPPED_PATCH_COMMAND ${CMAKE_COMMAND} -E env GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR} ${_ARGS_PATCH_COMMAND})
+          else()
+            set(_WRAPPED_PATCH_COMMAND)
+          endif()
+
+          set(FETCHCONTENT_QUIET OFF)
+          if(USE_LOCAL_TARBALL)
+            message(STATUS "mujoco::FindOrFetch: Using package cache for ${_ARGS_LIBRARY_NAME}: ${TARBALL_PATH}")
+            FetchContent_Declare(
+              ${_ARGS_LIBRARY_NAME}
+              URL ${TARBALL_PATH}
+              PATCH_COMMAND ${_WRAPPED_PATCH_COMMAND}
+            )
+          else()
+            message(STATUS "mujoco::FindOrFetch: Using FetchContent for ${_ARGS_LIBRARY_NAME}: ${_ARGS_GIT_REPO}")
+            FetchContent_Declare(
+              ${_ARGS_LIBRARY_NAME}
+              GIT_REPOSITORY ${_ARGS_GIT_REPO}
+              GIT_TAG ${_ARGS_GIT_TAG}
+              GIT_SHALLOW FALSE
+              PATCH_COMMAND ${_WRAPPED_PATCH_COMMAND}
+              UPDATE_DISCONNECTED TRUE
             )
           endif()
-        else()
-          FetchContent_MakeAvailable(${_ARGS_LIBRARY_NAME})
+          if(${_ARGS_EXCLUDE_FROM_ALL})
+            FetchContent_GetProperties(${_ARGS_LIBRARY_NAME})
+            if(NOT ${${_ARGS_LIBRARY_NAME}_POPULATED})
+              FetchContent_Populate(${_ARGS_LIBRARY_NAME})
+              if(NOT "${_ARGS_CUSTOM_CMAKE}" STREQUAL "")
+                file(COPY
+                  "${_ARGS_CUSTOM_CMAKE}"
+                  DESTINATION "${${_ARGS_LIBRARY_NAME}_SOURCE_DIR}"
+                )
+              endif()
+              add_subdirectory(
+                ${${_ARGS_LIBRARY_NAME}_SOURCE_DIR} ${${_ARGS_LIBRARY_NAME}_BINARY_DIR}
+                EXCLUDE_FROM_ALL
+              )
+            endif()
+          else()
+            FetchContent_MakeAvailable(${_ARGS_LIBRARY_NAME})
+          endif()
+          message(CHECK_PASS "Done")
         endif()
-        message(CHECK_PASS "Done")
       endif()
     else()
       message(CHECK_PASS "found")
