@@ -14,6 +14,7 @@
 
 // NOLINTBEGIN(whitespace/line_length)
 // NOLINTBEGIN(whitespace/semicolon)
+// NOLINTBEGIN(misc-include-cleaner)
 
 #include "wasm/codegen/generated/bindings.h"
 
@@ -353,7 +354,7 @@ std::unique_ptr<MjModel> mj_loadXML_wrapper_2(std::string filename, const MjVFS&
 void mj_saveModel_wrapper(const MjModel& m, const StringOrNull& filename, const val& buffer) {
   UNPACK_NULLABLE_STRING(filename);
   UNPACK_NULLABLE_VALUE(uint8_t, buffer);
-  mj_saveModel(m.get(), filename_.data(), buffer_.data(), static_cast<int>(buffer_.size()));
+  mj_saveModel(m.get(), filename_.data(), buffer_.data(), static_cast<mjtSize>(buffer_.size()));
 }
 
 std::unique_ptr<MjModel> mj_loadModel_wrapper(std::string filename, const MjVFS& vfs) {
@@ -479,6 +480,15 @@ int mj_setLengthRange_wrapper(const MjModel& m, const MjData& d, int index, cons
   return result;
 }
 
+std::unique_ptr<MjModel> mj_embedAssets_wrapper(const MjModel& m) {
+  std::array<char, 1024> error;
+  mjModel* model = mj_embedAssets(m.get(), error.data(), error.size());
+  if (!model) {
+    mju_error("%s", error.data());
+  }
+  return std::unique_ptr<MjModel>(new MjModel(model));
+}
+
 void mju_info_wrapper(int topic, const String& msg) {
   CHECK_VAL(msg);
   mju_info(topic, "%s", msg.as<const std::string>().data());
@@ -505,16 +515,19 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
 
   // Bindings for the MjData accessor classes.
   #define X(type, prefix, var, dim0, dim1) .property(#var, &Accessor::get_##var, &Accessor::set_##var)
+  #define XC(name) .property(#name, &Accessor::get_##name)
   #define X_ACCESSOR(NAME, Name, OBJTYPE, field, nfield)       \
     {                                                          \
       using Accessor = MjData##Name##Accessor;                 \
       emscripten::class_<Accessor>("MjData" #Name "Accessor")  \
           .property("id", &Accessor::id)                       \
           .property("name", &Accessor::name)                   \
-          MJDATA_##NAME;                                       \
+          MJDATA_##NAME                                        \
+          MJDATA_COMPUTED_##NAME;                              \
     }
     MJDATA_ACCESSORS
   #undef X
+  #undef XC
   #undef X_ACCESSOR
 
   // {{ STRUCTS_BINDINGS }}
@@ -532,6 +545,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
   function("mj_saveModel", &mj_saveModel_wrapper);
   function("mj_saveLastXML", &mj_saveLastXML_wrapper);
   function("mj_setLengthRange", &mj_setLengthRange_wrapper);
+  function("mj_embedAssets", &mj_embedAssets_wrapper);
   function("mju_info", &mju_info_wrapper);
   // mj_compile is bound using two overloads to handle the optional MjVFS argument,
   // as using std::optional<MjVFS> caused memory errors due to missing copy/move constructors.
@@ -649,5 +663,6 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
 }
 
 }  // namespace mujoco::wasm
+// NOLINTEND(misc-include-cleaner)
 // NOLINTEND(whitespace/semicolon)
 // NOLINTEND(whitespace/line_length)

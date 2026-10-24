@@ -14,20 +14,22 @@
 """Base class and configuration for any viewer."""
 
 import abc
+import contextlib
 import copy
 import dataclasses
 import enum
+import logging
 from typing import Any
 import mujoco
 from mujoco.experimental.studio import endpoints
+from mujoco.experimental.studio import hot_reload
 from mujoco.experimental.studio import messages
 from mujoco.experimental.studio import plugin_registry
 from mujoco.experimental.studio import ux
-import numpy as np
+
+logger = logging.getLogger(__name__)
 
 GFX_MODES = (
-    'classic',
-    'classic_headless',
     'opengl',
     'opengl_headless',
     'opengl_software',
@@ -52,47 +54,32 @@ class ViewerConfig:
   height: int = 800
   gfx: str = ''  # Graphics mode ('web' launches Web Viewer).
   http_port: int = 0  # Web Viewer port (0 picks first free port >= 8080).
-
-
-# Legacy message types kept for backward compatibility.
-# Will be removed when callers are migrated.
-
-
-@dataclasses.dataclass
-class SimToView:
-  """A message sent from the simulation to the viewer."""
-
-  model: mujoco.MjModel | None = None
-  state: np.ndarray | None = None
-  state_sig: int = 0
-  user_data: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-
-@dataclasses.dataclass
-class ViewToSim:
-  """A message sent from the viewer to the simulation."""
-
-  state: np.ndarray | None = None
-  state_sig: int = 0
-  reset: bool = False
-  send_rate: float = 60.0
-  user_data: dict[str, Any] = dataclasses.field(default_factory=dict)
+  open_browser: bool = False  # Open Web Viewer URL in a browser tab on launch.
+  # What is reloaded when modified. Options are '', 'plugins', 'model', 'all',
+  # 'Plugin1,Plugin2,...'. Default is '', meaning nothing.
+  hot_reload: str = ''
 
 
 # -----------------------------------------------------------------------------
-# Base class for any viewer.
+# Viewer lifecycle events.
 # -----------------------------------------------------------------------------
 
 
 @dataclasses.dataclass(frozen=True)
 class ViewerInitEvent(messages.Event):
-  """Lifecycle event dispatched once when the concrete Viewer is initialized.
+  """Lifecycle event dispatched locally once when a ``Viewer`` initializes.
 
-  Plugins that need access to the Viewer should handle this event
-  and cache the reference.
+  ``plugin.ViewerPlugin`` caches ``event.viewer`` as ``self.viewer`` above
+  ``CRITICAL`` priority, so ``self.viewer`` is already set when subclass
+  handlers run.
   """
 
   viewer: 'Viewer'
+
+
+# -----------------------------------------------------------------------------
+# Base class for any viewer.
+# -----------------------------------------------------------------------------
 
 
 class Viewer(abc.ABC):
@@ -108,7 +95,6 @@ class Viewer(abc.ABC):
       endpoint: endpoints.ViewerEndpoint,
       *,
       model: mujoco.MjModel | None = None,
-      model_path: str = '',
       plugins: list[Any] | None = None,
       camera: mujoco.MjvCamera | None = None,
       vis_options: mujoco.MjvOption | None = None,
@@ -124,7 +110,6 @@ class Viewer(abc.ABC):
       model: Optional initial MjModel. If None, an empty model is created from
         an empty MjSpec. The Viewer deep-copies this model and creates its own
         MjData.
-      model_path: Optional path to the model file.
       plugins: Optional list of plugin instances for viewer-side processing.
       camera: Camera parameters. Internal object is created if None.
       vis_options: Visualization options. Internal object is created if None.
@@ -135,7 +120,7 @@ class Viewer(abc.ABC):
     self.config = config
     self._endpoint = endpoint
     self._is_running = True
-    self._closed = False
+    self.exit_reason = ''
 
     # Viewer-owned model and data.
     if model is None:
@@ -143,7 +128,7 @@ class Viewer(abc.ABC):
     self.model: mujoco.MjModel
     self.data: mujoco.MjData
     self.model_path: str = ''
-    self.load_model(model, model_path)
+    self.load_model(model)
 
     # Visual state.
     self.camera = camera or mujoco.MjvCamera()
@@ -161,24 +146,34 @@ class Viewer(abc.ABC):
     # Plugin infrastructure.
     all_plugins = [self] + list(plugins or [])
     self.plugins = plugin_registry.PluginRegistry(all_plugins)
+    if config.hot_reload:
+      # Process-wide; also covers the sim's plugins.
+      hot_reload.enable(config.hot_reload)
 
   def close(self) -> None:
     """Closes the viewer, sends an exit event and shuts down the endpoint."""
-    if self._closed:
-      return
-    self._closed = True
-    self._is_running = False
+    # Only attach exit_reason when the exit originated on the viewer side; if
+    # _on_exit already handled an ExitEvent from the sim, do not echo the sim's
+    # reason back to it.
+    reason = self.exit_reason if self._is_running else ''
+    exit_event = messages.ExitEvent(reason=reason)
     try:
-      self.send_to_sim(messages.ExitEvent())
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass  # Ignore exceptions, the sim may have already closed.
-    self._endpoint.close()
+      if self._is_running:
+        self._is_running = False
+        self.dispatch(exit_event)
+    finally:  # Finish the teardown even if an ExitEvent handler raised.
+      try:
+        self.send_to_sim(exit_event)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass  # Ignore exceptions, the sim may have already closed.
+      self._endpoint.close()
 
   @messages.handler(priority=messages.Priority.CRITICAL)
-  def _on_exit(self, _: messages.ExitEvent) -> bool:
+  def _on_exit(self, event: messages.ExitEvent) -> None:
     """Stops the viewer loop when the sim side requests an exit."""
     self._is_running = False
-    return False  # Do not consume; app handlers may want cleanup too.
+    if event.reason:
+      self.exit_reason = event.reason
 
   def is_running(self) -> bool:
     """Returns True while the viewer has not been closed."""
@@ -187,6 +182,22 @@ class Viewer(abc.ABC):
   def send_to_sim(self, message: messages.Message) -> None:
     """Sends a message to the simulation process."""
     self._endpoint.send_to_sim(message)
+
+  def send_if_changes(
+      self, *make_messages: messages.MakeMessage
+  ) -> contextlib.AbstractContextManager[None]:
+    """Sends the messages that change during the ``with`` block to the sim.
+
+    Calls each ``make_message()`` on entering and on leaving the block and
+    sends those that differ. Nothing is sent if the viewer stops running or
+    its model is replaced during the block.
+    """
+    model = self.model
+    return messages.send_if_changes(
+        self.send_to_sim,
+        *make_messages,
+        should_send=lambda: self._is_running and self.model is model,
+    )
 
   def get_sim_events(self) -> list[messages.Event]:
     """Returns all pending events from the simulation."""
@@ -208,21 +219,29 @@ class Viewer(abc.ABC):
     assert id(self.model) != id(model)
     mujoco.mj_forward(self.model, self.data)
 
-  @messages.handler(priority=messages.Priority.CRITICAL)
-  def _on_model(self, event: messages.ModelEvent) -> bool:
+  @messages.handler(priority=messages.Priority.INTERNAL)
+  def _on_model(self, event: messages.ModelEvent) -> None:
     """Deep-copies the incoming model so the Viewer owns its data."""
     self.load_model(event.model, event.path)
     self.extra_geoms.clear()
-    return False  # Do not consume; let other handlers see the event.
+    self.dispatch(
+        messages.PostModelEvent(
+            model=self.model, data=self.data, path=event.path
+        )
+    )
 
   @messages.handler(priority=messages.Priority.CRITICAL)
-  def _on_state(self, event: messages.StateSnapshot) -> bool:
+  def _on_mjoption(self, event: messages.MjOptionSnapshot) -> None:
+    """Applies incoming simulation physics options to the viewer's model."""
+    self.model.opt = event.opt
+
+  @messages.handler(priority=messages.Priority.CRITICAL)
+  def _on_state(self, event: messages.StateSnapshot) -> None:
     """Applies incoming simulation state to the viewer's model/data."""
     state_size = mujoco.mj_stateSize(self.model, event.state_sig)
     if len(event.state) == state_size:
       mujoco.mj_setState(self.model, self.data, event.state, event.state_sig)
       mujoco.mj_forward(self.model, self.data)
-    return False  # Do not consume; let other handlers see the event.
 
   @abc.abstractmethod
   def prepare_next_frame(self) -> bool:
@@ -254,35 +273,53 @@ def run_viewer_loop(viewer: Viewer) -> None:
   """Minimal viewer loop: process sim messages, dispatch lifecycle events, sync.
 
   Runs until the viewer window is closed or an exit event is received.
-  On exit, closes the viewer (which sends an ExitEvent to the sim side).
+  On exit, closes the viewer (which sends an ExitEvent to the sim side). The
+  viewer is closed even if a plugin handler raises, so its resources are
+  released on this thread and the sim side is told to exit before the
+  exception propagates.
+
+  An unhandled exception is also logged here, on the viewer thread, as soon as
+  it happens: the sim side only re-raises it the next time it touches the
+  handle, which may be much later or never (e.g. a notebook cell that has
+  already returned).
 
   Args:
     viewer: A Viewer that owns the endpoint and plugin registry.
   """
-  while True:
-    # Get the next frame; this also gets the frame's mouse/keyboard events.
-    frame = viewer.prepare_next_frame()
+  try:
+    while True:
+      # Apply edited plugin code between frames (no-op unless enabled).
+      hot_reload.tick(viewer.plugins, viewer)
 
-    # Process incoming simulation events.
-    for event in viewer.get_sim_events():
-      viewer.dispatch(event)
+      # Get the next frame; this also gets the frame's mouse/keyboard events.
+      frame = viewer.prepare_next_frame()
 
-    # Stop the loop if the viewer is not running (endpoint will be closed).
-    if not viewer.is_running():
-      break
+      # Process incoming simulation events.
+      for event in viewer.get_sim_events():
+        viewer.dispatch(event)
 
-    # Process incoming simulation snapshots.
-    for snapshot in viewer.get_sim_snapshots():
-      viewer.dispatch(snapshot)
+      # Stop the loop if the viewer is not running (endpoint will be closed).
+      if not viewer.is_running():
+        break
 
-    # Skip rendering when prepare_next_frame returned no active frame.
-    # e.g., no browser is connected to the web viewer.
-    if frame:
-      # Dispatch lifecycle events.
-      viewer.dispatch(messages.UpdateEvent())
-      viewer.dispatch(messages.BuildGuiEvent())
+      # Process incoming simulation snapshots.
+      for snapshot in viewer.get_sim_snapshots():
+        viewer.dispatch(snapshot)
 
-      # Render the scene.
-      viewer.sync()
+      # Skip rendering when prepare_next_frame returned no active frame.
+      # e.g., no browser is connected to the web viewer.
+      if frame:
+        # Dispatch lifecycle events.
+        viewer.dispatch(messages.UpdateEvent())
+        viewer.dispatch(messages.BuildGuiEvent())
 
-  viewer.close()
+        # Render the scene.
+        viewer.sync()
+  except Exception as ex:
+    viewer.exit_reason = messages.describe_exception(ex)
+    logger.exception(
+        'Unhandled exception on the viewer thread; the viewer is closing.'
+    )
+    raise
+  finally:
+    viewer.close()

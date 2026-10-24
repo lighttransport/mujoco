@@ -49,7 +49,7 @@ typedef enum mjrGraphicsApi_ {
 // Parameters for creating filament graphics context (mjrfContext).
 typedef struct mjrfContextConfig_ {
   int graphics_api;                  // rendering graphics API [mjrGraphicsApi]
-  mjtBool force_software_rendering;  // force backend to use software rendering
+  mjtBool software_rendering;        // force backend to use software rendering
   void* native_window;               // platform-dependent window handle (or nullptr for windowless)
 } mjrfContextConfig;
 
@@ -83,9 +83,16 @@ typedef struct mjrfRenderRequest_ {
   mjrRect viewport;                  // viewport (rect area) into which to render
   mjrfRenderTarget* target;          // target used for rendering (or nullptr for window rendering)
   int draw_mode;                     // method to use for drawing objects [mjrDrawMode]
-  mjtBool enable_post_processing;    // enable post processing, enabled by default
-  mjtBool enable_reflections;        // enable reflections, enabled by default
-  mjtBool enable_shadows;            // enable shadows, enabled by default
+  mjtBool post_processing;           // enable post processing, enabled by default
+  mjtBool reflections;               // enable reflections, enabled by default
+  mjtBool shadows;                   // enable shadows, enabled by default
+
+  // The headlight is a directional light aligned with this request's camera. It
+  // is a property of the request rather than of the scene, so that a scene
+  // rendered from several cameras is not lit by any one of them.
+  mjtBool headlight;                 // enable the headlight, disabled by default
+  float headlight_color[3];          // headlight color, RGB
+  float headlight_intensity;         // headlight intensity, in lux
 } mjrfRenderRequest;
 
 // Initializes the mjrfRenderRequest to default values.
@@ -98,10 +105,10 @@ typedef struct mjrfReadPixelsRequest_ {
   mjtSize num_bytes;                     // size of output buffer
   mjrfCallback read_completed;           // callback when read is complete; can use to free output
   void* user_data;                       // user data for read_completed_callback
-} mjrfReadPixelsRequest;
+} mjrfReadRequest;
 
-// Initializes the mjrfReadPixelsRequest to default values.
-void mjrf_defaultReadPixelsRequest(mjrfReadPixelsRequest* request);
+// Initializes the mjrfReadRequest to default values.
+void mjrf_defaultReadRequest(mjrfReadRequest* request);
 
 // Unique handle assigned to each render request; used to block until request is completed or query
 // the status of the request.
@@ -116,7 +123,7 @@ typedef uint64_t mjrfFrameHandle;
 // Callbacks will be invoked from within this function, though there is no guarantee on which
 // invocation of this function it will be done.
 mjrfFrameHandle mjrf_render(mjrfContext* ctx, const mjrfRenderRequest* req, int nreq,
-                            const mjrfReadPixelsRequest* read_req, int nread_req);
+                            const mjrfReadRequest* read_req, int nread_req);
 
 // Waits for all rendering operations to complete for the given frame handle, triggering any
 // callbacks as needed.
@@ -149,7 +156,7 @@ typedef struct mjrfTextureConfig_ {
 void mjrf_defaultTextureConfig(mjrfTextureConfig* config);
 
 // Creates a filament texture. Note that the texture will not be created on the GPU until
-// `mjrf_setTextureData()` is called.
+// `mjrf_uploadTexture()` is called.
 mjrfTexture* mjrf_createTexture(mjrfContext* ctx, const mjrfTextureConfig* config);
 
 // Destroys the texture.
@@ -167,7 +174,7 @@ typedef struct mjrfTextureData_ {
 void mjrf_defaultTextureData(mjrfTextureData* data);
 
 // Uploads the given texture data to the texture.
-void mjrf_setTextureData(mjrfTexture* texture, const mjrfTextureData* data);
+void mjrf_uploadTexture(mjrfTexture* texture, const mjrfTextureData* data);
 
 // Returns the width of the texture.
 int mjrf_getTextureWidth(const mjrfTexture* texture);
@@ -219,7 +226,7 @@ typedef struct mjrfMeshData_ {
 void mjrf_defaultMeshData(mjrfMeshData* data);
 
 // Uploads the given mesh data to the mesh.
-void mjrf_setMeshData(mjrfMesh* mesh, const mjrfMeshData* data);
+void mjrf_uploadMesh(mjrfMesh* mesh, const mjrfMeshData* data);
 
 // Parameters for creating a scene (mjrfScene).
 typedef struct mjrfSceneParams_ {
@@ -236,16 +243,16 @@ mjrfScene* mjrf_createScene(mjrfContext* ctx, const mjrfSceneParams* params);
 void mjrf_destroyScene(mjrfScene* scene);
 
 // Adds a light to the scene.
-void mjrf_addLightToScene(mjrfScene* scene, mjrfLight* light);
+void mjrf_addSceneLight(mjrfScene* scene, mjrfLight* light);
 
 // Removes the light from the scene.
-void mjrf_removeLightFromScene(mjrfScene* scene, mjrfLight* light);
+void mjrf_removeSceneLight(mjrfScene* scene, mjrfLight* light);
 
 // Adds a renderable to the scene.
-void mjrf_addRenderableToScene(mjrfScene* scene, mjrfRenderable* renderable);
+void mjrf_addSceneRenderable(mjrfScene* scene, mjrfRenderable* renderable);
 
 // Removes the renderable from the scene.
-void mjrf_removeRenderableFromScene(mjrfScene* scene, mjrfRenderable* renderable);
+void mjrf_removeSceneRenderable(mjrfScene* scene, mjrfRenderable* renderable);
 
 // Sets the skybox (cube texture) for the scene.
 void mjrf_setSceneSkybox(mjrfScene* scene, const mjrfTexture* texture);
@@ -253,19 +260,21 @@ void mjrf_setSceneSkybox(mjrfScene* scene, const mjrfTexture* texture);
 // Configures the scene based on the parameters in an mjModel.
 void mjrf_configureSceneFromModel(mjrfScene* scene, const mjModel* model);
 
+// Sets the number of multi-sample anti-aliasing samples; values <= 1 disable MSAA.
+void mjrf_setSceneMsaa(mjrfScene* scene, int samples);
+
 // Parameters for creating a light (mjrfLight).
 typedef struct mjrfLightParams_ {
   int type;                        // type of light (e.g. spot, point, image, etc.) [mjrLightType]
   const mjrfTexture* texture;      // texture; only for image lights
   float color[3];                  // RGB color
   float intensity;                 // light intensity, in candela
-  mjtBool cast_shadows;            // if true, cast shadows
+  mjtBool cast_shadow;             // if true, cast shadows
   float range;                     // effective range of light, in meters
-  float spot_cone_angle;           // spot light cone angle, in degrees
-  float spot_softness;             // spot light edge softness, fraction of cone angle in [0, 1]
+  float cutoff;                    // spot light cone angle, in degrees
+  float softness;                  // spot light edge softness, fraction of cone angle in [0, 1]
   int shadow_map_size;             // size of shadow map texture, 0 to use default size
   float bulb_radius;               // bulb radius, used for soft shadows
-  float vsm_blur_width;            // variance shadow map blur width
 } mjrfLightParams;
 
 // Initializes the mjrfLightParams to default values.
@@ -277,11 +286,11 @@ mjrfLight* mjrf_createLight(mjrfContext* ctx, const mjrfLightParams* params);
 // Destroys the light.
 void mjrf_destroyLight(mjrfLight* light);
 
-// Enables or disables the light.
-void mjrf_setLightEnabled(mjrfLight* light, mjtBool enabled);
+// Activates or deactivates the light.
+void mjrf_setLightActive(mjrfLight* light, mjtBool active);
 
 // Enables or disables whether or not the light casts shadows.
-void mjrf_setLightShadowsEnabled(mjrfLight* light, mjtBool enabled);
+void mjrf_setLightCastShadow(mjrfLight* light, mjtBool enabled);
 
 // Sets the RGB color of the light.
 void mjrf_setLightColor(mjrfLight* light, const float color[3]);
@@ -293,7 +302,7 @@ void mjrf_setLightIntensity(mjrfLight* light, float intensity);
 void mjrf_setLightRange(mjrfLight* light, float range);
 
 // Sets the cutoff angle of the light, in degrees. Only used for spot lights.
-void mjrf_setLightCutoffAngle(mjrfLight* light, float cutoff);
+void mjrf_setLightCutoff(mjrfLight* light, float cutoff);
 
 // Sets the softness of the light, in the range [0, 1]. Only used for spot lights.
 void mjrf_setLightSoftness(mjrfLight* light, float softness);
@@ -301,14 +310,11 @@ void mjrf_setLightSoftness(mjrfLight* light, float softness);
 // Sets the radius of the light bulb.
 void mjrf_setLightBulbRadius(mjrfLight* light, float radius);
 
-// Sets the width of the blur applied to the light's shadow map, in texels.
-void mjrf_setLightBlurWidth(mjrfLight* light, float blur_width);
-
 // Sets the resolution of the light's shadow map, in texels.
 void mjrf_setLightShadowMapSize(mjrfLight* light, int map_size);
 
 // Sets the position and direction of the light.
-void mjrf_setLightTransform(mjrfLight* light, const float position[3], const float direction[3]);
+void mjrf_setLightPose(mjrfLight* light, const float position[3], const float direction[3]);
 
 // Returns the type of the light (mjrLightType).
 int mjrf_getLightType(const mjrfLight* light);
@@ -328,7 +334,7 @@ typedef struct mjrfMaterial_ {
   float glossiness;             // glossiness factor [0, 1]; disabled if < 0
   float emissive;               // emissive/glow factor [0, 1]; disabled if < 0
   float reflectance;            // blend factor for reflective surfaces [0, 1]; applies only to planes
-  mjtBool decor_ux;             // for ux elements, does not apply any lighting
+  mjtBool decor;                // ux/decor element: unlit, drawn on the decor layer, no shadows
   mjtBool selected;             // for "selected" ux elements, adds additional styling
   const mjrfTexture* color_texture;       // color/albedo texture (RGB8)
   const mjrfTexture* opacity_texture;     // opacity texture (A8)
@@ -348,8 +354,8 @@ void mjrf_defaultMaterial(mjrfMaterial* material);
 
 // Parameters for creating a renderable (mjrfRenderable).
 typedef struct mjrfRenderableParams_ {
-  mjtBool cast_shadows;                 // if true, casts shadows
-  mjtBool receive_shadows;              // if true, receives shadows
+  mjtBool cast_shadow;                  // if true, casts shadows
+  mjtBool receive_shadow;               // if true, receives shadows
   uint16_t blend_order;                 // controls draw order for transparent objects [0, 8]
 } mjrfRenderableParams;
 
@@ -379,9 +385,9 @@ void mjrf_setRenderableMaterial(mjrfRenderable* renderable, const mjrfMaterial* 
 // Copies the material properties of the renderable into the given mjrfMaterial.
 void mjrf_getRenderableMaterial(mjrfRenderable* renderable, mjrfMaterial* material);
 
-// Sets the transform position and rotation of the renderable.
-void mjrf_setRenderableTransform(mjrfRenderable* renderable, const float position[3],
-                                 const float rotation[9]);
+// Sets the position and rotation of the renderable.
+void mjrf_setRenderablePose(mjrfRenderable* renderable, const float position[3],
+                            const float rotation[9]);
 
 // Sets the size of the renderable. Note that, for most renderables, this is equivalent to setting
 // the scale. However, for some geom-based renderables, the size scale is not applied uniformly
@@ -396,7 +402,7 @@ typedef struct mjrfRenderTargetConfig_ {
   int depth_format;                       // pixel format for depth buffer [mjrPixelFormat]
 } mjrfRenderTargetConfig;
 
-// Initializes the RenderTargetConfig to default values.
+// Initializes the mjrfRenderTargetConfig to default values.
 void mjrf_defaultRenderTargetConfig(mjrfRenderTargetConfig* config);
 
 // Creates a render target for the filament renderer.
@@ -407,9 +413,6 @@ void mjrf_destroyRenderTarget(mjrfRenderTarget* render_target);
 
 // Resizes the render target to the given width and height.
 void mjrf_resizeRenderTarget(mjrfRenderTarget* render_target, int width, int height);
-
-// Draws an ImGui editor for the given scene, exposing filament-specific settings.
-void mjrf_DEBUG_drawImguiEditor(mjrfScene* scene);
 
 #if defined(__cplusplus)
 }  // extern "C"

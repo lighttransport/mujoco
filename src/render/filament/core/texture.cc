@@ -126,10 +126,12 @@ Texture::Texture(filament::Engine* engine, const mjrfTextureConfig& config,
     return;
   }
 
+  const filament::Texture::InternalFormat internal_format =
+      GetTextureInternalFormat(config_);
   filament::Texture::Builder builder;
   builder.width(config_.width);
   builder.height(config_.height);
-  builder.format(GetTextureInternalFormat(config_));
+  builder.format(internal_format);
 
   if (IsCubeMap(config_)) {
     if (config_.format != mjPIXEL_FORMAT_RGB8) {
@@ -149,8 +151,10 @@ Texture::Texture(filament::Engine* engine, const mjrfTextureConfig& config,
   } else if (flags.depth_attachment) {
     usage |= filament::Texture::Usage::DEPTH_ATTACHMENT;
     usage |= filament::Texture::Usage::BLIT_SRC;
-  } else if (config_.color_space != mjCOLORSPACE_SRGB) {
+  } else if (filament::Texture::isTextureFormatMipmappable(*engine_,
+                                                           internal_format)) {
     usage |= filament::Texture::Usage::GEN_MIPMAPPABLE;
+    builder.levels(0xff);
   }
   builder.usage(usage);
 
@@ -195,11 +199,9 @@ void Texture::Upload(const mjrfTextureData& data) {
       mju_error("Texture size does not match data size.");
     }
 
-    auto callback = +[](void* buffer, size_t size, void* user) {
-      reinterpret_cast<Texture*>(user)->ReleaseData();
-    };
-    filament::Texture::PixelBufferDescriptor desc(data.bytes, data.num_bytes,
-                                                  format, type, callback, this);
+    filament::Texture::PixelBufferDescriptor desc(
+        data.bytes, data.num_bytes, format, type, &ReleaseUploaded,
+        TakeRelease());
     texture_->setImage(*engine_, 0, std::move(desc));
   } else {
     const int face_size = config_.width * GetFaceHeight(config_) * num_channels;
@@ -223,20 +225,41 @@ void Texture::Upload(const mjrfTextureData& data) {
       if (num_bytes != data.num_bytes) {
         mju_error("Texture size does not match data size.");
       }
-      auto callback = +[](void* buffer, size_t size, void* user) {
-        reinterpret_cast<Texture*>(user)->ReleaseData();
-      };
       filament::Texture::PixelBufferDescriptor desc(
-          data.bytes, data.num_bytes, format, type, callback, this);
+          data.bytes, data.num_bytes, format, type, &ReleaseUploaded,
+          TakeRelease());
       texture_->setImage(*engine_, /*level=*/0, /*xoffset=*/0, /*yoffset=*/0,
                          /*zoffset=*/0, config_.width, GetFaceHeight(config_),
                          /*depth=*/6, std::move(desc));
     }
   }
 
-  if (config_.color_space != mjCOLORSPACE_SRGB) {
+  if (texture_->getLevels() > 1) {
     texture_->generateMipmaps(*engine_);
   }
+}
+
+// The release function and user data of a pending upload. The descriptor owns
+// them, so the data is released once Filament has read it, even if the Texture
+// was destroyed in the meantime.
+struct PendingRelease {
+  void (*release)(void* user_data);
+  void* user_data;
+};
+
+void* Texture::TakeRelease() {
+  auto* pending = new PendingRelease{release_callback_, user_data_};
+  release_callback_ = nullptr;
+  user_data_ = nullptr;
+  return pending;
+}
+
+void Texture::ReleaseUploaded(void* buffer, size_t size, void* user) {
+  auto* pending = static_cast<PendingRelease*>(user);
+  if (pending->release) {
+    pending->release(pending->user_data);
+  }
+  delete pending;
 }
 
 void Texture::ReleaseData() {

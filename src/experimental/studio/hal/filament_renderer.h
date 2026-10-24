@@ -22,12 +22,11 @@
 #include <mujoco/mjrfilament.h>
 #include <mujoco/mujoco.h>
 #include "experimental/studio/hal/graphics_mode.h"
-#include "experimental/studio/hal/renderer.h"
-#include "render/filament/mjrfilament_cpp.h"
+#include "render/filament/support/mjrf_ptr.h"
 #include "render/filament/support/imgui_bridge.h"
 #include "render/filament/support/model_decorations.h"
 #include "render/filament/support/model_lights.h"
-#include "render/filament/support/model_objects.h"
+#include "render/filament/support/model_resources.h"
 #include "render/filament/support/model_renderables.h"
 
 namespace mujoco::studio {
@@ -41,7 +40,7 @@ namespace mujoco::studio {
 // will be rendering to a texture and will use an EGL context. Vulkan and WebGL
 // have no need for such a distinction. If rendering to a window surface (e.g.
 // x11), it requires a pointer to the native window to do so.
-class FilamentRenderer : public Renderer {
+class FilamentRenderer {
  public:
   FilamentRenderer(void* native_window, GraphicsMode gfx_mode);
   ~FilamentRenderer();
@@ -50,57 +49,59 @@ class FilamentRenderer : public Renderer {
   FilamentRenderer& operator=(const FilamentRenderer&) = delete;
 
   // Initializes the renderer with the given mjModel.
-  void Init(const mjModel* model) override;
+  void Init(const mjModel* model);
 
-  // Renders the simulation and ux state. Renders into `pixels` if provided,
-  // otherwise renders to the `native_window` provided at construction.
-  void Render(const mjModel* model, mjData* data, const mjvPerturb* perturb,
-              mjvCamera* camera, const mjvOption* vis_option, int width,
-              int height, std::span<std::byte> pixels = {},
-              std::span<mjvGeom> extra_geoms = {}) override;
+  // Synchronizes scene state from the simulation model and data.
+  void Sync(const mjModel* model, mjData* data, const mjvPerturb* perturb,
+            mjvCamera* camera, const mjvOption* vis_option, int width,
+            int height, std::span<mjvGeom> extra_geoms = {});
+
+  // Renders the previously synchronized scene and current UX state.
+  void Submit(int width, int height, std::span<std::byte> pixels = {});
 
   // Populates the given output buffer with RGB888 pixel data. The size of the
   // output buffer must be at least width * height * 3.
   void RenderToTexture(const mjModel* model, mjData* data, mjvCamera* camera,
-                       int width, int height, std::byte* output) override;
+                       int width, int height, std::byte* output);
 
   // Uploads an image to the backend for GUI rendering, returning the texture
   // ID for the texture. The ID can be used in subsequent calls to update the
-  // texture data. A nullptr pixels argument will free the texture if it exists.
+  // texture data. An empty pixels argument will free the texture if it exists.
   // A texture ID of 0 will create a new texture.
-  int UploadImage(int texture_id, const std::byte* pixels, int width,
-                  int height, int bpp) override;
+  int UploadImage(int tex_id, std::span<const std::byte> pixels, int width,
+                  int height);
 
   // Rendering flags.
-  mjtByte* GetRenderFlags() override { return render_flags_; }
+  mjtByte* GetRenderFlags() { return render_flags_; }
 
-  // Returns the current frame rate.
-  double GetFps() override;
+  // Returns the GPU time of the last rendered frame, in milliseconds.
+  double GetGpuFrameMs();
 
  private:
   // Resets the renderer; no rendering will occur until Init() is called again.
   void Deinit();
 
   void BuildMainRenderRequest(mjrfRenderRequest* request,
-                              const mjvOption* vis_option,
-                              const mjrRect& viewport, const mjrCamera& camera);
+                              const mjVisual& vis,
+                              const mjvOption& vis_option,
+                              const mjrRect& viewport,
+                              const mjrCamera& camera);
   void BuildUxRenderRequest(mjrfRenderRequest* request,
                             const mjrRect& viewport);
 
-  void* native_window_ = nullptr;
-  GraphicsMode gfx_ = GraphicsMode::FilamentVulkan;
   UniquePtr<mjrfContext> filament_context_{nullptr, nullptr};
   UniquePtr<mjrfScene> main_scene_{nullptr, nullptr};
   UniquePtr<mjrfScene> ux_scene_{nullptr, nullptr};
   UniquePtr<mjrfRenderTarget> render_target_{nullptr, nullptr};
   std::unique_ptr<ImguiBridge> imgui_bridge_;
-  std::unique_ptr<ModelObjects> model_objects_;
+  std::unique_ptr<ModelResources> model_resources_;
   std::unique_ptr<ModelLights> model_lights_;
   std::unique_ptr<ModelRenderables> model_renderables_;
   std::unique_ptr<ModelDecorations> model_decorations_;
+  mjrfRenderRequest render_requests_[2];
   mjtByte render_flags_[mjNRNDFLAG];
-  int framebuffer_mode_ = 0;
-  double fps_ = 0;
+  int offsamples_ = -1;
+  double gpu_frame_ms_ = 0;
 };
 
 }  // namespace mujoco::studio

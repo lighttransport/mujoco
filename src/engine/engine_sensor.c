@@ -22,7 +22,9 @@
 #include <mujoco/mjplugin.h>
 #include <mujoco/mjsan.h>  // IWYU pragma: keep
 #include "engine/engine_callback.h"
+#include "engine/engine_collision_convex.h"
 #include "engine/engine_collision_sdf.h"
+#include "engine/engine_core_constraint.h"
 #include "engine/engine_core_smooth.h"
 #include "engine/engine_core_util.h"
 #include "engine/engine_crossplatform.h"
@@ -391,8 +393,8 @@ static int matchContact(const mjModel* m, const mjData* d, int conid,
 
 // fill in output data for contact sensor for all fields
 //   if flg_flip > 0, normal/tangent rotate 180 about frame[2]
-//   force/torque flip-z s.t. force is equal-and-opposite in new contact frame
-static void copySensorData(const mjModel* m, const mjData* d,
+//   force/torque/linvel/angvel flip-z s.t. values are equal-and-opposite in new contact frame
+static void copySensorData(const mjModel* m, mjData* d,
                            mjtNum* data[mjNCONDATA], int id, int flg_flip, int nfound) {
   // found flag
   if (data[mjCONDATA_FOUND]) *data[mjCONDATA_FOUND] = nfound;
@@ -432,6 +434,65 @@ static void copySensorData(const mjModel* m, const mjData* d,
     mju_copy3(data[mjCONDATA_TANGENT], d->contact[id].frame+3);
     if (flg_flip) mju_scl3(data[mjCONDATA_TANGENT], data[mjCONDATA_TANGENT], -1);
   }
+
+  // contact linear and angular velocity
+  if (data[mjCONDATA_LINVEL] || data[mjCONDATA_ANGVEL]) {
+    const mjContact* con = d->contact + id;
+    mjtNum linvel[3] = {0}, angvel[3] = {0};
+
+    // single body on each side: compute from cvel
+    if ((con->geom[0] >= 0 || (con->vert[0] >= 0 && m->flex_interp[con->flex[0]] == 0)) &&
+        (con->geom[1] >= 0 || (con->vert[1] >= 0 && m->flex_interp[con->flex[1]] == 0))) {
+      int bid[2];
+      mjtNum vel[2][6];
+      for (int s=0; s < 2; s++) {
+        bid[s] = (con->geom[s] >= 0) ?
+                 m->geom_bodyid[con->geom[s]] :
+                 m->flex_vertbodyid[m->flex_vertadr[con->flex[s]] + con->vert[s]];
+        mju_transformSpatial(vel[s], d->cvel + 6*bid[s], 0, con->pos,
+                             d->subtree_com + 3*m->body_rootid[bid[s]], NULL);
+      }
+      mju_sub3(angvel, vel[1], vel[0]);
+      mju_sub3(linvel, vel[1]+3, vel[0]+3);
+    }
+
+    // general flex case: compute via contact Jacobian
+    else if (m->nv) {
+      int nv = m->nv, issparse = mj_isSparse(m);
+      int need_ang = (data[mjCONDATA_ANGVEL] != NULL);
+      mj_markStack(d);
+      mjtNum* jacdifp = mjSTACKALLOC(d, 3*nv, mjtNum);
+      mjtNum* jacdifr = need_ang ? mjSTACKALLOC(d, 3*nv, mjtNum) : NULL;
+      int* chain = issparse ? mjSTACKALLOC(d, nv, int) : NULL;
+      int NV = mj_contactJacobian(m, d, con, need_ang ? 6 : 3, jacdifp, jacdifr,
+                                  NULL, NULL, NULL, NULL, chain);
+      if (NV) {
+        if (issparse) {
+          for (int j=0; j < NV; j++) {
+            mjtNum qv = d->qvel[chain[j]];
+            for (int k=0; k < 3; k++) {
+              linvel[k] += jacdifp[k*NV+j] * qv;
+              if (need_ang) angvel[k] += jacdifr[k*NV+j] * qv;
+            }
+          }
+        } else {
+          mju_mulMatVec(linvel, jacdifp, d->qvel, 3, nv);
+          if (need_ang) mju_mulMatVec(angvel, jacdifr, d->qvel, 3, nv);
+        }
+      }
+      mj_freeStack(d);
+    }
+
+    // rotate to contact frame and apply flip
+    if (data[mjCONDATA_LINVEL]) {
+      mju_mulMatVec3(data[mjCONDATA_LINVEL], con->frame, linvel);
+      if (flg_flip) data[mjCONDATA_LINVEL][2] *= -1;
+    }
+    if (data[mjCONDATA_ANGVEL]) {
+      mju_mulMatVec3(data[mjCONDATA_ANGVEL], con->frame, angvel);
+      if (flg_flip) data[mjCONDATA_ANGVEL][2] *= -1;
+    }
+  }
 }
 
 
@@ -458,6 +519,138 @@ static void total_wrench(mjtNum force[3], mjtNum torque[3], const mjtNum point[3
     mju_cross(induced_torque, diff, force_j);
     mju_addTo3(torque, induced_torque);
   }
+}
+
+
+// compute contact sensor value, write to data buffer
+static void compute_contact_sensor(const mjModel* m, mjData* d, int i, mjtNum* sensordata) {
+  // local reduce enum for readability
+  enum {
+    REDUCE_NONE     = 0,
+    REDUCE_MINDIST  = 1,
+    REDUCE_MAXFORCE = 2,
+    REDUCE_NETFORCE = 3,
+  };
+
+  // prepare sizes and indices
+  int objtype = m->sensor_objtype[i];
+  int objid = m->sensor_objid[i];
+  int dataspec = m->sensor_intprm[i*mjNSENS];
+  int size = mju_condataSize(dataspec);  // size of each slot
+  int dim = m->sensor_dim[i];            // total sensor array dimension
+  int num = dim / size;                  // number of slots
+  int reftype = m->sensor_reftype[i];
+  int refid = m->sensor_refid[i];
+  int reduce = m->sensor_intprm[i*mjNSENS+1];
+
+  // clear all outputs, prepare data pointers
+  mju_zero(sensordata, dim);
+  mjtNum* data[mjNCONDATA] = {NULL};
+  for (int j=0; j < mjNCONDATA; j++) {
+    if (dataspec & (1 << j)) {
+      data[j] = sensordata;
+      sensordata += mjCONDATA_SIZE[j];
+    }
+  }
+
+  // prepare for matching loop
+  int nmatch = 0;
+  mj_markStack(d);
+  ContactInfo *match = mjSTACKALLOC(d, d->ncon, ContactInfo);
+
+  // find matching contacts
+  for (int j=0; j < d->ncon; j++) {
+    // check match condition
+    int match_j = matchContact(m, d, j, objtype, objid, reftype, refid);
+    if (!match_j) {
+      continue;
+    }
+
+    // save id and flip flag
+    match[nmatch].id = j;
+    match[nmatch].flip = match_j < 0;
+
+    // save sorting criterion, if required
+    if (reduce == REDUCE_MINDIST) {
+      match[nmatch].criterion = d->contact[j].dist;
+    } else if (reduce == REDUCE_MAXFORCE) {
+      mjtNum forcetorque[6];
+      mj_contactForce(m, d, j, forcetorque);
+      match[nmatch].criterion = -mju_dot3(forcetorque, forcetorque);
+    }
+
+    // increment number of matching contacts
+    nmatch++;
+  }
+
+  // number of slots to be filled
+  int nslot = mjMIN(num, nmatch);
+
+  // partial sort to get bottom nslot contacts if sorted reduction
+  if (reduce == REDUCE_MINDIST || reduce == REDUCE_MAXFORCE) {
+    ContactInfo *heap = mjSTACKALLOC(d, nslot, ContactInfo);
+    ContactSelect(match, heap, nmatch, nslot, NULL);
+  }
+
+  // netforce reduction
+  else if (reduce == REDUCE_NETFORCE) {
+    if (!nmatch) {
+      mj_freeStack(d);
+      return;
+    }
+
+    mjtNum *wrench = mjSTACKALLOC(d, nmatch * 6, mjtNum);
+    mjtNum *pos = mjSTACKALLOC(d, nmatch * 3, mjtNum);
+    mjtNum *frame = mjSTACKALLOC(d, nmatch * 9, mjtNum);
+
+    // precompute wrenches, positions, and frames, maybe flip wrench
+    for (int j=0; j < nmatch; j++) {
+      int conid = match[j].id;
+      mj_contactForce(m, d, conid, wrench + 6*j);
+      mju_copy3(pos + 3*j, d->contact[conid].pos);
+      mju_copy9(frame + 9*j, d->contact[conid].frame);
+      if (match[j].flip) {
+        mju_scl(wrench + 6*j, wrench + 6*j, -1, 6);
+      }
+    }
+
+    // compute point: force-weighted centroid of contact positions
+    mjtNum point[3] = {0};
+    mjtNum total_force = 0;
+    for (int j=0; j < nmatch; j++) {
+      mjtNum weight = mju_norm3(wrench + 6*j);
+      mju_addToScl3(point, pos + 3*j, weight);
+      total_force += weight;
+    }
+    mju_scl3(point, point, 1.0 / mjMAX(total_force, mjMINVAL));
+
+    // compute total wrench about point, in the global frame
+    mjtNum force[3], torque[3];
+    total_wrench(force, torque, point, nmatch, wrench, pos, frame);
+
+    // write data to slot 0
+    if (data[mjCONDATA_FOUND])   *data[mjCONDATA_FOUND] = nmatch;
+    if (data[mjCONDATA_FORCE])   mju_copy3(data[mjCONDATA_FORCE], force);
+    if (data[mjCONDATA_TORQUE])  mju_copy3(data[mjCONDATA_TORQUE], torque);
+    if (data[mjCONDATA_DIST])    *data[mjCONDATA_DIST] = 0;
+    if (data[mjCONDATA_POS])     mju_copy3(data[mjCONDATA_POS], point);
+    if (data[mjCONDATA_NORMAL])  data[mjCONDATA_NORMAL][0] = 1;
+    if (data[mjCONDATA_TANGENT]) data[mjCONDATA_TANGENT][1] = 1;
+
+    // done with this sensor
+    mj_freeStack(d);
+    return;
+  }
+
+  // copy data into slots, increment pointers
+  for (int j=0; j < nslot; j++) {
+    copySensorData(m, d, data, match[j].id, match[j].flip, nmatch);
+    for (int k=0; k < mjNCONDATA; k++) {
+      if (data[k]) data[k] += size;
+    }
+  }
+
+  mj_freeStack(d);
 }
 
 
@@ -735,7 +928,45 @@ static void mj_computeSensorPos(const mjModel* m, mjData* d, int i, mjtNum* sens
     mju_copy3(sensordata, d->subtree_com+3*objid);
     break;
 
-  case mjSENS_INSIDESITE:                             // 1 if object is inside site
+  case mjSENS_INSIDESITE:                             // 1 if object is inside site (or Hausdorff dist if enclosed)
+    if (m->sensor_intprm[i*mjNSENS]) {
+      mjCCDObj obj1, obj2;
+      mjc_initCCDObjSite(&obj2, m, d, refid, 0);
+      int niter = m->opt.ccd_iterations;
+      mjtNum tol = m->opt.ccd_tolerance;
+
+      if (objtype == mjOBJ_GEOM) {
+        mjc_initCCDObj(&obj1, m, d, objid, 0);
+        sensordata[0] = mjc_hausdorff(&obj1, &obj2, niter, 0.5, tol);
+      } else if (objtype == mjOBJ_SITE) {
+        mjc_initCCDObjSite(&obj1, m, d, objid, 0);
+        sensordata[0] = mjc_hausdorff(&obj1, &obj2, niter, 0.5, tol);
+      } else if (objtype == mjOBJ_BODY) {
+        int n1 = m->body_geomnum[objid];
+        int id1 = m->body_geomadr[objid];
+        mjtNum max_dist = -mjMAXVAL;
+        for (int g = id1; g < id1 + n1; g++) {
+          mjc_initCCDObj(&obj1, m, d, g, 0);
+          max_dist = mju_max(max_dist, mjc_hausdorff(&obj1, &obj2, niter, 0.5, tol));
+        }
+        sensordata[0] = max_dist;
+      } else if (objtype == mjOBJ_XBODY) {
+        mjtNum max_dist = -mjMAXVAL;
+        for (int g = 0; g < m->ngeom; g++) {
+          int b = m->geom_bodyid[g];
+          while (b > objid) {
+            b = m->body_parentid[b];
+          }
+          if (b == objid) {
+            mjc_initCCDObj(&obj1, m, d, g, 0);
+            max_dist = mju_max(max_dist, mjc_hausdorff(&obj1, &obj2, niter, 0.5, tol));
+          }
+        }
+        sensordata[0] = max_dist;
+      }
+      break;
+    }
+
     get_xpos_xmat(d, objtype, objid, i, &xpos, &xmat);
 
     // for massless bodies with positive subtree mass (e.g., flex parents),
@@ -820,6 +1051,10 @@ static void mj_computeSensorPos(const mjModel* m, mjData* d, int i, mjtNum* sens
 
   case mjSENS_CLOCK:                                  // simulation time
     sensordata[0] = d->time;
+    break;
+
+  case mjSENS_CONTACT:                                // contact
+    compute_contact_sensor(m, d, i, sensordata);
     break;
 
   default:
@@ -941,205 +1176,8 @@ static void mj_computeSensorVel(const mjModel* m, mjData* d, int i, mjtNum* sens
     mju_copy3(sensordata, d->subtree_angmom+3*objid);
     break;
 
-  default:
-    mjERROR("invalid type in VEL stage, sensor %d", i);
-  }
-}
-
-
-// compute acceleration-stage sensor value, write to data buffer
-static void mj_computeSensorAcc(const mjModel* m, mjData* d, int i, mjtNum* sensordata) {
-  int ne = d->ne, nf = d->nf, nefc = d->nefc, nactuator = m->nactuator;
-  mjtSensor type = (mjtSensor)m->sensor_type[i];
-  int objtype = m->sensor_objtype[i];
-  int objid = m->sensor_objid[i];
-
-  mjtNum tmp[6], conforce[6], conray[3], frc;
-  const mjContact* con;
-  int rootid, bodyid;
-
-  // call mj_rnePostConstraint for sensors that need it (unless already computed)
-  if (!d->flg_rnepost &&
-      (type == mjSENS_ACCELEROMETER ||
-       type == mjSENS_FORCE         ||
-       type == mjSENS_TORQUE        ||
-       type == mjSENS_FRAMELINACC   ||
-       type == mjSENS_FRAMEANGACC)) {
-    mj_rnePostConstraint(m, d);
-  }
-
-  // process according to type
-  switch (type) {
-  case mjSENS_TOUCH:                                  // touch
-    // extract body data
-    bodyid = m->site_bodyid[objid];
-
-    // clear result
-    sensordata[0] = 0;
-
-    // find contacts in sensor zone, add normal forces
-    for (int j=0; j < d->ncon; j++) {
-      // contact pointer, contacting bodies  (-1 for flex)
-      con = d->contact + j;
-      int conbody[2];
-      for (int k=0; k < 2; k++) {
-        conbody[k] = (con->geom[k] >= 0)
-            ? m->geom_bodyid[con->geom[k]]
-            : mj_flexBody(m, con, k);
-      }
-
-      // select contacts involving sensorized body
-      if (con->efc_address >= 0 && (bodyid == conbody[0] || bodyid == conbody[1])) {
-        // get contact force:torque in contact frame
-        mj_contactForce(m, d, j, conforce);
-
-        // nothing to do if normal is zero
-        if (conforce[0] <= 0) {
-          continue;
-        }
-
-        // convert contact normal force to global frame, normalize
-        mju_scl3(conray, con->frame, conforce[0]);
-        mju_normalize3(conray);
-
-        // flip ray direction if sensor is on body2
-        if (bodyid == conbody[1]) {
-          mju_scl3(conray, conray, -1);
-        }
-
-        // add if ray-zone intersection (always true when con->pos inside zone)
-        if (mju_rayGeom(d->site_xpos+3*objid, d->site_xmat+9*objid,
-                        m->site_size+3*objid, con->pos, conray,
-                        m->site_type[objid], NULL) >= 0) {
-          sensordata[0] += conforce[0];
-        }
-      }
-    }
-    break;
-
   case mjSENS_CONTACT:                                // contact
-    {
-      // local reduce enum for readability
-      enum {
-        REDUCE_NONE     = 0,
-        REDUCE_MINDIST  = 1,
-        REDUCE_MAXFORCE = 2,
-        REDUCE_NETFORCE = 3,
-      };
-
-      // prepare sizes and indices
-      int dataspec = m->sensor_intprm[i*mjNSENS];
-      int size = mju_condataSize(dataspec);  // size of each slot
-      int dim = m->sensor_dim[i];            // total sensor array dimension
-      int num = dim / size;                  // number of slots
-      int reftype = m->sensor_reftype[i];
-      int refid = m->sensor_refid[i];
-      int reduce = m->sensor_intprm[i*mjNSENS+1];
-
-      // clear all outputs, prepare data pointers
-      mju_zero(sensordata, dim);
-      mjtNum* data[mjNCONDATA] = {NULL};
-      for (int j=0; j < mjNCONDATA; j++) {
-        if (dataspec & (1 << j)) {
-          data[j] = sensordata;
-          sensordata += mjCONDATA_SIZE[j];
-        }
-      }
-
-      // prepare for matching loop
-      int nmatch = 0;
-      mj_markStack(d);
-      ContactInfo *match = mjSTACKALLOC(d, d->ncon, ContactInfo);
-
-      // find matching contacts
-      for (int j=0; j < d->ncon; j++) {
-        // check match condition
-        int match_j = matchContact(m, d, j, objtype, objid, reftype, refid);
-        if (!match_j) {
-          continue;
-        }
-
-        // save id and flip flag
-        match[nmatch].id = j;
-        match[nmatch].flip = match_j < 0;
-
-        // save sorting criterion, if required
-        if (reduce == REDUCE_MINDIST) {
-          match[nmatch].criterion = d->contact[j].dist;
-        } else if (reduce == REDUCE_MAXFORCE) {
-          mjtNum forcetorque[6];
-          mj_contactForce(m, d, j, forcetorque);
-          match[nmatch].criterion = -mju_dot3(forcetorque, forcetorque);
-        }
-
-        // increment number of matching contacts
-        nmatch++;
-      }
-
-      // number of slots to be filled
-      int nslot = mjMIN(num, nmatch);
-
-      // partial sort to get bottom nslot contacts if sorted reduction
-      if (reduce == REDUCE_MINDIST || reduce == REDUCE_MAXFORCE) {
-        ContactInfo *heap = mjSTACKALLOC(d, nslot, ContactInfo);
-        ContactSelect(match, heap, nmatch, nslot, NULL);
-      }
-
-      // netforce reduction
-      else if (reduce == REDUCE_NETFORCE) {
-        mjtNum *wrench = mjSTACKALLOC(d, nmatch * 6, mjtNum);
-        mjtNum *pos = mjSTACKALLOC(d, nmatch * 3, mjtNum);
-        mjtNum *frame = mjSTACKALLOC(d, nmatch * 9, mjtNum);
-
-        // precompute wrenches, positions, and frames, maybe flip wrench
-        for (int j=0; j < nmatch; j++) {
-          int conid = match[j].id;
-          mj_contactForce(m, d, conid, wrench + 6*j);
-          mju_copy3(pos + 3*j, d->contact[conid].pos);
-          mju_copy9(frame + 9*j, d->contact[conid].frame);
-          if (match[j].flip) {
-            mju_scl(wrench + 6*j , wrench + 6*j, -1, 6);
-          }
-        }
-
-        // compute point: force-weighted centroid of contact positions
-        mjtNum point[3] = {0};
-        mjtNum total_force = 0;
-        for (int j=0; j < nmatch; j++) {
-          mjtNum weight = mju_norm3(wrench + 6*j);
-          mju_addToScl3(point, pos + 3*j, weight);
-          total_force += weight;
-        }
-        mju_scl3(point, point, 1.0 / mjMAX(total_force, mjMINVAL));
-
-        // compute total wrench about point, in the global frame
-        mjtNum force[3], torque[3];
-        total_wrench(force, torque, point, nmatch, wrench, pos, frame);
-
-        // write data to slot 0
-        if (data[mjCONDATA_FOUND])   *data[mjCONDATA_FOUND] = nmatch;
-        if (data[mjCONDATA_FORCE])   mju_copy3(data[mjCONDATA_FORCE], force);
-        if (data[mjCONDATA_TORQUE])  mju_copy3(data[mjCONDATA_TORQUE], torque);
-        if (data[mjCONDATA_DIST])    *data[mjCONDATA_DIST] = 0;
-        if (data[mjCONDATA_POS])     mju_copy3(data[mjCONDATA_POS], point);
-        if (data[mjCONDATA_NORMAL])  data[mjCONDATA_NORMAL][0] = 1;
-        if (data[mjCONDATA_TANGENT]) data[mjCONDATA_TANGENT][1] = 1;
-
-        // done with this sensor
-        mj_freeStack(d);
-        break;
-      }
-
-      // copy data into slots, increment pointers
-      for (int j=0; j < nslot; j++) {
-        copySensorData(m, d, data, match[j].id, match[j].flip, nmatch);
-        for (int k=0; k < mjNCONDATA; k++) {
-          if (data[k]) data[k] += size;
-        }
-      }
-
-      mj_freeStack(d);
-    }
+    compute_contact_sensor(m, d, i, sensordata);
     break;
 
   case mjSENS_TACTILE:                                // tactile
@@ -1233,6 +1271,86 @@ static void mj_computeSensorAcc(const mjModel* m, mjData* d, int i, mjtNum* sens
 
       mj_freeStack(d);
     }
+    break;
+
+  default:
+    mjERROR("invalid type in VEL stage, sensor %d", i);
+  }
+}
+
+
+// compute acceleration-stage sensor value, write to data buffer
+static void mj_computeSensorAcc(const mjModel* m, mjData* d, int i, mjtNum* sensordata) {
+  int ne = d->ne, nf = d->nf, nefc = d->nefc, nactuator = m->nactuator;
+  mjtSensor type = (mjtSensor)m->sensor_type[i];
+  int objtype = m->sensor_objtype[i];
+  int objid = m->sensor_objid[i];
+
+  mjtNum tmp[6], conforce[6], conray[3], frc;
+  const mjContact* con;
+  int rootid, bodyid;
+
+  // call mj_rnePostConstraint for sensors that need it (unless already computed)
+  if (!d->flg_rnepost &&
+      (type == mjSENS_ACCELEROMETER ||
+       type == mjSENS_FORCE         ||
+       type == mjSENS_TORQUE        ||
+       type == mjSENS_FRAMELINACC   ||
+       type == mjSENS_FRAMEANGACC)) {
+    mj_rnePostConstraint(m, d);
+  }
+
+  // process according to type
+  switch (type) {
+  case mjSENS_TOUCH:                                  // touch
+    // extract body data
+    bodyid = m->site_bodyid[objid];
+
+    // clear result
+    sensordata[0] = 0;
+
+    // find contacts in sensor zone, add normal forces
+    for (int j=0; j < d->ncon; j++) {
+      // contact pointer, contacting bodies  (-1 for flex)
+      con = d->contact + j;
+      int conbody[2];
+      for (int k=0; k < 2; k++) {
+        conbody[k] = (con->geom[k] >= 0)
+            ? m->geom_bodyid[con->geom[k]]
+            : mj_flexBody(m, con, k);
+      }
+
+      // select contacts involving sensorized body
+      if (con->efc_address >= 0 && (bodyid == conbody[0] || bodyid == conbody[1])) {
+        // get contact force:torque in contact frame
+        mj_contactForce(m, d, j, conforce);
+
+        // nothing to do if normal is zero
+        if (conforce[0] <= 0) {
+          continue;
+        }
+
+        // convert contact normal force to global frame, normalize
+        mju_scl3(conray, con->frame, conforce[0]);
+        mju_normalize3(conray);
+
+        // flip ray direction if sensor is on body2
+        if (bodyid == conbody[1]) {
+          mju_scl3(conray, conray, -1);
+        }
+
+        // add if ray-zone intersection (always true when con->pos inside zone)
+        if (mju_rayGeom(d->site_xpos+3*objid, d->site_xmat+9*objid,
+                        m->site_size+3*objid, con->pos, conray,
+                        m->site_type[objid], NULL) >= 0) {
+          sensordata[0] += conforce[0];
+        }
+      }
+    }
+    break;
+
+  case mjSENS_CONTACT:                                // contact
+    compute_contact_sensor(m, d, i, sensordata);
     break;
 
   case mjSENS_ACCELEROMETER:                          // accelerometer

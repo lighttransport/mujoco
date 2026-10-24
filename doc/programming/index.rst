@@ -25,15 +25,15 @@ Compiler
 Thread
    The threading framework is written in C++ and exposed in C. It provides a thread pool interface
    to process tasks asynchronously. To enable use in MuJoCo, call ``mju_threadpool``.
-Rendering
-   There are two rendering libraries provided by MuJoCo. The :ref:`classic rendering<OpenGLrendering>` library is
-   written in C and uses OpenGL 1.5. It provides a simple and efficient way to visualize MuJoCo models. The
-   :ref:`filament rendering<FilamentRendering>` library is written in C++ and uses the externally-devloped Filament
-   rendering engine. It provides more modern and feature-rich real-time rendering capabilities.
 Abstract visualizer
-   The abstract visualizer is written in C. It generates a list of abstract geometric entities representing the
-   simulation state, with all information needed for rendering with the Classic renderer. It also provides abstract
-   mouse hooks for camera and perturbation control.
+   The abstract visualizer is written in C and is independent of any graphics library. It provides abstract mouse
+   hooks for camera and perturbation control, object selection, visualization options, and generates a list of
+   abstract geometric entities representing the simulation state and its decorations. It is shared by both renderers.
+Rendering
+   There are two rendering libraries provided by MuJoCo. The :ref:`classic rendering<ClassicRendering>` library is
+   written in C and uses OpenGL 1.5. It provides a simple and efficient way to visualize MuJoCo models. The
+   :ref:`filament rendering<FilamentRendering>` library is written in C++ and uses the externally-developed Filament
+   rendering engine. It provides more modern and feature-rich real-time rendering capabilities.
 UI framework
    The UI framework is written in C and is designed to work with the :ref:`classic OpenGL renderer<OpenGLrendering>`.
    UI elements are rendered in OpenGL. It has its own event mechanism and abstract hooks for keyboard and mouse input.
@@ -125,6 +125,72 @@ target directory.
    As a reference, a working build configuration can be found in MuJoCo's
    `continuous integration setup <https://github.com/google-deepmind/mujoco/blob/main/.github/workflows/build.yml>`_ on
    GitHub.
+
+.. _inBuildBazel:
+
+Building with Bazel
+~~~~~~~~~~~~~~~~~~~
+
+MuJoCo can also be built with `Bazel <https://bazel.build/>`__ 8.0 or later. The Bazel version it is tested with is
+pinned in ``.bazelversion``, which `Bazelisk <https://github.com/bazelbuild/bazelisk>`__ uses automatically. To build
+and test MuJoCo from the root of the cloned repository:
+
+.. code-block:: shell
+
+   bazel build //...
+   bazel test //...
+
+To use MuJoCo from your own Bazel module, add it to your ``MODULE.bazel``. MuJoCo isn't in the
+`Bazel Central Registry <https://registry.bazel.build/>`__ yet, so use an override, for example:
+
+.. code-block:: python
+
+   bazel_dep(name = "mujoco")
+   git_override(
+       module_name = "mujoco",
+       remote = "https://github.com/google-deepmind/mujoco.git",
+       commit = "<commit>",
+   )
+
+The main targets are:
+
+- ``@mujoco``: the MuJoCo library. Its headers are included as ``#include <mujoco/mujoco.h>``.
+- ``@mujoco//:mujoco_shared``: MuJoCo as a shared library (``libmujoco.so``, or ``libmujoco.dylib`` on macOS) which,
+  like the one built with CMake, exports only the MuJoCo API. Add it to the ``dynamic_deps`` of a ``cc_binary`` or
+  ``cc_shared_library`` that depends on ``@mujoco`` to link MuJoCo dynamically, for example to share one copy of MuJoCo
+  with the Python bindings.
+- ``@mujoco//plugin/<name>:register``, where ``<name>`` is ``actuator``, ``elasticity``, ``sdf`` or ``sensor``: the
+  bundled plugins, which register themselves when linked in.
+- ``@mujoco//python/mujoco``: the Python bindings, see :ref:`PyBuildBazel`.
+
+To build your own :ref:`plugin<exPlugin>` as a shared library, like the bundled ones, use the ``mujoco_plugin`` macro.
+The library links against ``@mujoco//:mujoco_shared`` and exports no symbols; load it at run time with
+:ref:`mj_loadPluginLibrary`, which runs its :ref:`registration<exRegistration>` code:
+
+.. code-block:: python
+
+   load("@mujoco//plugin:mujoco_plugin.bzl", "mujoco_plugin")
+
+   cc_library(
+       name = "my_plugin_lib",
+       srcs = ["my_plugin.cc"],
+       deps = ["@mujoco"],
+       alwayslink = True,
+   )
+
+   # Builds libmy_plugin.so (libmy_plugin.dylib on macOS).
+   mujoco_plugin(
+       name = "my_plugin",
+       deps = [":my_plugin_lib"],
+   )
+
+To use single-precision floating point (``mjUSESINGLE``), build with ``--@mujoco//:single_precision``.
+
+The Bazel build is tested on Linux and macOS, and covers the MuJoCo library, ``simulate``, the plugins, the samples and
+the core Python bindings.
+
+.. tip::
+   The ``sample`` directory is a standalone Bazel module that depends on MuJoCo this way.
 
 .. _inBuildDocs:
 
@@ -272,12 +338,15 @@ Next we list the prefixes corresponding to function definitions. Note that funct
    Functions for computing derivatives, for example :ref:`mjd_transitionFD`.
 ``mjs_``
    Functions for :doc:`procedural model editing <modeledit>`, for example :ref:`mjs_addJoint`.
+``mjb_``
+   Functions for :ref:`batched simulation<siBatch>`, declared in ``mujoco/mjbatch.h``, for example :ref:`mjb_step`.
 
 .. toctree::
     :hidden:
 
     simulation
     visualization
+    rendering
     ui
     modeledit
     samples

@@ -23,7 +23,7 @@
 #include <string_view>  // IWYU pragma: keep
 #include <unordered_map>
 #include <utility>
-#include <vector>       // IWYU pragma: keep
+#include <vector>  // IWYU pragma: keep
 
 #include <Eigen/Core>
 #include <Eigen/Eigen>
@@ -31,9 +31,9 @@
 #include <mujoco/mujoco.h>
 #include "errors.h"
 #include "indexers.h"  // IWYU pragma: keep
-#include "specs_wrapper.h"  // IWYU pragma: keep
 #include "raw.h"
-#include "structs.h"  // IWYU pragma: keep
+#include "specs_wrapper.h"  // IWYU pragma: keep
+#include "structs.h"        // IWYU pragma: keep
 #include "vfs.h"
 #include <pybind11/cast.h>
 #include <pybind11/eigen.h>
@@ -57,7 +57,7 @@ using MjDouble5 = Eigen::Map<Eigen::Matrix<double, 5, 1>>;
 using MjDouble6 = Eigen::Map<Eigen::Matrix<double, 6, 1>>;
 using MjDouble9 = Eigen::Map<Eigen::Matrix<double, 9, 1>>;
 using MjDouble10 = Eigen::Map<Eigen::Matrix<double, 10, 1>>;
-using MjDouble11 = Eigen::Map<Eigen::Matrix<double, 11, 1>>;
+using MjDouble12 = Eigen::Map<Eigen::Matrix<double, 12, 1>>;
 using MjDoubleVec = Eigen::Map<Eigen::VectorXd>;
 using MjNum2 = Eigen::Map<Eigen::Matrix<mjtNum, 2, 1>>;
 using MjNum3 = Eigen::Map<Eigen::Matrix<mjtNum, 3, 1>>;
@@ -75,17 +75,16 @@ using MjDoubleRef5 = Eigen::Ref<const Eigen::Matrix<double, 5, 1>>;
 using MjDoubleRef6 = Eigen::Ref<const Eigen::Matrix<double, 6, 1>>;
 using MjDoubleRef9 = Eigen::Ref<const Eigen::Matrix<double, 9, 1>>;
 using MjDoubleRef10 = Eigen::Ref<const Eigen::Matrix<double, 10, 1>>;
-using MjDoubleRef11 = Eigen::Ref<const Eigen::Matrix<double, 11, 1>>;
+using MjDoubleRef12 = Eigen::Ref<const Eigen::Matrix<double, 12, 1>>;
 using MjDoubleRefVec = Eigen::Ref<const Eigen::VectorXd>;
 using MjNumRef2 = Eigen::Ref<const Eigen::Matrix<mjtNum, 2, 1>>;
 using MjNumRef3 = Eigen::Ref<const Eigen::Matrix<mjtNum, 3, 1>>;
 using MjNumRef5 = Eigen::Ref<const Eigen::Matrix<mjtNum, 5, 1>>;
 
 template <typename LoadFunc>
-static raw::MjSpec* LoadSpecFileImpl(
-    const std::string& filename,
-    const std::vector<_impl::VfsAsset>& assets,
-    LoadFunc&& loadfunc) {
+static raw::MjSpec* LoadSpecFileImpl(const std::string& filename,
+                                     const std::vector<_impl::VfsAsset>& assets,
+                                     LoadFunc&& loadfunc) {
   mjVFS vfs;
   mjVFS* vfs_ptr = nullptr;
   if (!assets.empty()) {
@@ -139,9 +138,10 @@ void DefineArray(py::module& m, const std::string& typestr) {
              v.ptr[i] = std::move(c);
            })
       .def("__len__", [](Class& v) { return v.size; })
-      .def("__iter__", [](Class& v) {
-        return py::make_iterator(v.ptr, v.ptr + v.size);
-      }, py::keep_alive<0, 1>(), py::return_value_policy::reference_internal);
+      .def(
+          "__iter__",
+          [](Class& v) { return py::make_iterator(v.ptr, v.ptr + v.size); },
+          py::keep_alive<0, 1>(), py::return_value_policy::reference_internal);
 };
 
 py::list FindAllImpl(raw::MjsBody& body, mjtObj objtype, bool recursive) {
@@ -233,34 +233,51 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       structs_m.attr("_recompile_spec_addr");
 
   py::class_<MjSpec> mjSpec(m, "MjSpec");
-  py::class_<raw::MjsElement> mjsElement(m, "MjsElement");
-  py::class_<raw::MjsDefault> mjsDefault(m, "MjsDefault");
-  py::class_<raw::MjsBody> mjsBody(m, "MjsBody");
-  py::class_<raw::MjsFrame> mjsFrame(m, "MjsFrame");
-  py::class_<raw::MjsGeom> mjsGeom(m, "MjsGeom");
-  py::class_<raw::MjsJoint> mjsJoint(m, "MjsJoint");
-  py::class_<raw::MjsLight> mjsLight(m, "MjsLight");
-  py::class_<raw::MjsMaterial> mjsMaterial(m, "MjsMaterial");
-  py::class_<raw::MjsSite> mjsSite(m, "MjsSite");
-  py::class_<raw::MjsMesh> mjsMesh(m, "MjsMesh");
-  py::class_<raw::MjsSkin> mjsSkin(m, "MjsSkin");
-  py::class_<raw::MjsTexture> mjsTexture(m, "MjsTexture");
-  py::class_<raw::MjsText> mjsText(m, "MjsText");
-  py::class_<raw::MjsTuple> mjsTuple(m, "MjsTuple");
-  py::class_<raw::MjsCamera> mjsCamera(m, "MjsCamera");
-  py::class_<raw::MjsFlex> mjsFlex(m, "MjsFlex");
-  py::class_<raw::MjsHField> mjsHField(m, "MjsHField");
-  py::class_<raw::MjsKey> mjsKey(m, "MjsKey");
-  py::class_<raw::MjsNumeric> mjsNumeric(m, "MjsNumeric");
-  py::class_<raw::MjsPair> mjsPair(m, "MjsPair");
-  py::class_<raw::MjsExclude> mjsExclude(m, "MjsExclude");
-  py::class_<raw::MjsEquality> mjsEquality(m, "MjsEquality");
-  py::class_<raw::MjsTendon> mjsTendon(m, "MjsTendon");
-  py::class_<raw::MjsSensor> mjsSensor(m, "MjsSensor");
-  py::class_<raw::MjsActuator> mjsActuator(m, "MjsActuator");
-  py::class_<raw::MjsPlugin> mjsPlugin(m, "MjsPlugin");
+  py::class_<raw::MjsElement, MjsElementRef<raw::MjsElement>> mjsElement(
+      m, "MjsElement");
+  py::class_<raw::MjsDefault, MjsElementRef<raw::MjsDefault>> mjsDefault(
+      m, "MjsDefault");
+  py::class_<raw::MjsBody, MjsElementRef<raw::MjsBody>> mjsBody(m, "MjsBody");
+  py::class_<raw::MjsFrame, MjsElementRef<raw::MjsFrame>> mjsFrame(m,
+                                                                   "MjsFrame");
+  py::class_<raw::MjsGeom, MjsElementRef<raw::MjsGeom>> mjsGeom(m, "MjsGeom");
+  py::class_<raw::MjsJoint, MjsElementRef<raw::MjsJoint>> mjsJoint(m,
+                                                                   "MjsJoint");
+  py::class_<raw::MjsLight, MjsElementRef<raw::MjsLight>> mjsLight(m,
+                                                                   "MjsLight");
+  py::class_<raw::MjsMaterial, MjsElementRef<raw::MjsMaterial>> mjsMaterial(
+      m, "MjsMaterial");
+  py::class_<raw::MjsSite, MjsElementRef<raw::MjsSite>> mjsSite(m, "MjsSite");
+  py::class_<raw::MjsMesh, MjsElementRef<raw::MjsMesh>> mjsMesh(m, "MjsMesh");
+  py::class_<raw::MjsSkin, MjsElementRef<raw::MjsSkin>> mjsSkin(m, "MjsSkin");
+  py::class_<raw::MjsTexture, MjsElementRef<raw::MjsTexture>> mjsTexture(
+      m, "MjsTexture");
+  py::class_<raw::MjsText, MjsElementRef<raw::MjsText>> mjsText(m, "MjsText");
+  py::class_<raw::MjsTuple, MjsElementRef<raw::MjsTuple>> mjsTuple(m,
+                                                                   "MjsTuple");
+  py::class_<raw::MjsCamera, MjsElementRef<raw::MjsCamera>> mjsCamera(
+      m, "MjsCamera");
+  py::class_<raw::MjsFlex, MjsElementRef<raw::MjsFlex>> mjsFlex(m, "MjsFlex");
+  py::class_<raw::MjsHField, MjsElementRef<raw::MjsHField>> mjsHField(
+      m, "MjsHField");
+  py::class_<raw::MjsKey, MjsElementRef<raw::MjsKey>> mjsKey(m, "MjsKey");
+  py::class_<raw::MjsNumeric, MjsElementRef<raw::MjsNumeric>> mjsNumeric(
+      m, "MjsNumeric");
+  py::class_<raw::MjsPair, MjsElementRef<raw::MjsPair>> mjsPair(m, "MjsPair");
+  py::class_<raw::MjsExclude, MjsElementRef<raw::MjsExclude>> mjsExclude(
+      m, "MjsExclude");
+  py::class_<raw::MjsEquality, MjsElementRef<raw::MjsEquality>> mjsEquality(
+      m, "MjsEquality");
+  py::class_<raw::MjsTendon, MjsElementRef<raw::MjsTendon>> mjsTendon(
+      m, "MjsTendon");
+  py::class_<raw::MjsSensor, MjsElementRef<raw::MjsSensor>> mjsSensor(
+      m, "MjsSensor");
+  py::class_<raw::MjsActuator, MjsElementRef<raw::MjsActuator>> mjsActuator(
+      m, "MjsActuator");
+  py::class_<raw::MjsPlugin, MjsElementRef<raw::MjsPlugin>> mjsPlugin(
+      m, "MjsPlugin");
   py::class_<raw::MjsOrientation> mjsOrientation(m, "MjsOrientation");
-  py::class_<raw::MjsWrap> mjsWrap(m, "MjsWrap");
+  py::class_<raw::MjsWrap, MjsElementRef<raw::MjsWrap>> mjsWrap(m, "MjsWrap");
   py::class_<raw::MjOption> mjOption(m, "MjOption");
   py::class_<raw::MjStatistic> mjStatistic(m, "MjStatistic");
   py::class_<raw::MjVisual> mjVisual(m, "MjVisual");
@@ -280,24 +297,20 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       .def(py::init<>())
       .def("close", &MjVfs::Close)
       .def("__enter__", [](MjVfs& self) -> MjVfs& { return self; })
-      .def("__exit__",
-           [](MjVfs& self, py::object, py::object, py::object) {
-             self.Close();
-           })
+      .def("__exit__", [](MjVfs& self, py::object, py::object,
+                          py::object) { self.Close(); })
       .def("__setitem__",
            [](MjVfs& self, const std::string& name, py::bytes data) {
              if (!self.is_open()) {
                throw std::runtime_error("VFS is closed");
              }
              std::string_view buffer = data;
-             const int err = mj_addBufferVFS(
-                 self.get(), name.c_str(), buffer.data(), buffer.size());
+             const int err = mj_addBufferVFS(self.get(), name.c_str(),
+                                             buffer.data(), buffer.size());
              if (err == 2) {
-               throw py::value_error(
-                   "Repeated file name in VFS: " + name);
+               throw py::value_error("Repeated file name in VFS: " + name);
              } else if (err) {
-               throw py::value_error(
-                   "Failed to add buffer to VFS: " + name);
+               throw py::value_error("Failed to add buffer to VFS: " + name);
              }
            })
       .def("__delitem__",
@@ -309,14 +322,12 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
                throw py::key_error(name);
              }
            })
-      .def("__contains__",
-           [](MjVfs& self, const std::string& name) {
-             if (!self.is_open()) {
-               throw std::runtime_error("VFS is closed");
-             }
-             return mj_containsBufferVFS(self.get(), name.c_str()) == 1;
-           });
-
+      .def("__contains__", [](MjVfs& self, const std::string& name) {
+        if (!self.is_open()) {
+          throw std::runtime_error("VFS is closed");
+        }
+        return mj_containsBufferVFS(self.get(), name.c_str()) == 1;
+      });
 
   // ============================= MJSPEC =====================================
   mjSpec.def(py::init<>());
@@ -326,8 +337,7 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       "from_file",
       [](std::string& filename,
          std::optional<std::unordered_map<std::string, py::bytes>>& include,
-         std::optional<py::dict>& assets,
-         MjVfs* vfs) -> MjSpec {
+         std::optional<py::dict>& assets, MjVfs* vfs) -> MjSpec {
         if (vfs && (include.has_value() || assets.has_value())) {
           throw py::value_error(
               "Cannot specify both 'vfs' and 'include'/'assets'.");
@@ -338,8 +348,7 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
             py::gil_scoped_release no_gil;
             char error[1024];
             spec = InterceptMjErrors(mj_parse)(
-                filename.c_str(), nullptr, vfs->get(),
-                error, sizeof(error));
+                filename.c_str(), nullptr, vfs->get(), error, sizeof(error));
             if (!spec) {
               throw py::value_error(error);
             }
@@ -354,8 +363,8 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
           spec = LoadSpecFileImpl(
               filename, files,
               [&error](const char* filename, const mjVFS* vfs) {
-                return InterceptMjErrors(mj_parse)(
-                    filename, nullptr, vfs, error, sizeof(error));
+                return InterceptMjErrors(mj_parse)(filename, nullptr, vfs,
+                                                   error, sizeof(error));
               });
           if (!spec) {
             throw py::value_error(error);
@@ -390,8 +399,7 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       "from_string",
       [](std::string& xml,
          std::optional<std::unordered_map<std::string, py::bytes>>& include,
-         std::optional<py::dict>& assets,
-         MjVfs* vfs) -> MjSpec {
+         std::optional<py::dict>& assets, MjVfs* vfs) -> MjSpec {
         if (vfs && (include.has_value() || assets.has_value())) {
           throw py::value_error(
               "Cannot specify both 'vfs' and 'include'/'assets'.");
@@ -401,8 +409,8 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
           {
             py::gil_scoped_release no_gil;
             char error[1024];
-            spec = InterceptMjErrors(mj_parseXMLString)(
-                xml.c_str(), vfs->get(), error, sizeof(error));
+            spec = InterceptMjErrors(mj_parseXMLString)(xml.c_str(), vfs->get(),
+                                                        error, sizeof(error));
             if (!spec) {
               throw py::value_error(error);
             }
@@ -415,20 +423,18 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
           py::gil_scoped_release no_gil;
           std::string model_filename = "model_.xml";
           if (include.has_value()) {
-            while (include->find(model_filename) !=
-                   include->end()) {
+            while (include->find(model_filename) != include->end()) {
               model_filename =
                   model_filename.substr(0, model_filename.size() - 4) + "_.xml";
             }
           }
-          files.emplace_back(
-              model_filename.c_str(), xml.c_str(), xml.length());
+          files.emplace_back(model_filename.c_str(), xml.c_str(), xml.length());
           char error[1024];
           spec = LoadSpecFileImpl(
               model_filename, files,
               [&error](const char* filename, const mjVFS* vfs) {
-                return InterceptMjErrors(mj_parseXML)(
-                    filename, vfs, error, sizeof(error));
+                return InterceptMjErrors(mj_parseXML)(filename, vfs, error,
+                                                      sizeof(error));
               });
           if (!spec) {
             throw py::value_error(error);
@@ -464,9 +470,7 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
     return mjmodel_mjdata_from_spec_ptr(reinterpret_cast<uintptr_t>(self.ptr),
                                         m, d);
   });
-  mjSpec.def("copy", [](const MjSpec& self) -> MjSpec {
-    return MjSpec(self);
-  });
+  mjSpec.def("copy", [](const MjSpec& self) -> MjSpec { return MjSpec(self); });
   mjSpec.def_property_readonly("_address", [](const MjSpec& self) {
     return reinterpret_cast<uintptr_t>(self.ptr);
   });
@@ -496,7 +500,8 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
         return mjs_findDefault(self.ptr, classname.c_str());
       },
       py::return_value_policy::reference_internal);
-  mjSpec.def("compile",
+  mjSpec.def(
+      "compile",
       [mjmodel_from_raw_ptr](MjSpec& self,
                              std::optional<MjVfs*> vfs) -> py::object {
         mjVFS* vfs_ptr = vfs.has_value() ? (*vfs)->get() : nullptr;
@@ -504,21 +509,110 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
             reinterpret_cast<uintptr_t>(self.Compile(vfs_ptr)));
       },
       py::arg("vfs") = py::none());
-  mjSpec.def_property(
-      "assets",
-      [](MjSpec& self) -> py::dict {
-        return self.assets;
+  mjSpec.def(
+      "fuse_static",
+      [](MjSpec& self, std::optional<MjVfs*> vfs) {
+        return self.FuseStatic(vfs.has_value() ? (*vfs)->get() : nullptr);
       },
+      py::arg("vfs") = py::none(),
+      R"mydelimiter(
+    Fuses the static bodies of the spec with their parents.
+
+    Each fused body becomes a frame in its parent, holding what the body held.
+    Objects referring to the fused bodies must not be used afterwards. Assets
+    are read as in compile(). Returns the number of bodies fused.
+
+    Parameters
+    ----------
+    vfs : MjVfs, optional
+        A VFS to read assets from. Cannot be used with assets.
+    )mydelimiter");
+  mjSpec.def(
+      "discard_visual",
+      [](MjSpec& self, std::optional<MjVfs*> vfs) {
+        return self.DiscardVisual(vfs.has_value() ? (*vfs)->get() : nullptr);
+      },
+      py::arg("vfs") = py::none(),
+      R"mydelimiter(
+    Discards the visual elements of the spec.
+
+    All materials and textures are discarded, as are the geoms which do not
+    collide and are not referenced, and the meshes which are then not used.
+    Objects referring to the discarded elements must not be used afterwards.
+    Assets are read as in compile(), and only if body inertia is inferred from
+    a discarded geom. Returns the number of elements discarded.
+
+    Parameters
+    ----------
+    vfs : MjVfs, optional
+        A VFS to read assets from. Cannot be used with assets.
+    )mydelimiter");
+  mjSpec.def(
+      "dedup_assets", [](MjSpec& self) { return self.DedupAssets(); },
+      R"mydelimiter(
+    Merges the duplicate textures and meshes of the spec.
+
+    Textures and meshes which would compile to the same asset, with the same
+    resolved file or buffers and the same parameters, are merged: the first of
+    each group keeps its name, every reference to the others is rewritten to it
+    and the others are deleted. Objects referring to the deleted elements must
+    not be used afterwards. Nothing is read from disk. Returns the number of
+    assets merged.
+    )mydelimiter");
+  mjSpec.def(
+      "adopt_inertial",
+      [](MjSpec& self, raw::MjsBody* body, std::optional<MjVfs*> vfs) {
+        self.AdoptInertial(body, vfs.has_value() ? (*vfs)->get() : nullptr);
+      },
+      py::arg("body"), py::arg("vfs") = py::none(),
+      R"mydelimiter(
+    Makes the inertial which compilation infers for a body part of the spec.
+
+    The mass, inertia and inertial frame calculated from the geoms of the body
+    become its explicit inertial, and no longer follow changes to the geoms.
+    Assets are read as in compile().
+
+    Parameters
+    ----------
+    body : MjsBody
+        A body of this spec.
+    vfs : MjVfs, optional
+        A VFS to read assets from. Cannot be used with assets.
+    )mydelimiter");
+  mjSpec.def(
+      "copy_back",
+      [](MjSpec& self, py::object model) {
+        auto& wrapper = py::cast<_impl::MjModelWrapper&>(model);
+        if (!mj_copyBack(self.ptr, wrapper.get())) {
+          throw py::value_error(mjs_getError(self.ptr));
+        }
+      },
+      py::arg("model"),
+      R"mydelimiter(
+    Writes to the spec what was changed in a model compiled from it.
+
+    Each value of the model which is not the one that the spec was compiled to
+    is written to the spec as what compiles to it, so that it is in the models
+    which are compiled from the spec afterwards and in the XML which is saved.
+    Raises ValueError, and writes nothing, if a change cannot be expressed in
+    the spec.
+
+    Parameters
+    ----------
+    model : MjModel
+        The model which was last compiled from this spec.
+    )mydelimiter");
+  mjSpec.def_property(
+      "assets", [](MjSpec& self) -> py::dict { return self.assets; },
       [](MjSpec& self, py::dict& assets) {
         for (auto item : assets) {
           self.assets[item.first] = item.second;
         };
-  }, py::return_value_policy::reference_internal);
+      },
+      py::return_value_policy::reference_internal);
   mjSpec.def_property(
       "override_assets",
-      [](MjSpec& self) -> bool {
-        return self.override_assets;
-      },
+      [](MjSpec& self) -> bool { return self.override_assets; },
       [](MjSpec& self, bool override_assets) {
         self.override_assets = override_assets;
       });
@@ -543,13 +637,11 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
   });
   mjSpec.def(
       "encode",
-      [](MjSpec& self, std::string filename,
-         std::optional<py::object> model,
+      [](MjSpec& self, std::string filename, std::optional<py::object> model,
          std::optional<std::string> content_type) -> mjtSize {
         raw::MjModel* m = nullptr;
         if (model.has_value() && !model->is_none()) {
-          auto& wrapper =
-              py::cast<_impl::MjModelWrapper&>(*model);
+          auto& wrapper = py::cast<_impl::MjModelWrapper&>(*model);
           m = wrapper.get();
         }
 
@@ -559,12 +651,10 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
           mj_defaultVFS(&vfs);
           vfs_ptr = &vfs;
           for (const auto& asset : self.assets) {
-            std::string buffer_name =
-                py::cast<std::string>(asset.first);
-            std::string buffer =
-                py::cast<std::string>(asset.second);
-            mj_addBufferVFS(vfs_ptr, buffer_name.c_str(),
-                            buffer.c_str(), buffer.size());
+            std::string buffer_name = py::cast<std::string>(asset.first);
+            std::string buffer = py::cast<std::string>(asset.second);
+            mj_addBufferVFS(vfs_ptr, buffer_name.c_str(), buffer.c_str(),
+                            buffer.size());
           }
         }
 
@@ -572,8 +662,8 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
         err[0] = '\0';
         const char* ct =
             content_type.has_value() ? content_type->c_str() : nullptr;
-        mjtSize nbytes = mj_encode(self.ptr, m, filename.c_str(), ct,
-                                   vfs_ptr, err.data(), err.size());
+        mjtSize nbytes = mj_encode(self.ptr, m, filename.c_str(), ct, vfs_ptr,
+                                   err.data(), err.size());
 
         if (vfs_ptr) {
           mj_deleteVFS(vfs_ptr);
@@ -730,12 +820,11 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       py::arg("frame") = py::none(),
       py::return_value_policy::reference_internal);
   mjSpec.def(
-    "activate_plugin",
+      "activate_plugin",
       [](MjSpec& self, std::string& name) {
         mjs_activatePlugin(self.ptr, name.c_str());
       },
-      py::arg("name"),
-      py::return_value_policy::reference_internal);
+      py::arg("name"), py::return_value_policy::reference_internal);
   mjSpec.def_static(
       "resolve_orientation",
       [](bool degree, const MjTypeVec<char>& sequence,
@@ -777,7 +866,8 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
           std::string key = py::str(item.first);
           if (key == "align") {
             try {
-              out->align = static_cast<mjtAlignFree>(kwargs["align"].cast<int>());
+              out->align =
+                  static_cast<mjtAlignFree>(kwargs["align"].cast<int>());
             } catch (const py::cast_error& e) {
               throw pybind11::value_error("align is the wrong type.");
             }
@@ -851,30 +941,32 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       py::return_value_policy::reference_internal);
   mjsBody.def(
       "make_flex",
-      [](raw::MjsBody& self,
-         const std::string& name,
-         std::optional<std::string> type,
-         int dim,
-         std::optional<std::string> dof,
-         std::optional<std::vector<int>> count,
+      [](raw::MjsBody& self, const std::string& name,
+         std::optional<std::string> type, int dim,
+         std::optional<std::string> dof, std::optional<std::vector<int>> count,
          std::optional<std::vector<int>> cellcount,
          std::optional<std::vector<double>> spacing,
-         std::optional<std::vector<double>> scale,
-         double radius,
-         double mass,
-         double inertiabox,
-         int equality,
-         int rigid,
-         int flatskin,
-         int elastic2d,
-         std::optional<std::vector<double>> pos,
+         std::optional<std::vector<double>> scale, double radius, double mass,
+         double inertiabox, int equality, int rigid, int flatskin,
+         int elastic2d, std::optional<std::vector<double>> pos,
          std::optional<std::vector<double>> quat,
          std::optional<std::vector<double>> origin,
-         std::optional<std::string> file,
+         std::optional<std::string> file, std::optional<std::string> mesh,
          MjVfs* vfs) -> raw::MjsFlex* {
         const char* type_str = type.has_value() ? type->c_str() : nullptr;
         const char* dof_str = dof.has_value() ? dof->c_str() : nullptr;
         const char* file_str = file.has_value() ? file->c_str() : nullptr;
+        if (mesh.has_value()) {
+          if (file.has_value()) {
+            throw pybind11::value_error(
+                "both 'file' and 'mesh' specified");
+          }
+          if (!mjs_findElement(mjs_getSpec(self.element), mjOBJ_MESH,
+                               mesh->c_str())) {
+            throw pybind11::value_error("mesh '" + *mesh + "' not found");
+          }
+          file_str = mesh->c_str();
+        }
         const mjVFS* vfs_ptr = vfs ? vfs->get() : nullptr;
 
         int count_arr[3] = {10, 10, 10};
@@ -941,38 +1033,27 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
         }
         const double* origin_ptr = origin.has_value() ? origin_arr : nullptr;
 
-        auto out = mjs_makeFlex(
-            &self, name.c_str(), type_str, dim, dof_str,
-            count_ptr, cellcount_ptr, spacing_ptr, scale_ptr,
-            radius, mass, inertiabox, equality, rigid, flatskin, elastic2d,
-            pos_ptr, quat_ptr, origin_ptr, file_str, vfs_ptr);
+        auto out =
+            mjs_makeFlex(&self, name.c_str(), type_str, dim, dof_str, count_ptr,
+                         cellcount_ptr, spacing_ptr, scale_ptr, radius, mass,
+                         inertiabox, equality, rigid, flatskin, elastic2d,
+                         pos_ptr, quat_ptr, origin_ptr, file_str, vfs_ptr);
         if (!out) {
           raw::MjSpec* spec = mjs_getSpec(self.element);
           throw pybind11::value_error(mjs_getError(spec));
         }
         return out;
       },
-      py::arg("name"),
-      py::arg("type") = py::none(),
-      py::arg("dim") = 3,
-      py::arg("dof") = py::none(),
-      py::arg("count") = py::none(),
-      py::arg("cellcount") = py::none(),
-      py::arg("spacing") = py::none(),
-      py::arg("scale") = py::none(),
-      py::arg("radius") = 0.0,
-      py::arg("mass") = 1.0,
-      py::arg("inertiabox") = 0.005,
-      py::arg("equality") = 0,
-      py::arg("rigid") = 0,
-      py::arg("flatskin") = 0,
-      py::arg("elastic2d") = 0,
-      py::arg("pos") = py::none(),
-      py::arg("quat") = py::none(),
-      py::arg("origin") = py::none(),
-      py::arg("file") = py::none(),
-      py::arg("vfs") = py::none(),
-      py::return_value_policy::reference_internal);
+      py::arg("name"), py::arg("type") = py::none(), py::arg("dim") = 3,
+      py::arg("dof") = py::none(), py::arg("count") = py::none(),
+      py::arg("cellcount") = py::none(), py::arg("spacing") = py::none(),
+      py::arg("scale") = py::none(), py::arg("radius") = 0.0,
+      py::arg("mass") = 1.0, py::arg("inertiabox") = 0.005,
+      py::arg("equality") = 0, py::arg("rigid") = 0, py::arg("flatskin") = 0,
+      py::arg("elastic2d") = 0, py::arg("pos") = py::none(),
+      py::arg("quat") = py::none(), py::arg("origin") = py::none(),
+      py::arg("file") = py::none(), py::arg("mesh") = py::none(),
+      py::arg("vfs") = py::none(), py::return_value_policy::reference_internal);
   mjsBody.def(
       "find_child",
       [](raw::MjsBody& self, std::string& name) -> raw::MjsBody* {
@@ -1128,7 +1209,7 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       py::arg("suffix") = py::none(),
       py::return_value_policy::reference_internal);
   mjsBody.def(
-    "to_frame",
+      "to_frame",
       [](raw::MjsBody* self) -> raw::MjsFrame* {
         raw::MjsFrame* frame = mjs_bodyToFrame(&self);
         if (!frame) {
@@ -1139,12 +1220,11 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       },
       py::return_value_policy::reference_internal);
   mjsBody.def_property_readonly(
-    "frame",
+      "frame",
       [](raw::MjsBody* self) -> raw::MjsFrame* {
         return mjs_getFrame(self->element);
       },
       py::return_value_policy::reference_internal);
-
 
   // ============================= MJSFRAME ====================================
   mjSpec.def("delete", [](MjSpec& self, raw::MjsFrame& obj) {
@@ -1172,8 +1252,7 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
         const char* s = suffix.has_value() ? suffix.value().c_str() : "";
         auto new_body = mjs_attach(self.element, body.element, p, s);
         if (!new_body) {
-          throw pybind11::value_error(
-              mjs_getError(mjs_getSpec(self.element)));
+          throw pybind11::value_error(mjs_getError(mjs_getSpec(self.element)));
         }
         return mjs_asBody(new_body);
       },
@@ -1288,8 +1367,7 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
         const char* s = suffix.has_value() ? suffix.value().c_str() : "";
         auto new_body = mjs_attach(self.element, body.element, p, s);
         if (!new_body) {
-          throw pybind11::value_error(
-              mjs_getError(mjs_getSpec(self.element)));
+          throw pybind11::value_error(mjs_getError(mjs_getSpec(self.element)));
         }
         return mjs_asBody(new_body);
       },
@@ -1469,6 +1547,106 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
         }
       },
       py::arg("resolution") = std::array<int, 2>{0, 0});
+  mjsMesh.def(
+      "make_grid",
+      [](raw::MjsMesh* self, std::vector<int> count,
+         std::vector<double> spacing, int dim) {
+        if (count.size() != 3 || spacing.size() != 3) {
+          throw pybind11::value_error("count and spacing must have 3 elements");
+        }
+        double params[7] = {
+            static_cast<double>(count[0]), static_cast<double>(count[1]),
+            static_cast<double>(count[2]), spacing[0], spacing[1], spacing[2],
+            static_cast<double>(dim)};
+        if (mjs_makeMesh(self, mjMESH_BUILTIN_GRID, params, 7)) {
+          throw pybind11::value_error(mjs_getError(mjs_getSpec(self->element)));
+        }
+      },
+      py::arg("count"), py::arg("spacing"), py::arg("dim") = 3);
+  mjsMesh.def(
+      "make_box",
+      [](raw::MjsMesh* self, std::vector<int> count,
+         std::vector<double> spacing, int dim) {
+        if (count.size() != 3 || spacing.size() != 3) {
+          throw pybind11::value_error("count and spacing must have 3 elements");
+        }
+        double params[7] = {
+            static_cast<double>(count[0]), static_cast<double>(count[1]),
+            static_cast<double>(count[2]), spacing[0], spacing[1], spacing[2],
+            static_cast<double>(dim)};
+        if (mjs_makeMesh(self, mjMESH_BUILTIN_BOX, params, 7)) {
+          throw pybind11::value_error(mjs_getError(mjs_getSpec(self->element)));
+        }
+      },
+      py::arg("count"), py::arg("spacing"), py::arg("dim") = 3);
+  mjsMesh.def(
+      "make_cylinder",
+      [](raw::MjsMesh* self, std::vector<int> count,
+         std::vector<double> spacing, int dim) {
+        if (count.size() != 3 || spacing.size() != 3) {
+          throw pybind11::value_error("count and spacing must have 3 elements");
+        }
+        double params[7] = {
+            static_cast<double>(count[0]), static_cast<double>(count[1]),
+            static_cast<double>(count[2]), spacing[0], spacing[1], spacing[2],
+            static_cast<double>(dim)};
+        if (mjs_makeMesh(self, mjMESH_BUILTIN_CYLINDER, params, 7)) {
+          throw pybind11::value_error(mjs_getError(mjs_getSpec(self->element)));
+        }
+      },
+      py::arg("count"), py::arg("spacing"), py::arg("dim") = 3);
+  mjsMesh.def(
+      "make_ellipsoid",
+      [](raw::MjsMesh* self, std::vector<int> count,
+         std::vector<double> spacing, int dim) {
+        if (count.size() != 3 || spacing.size() != 3) {
+          throw pybind11::value_error("count and spacing must have 3 elements");
+        }
+        double params[7] = {
+            static_cast<double>(count[0]), static_cast<double>(count[1]),
+            static_cast<double>(count[2]), spacing[0], spacing[1], spacing[2],
+            static_cast<double>(dim)};
+        if (mjs_makeMesh(self, mjMESH_BUILTIN_ELLIPSOID, params, 7)) {
+          throw pybind11::value_error(mjs_getError(mjs_getSpec(self->element)));
+        }
+      },
+      py::arg("count"), py::arg("spacing"), py::arg("dim") = 3);
+  mjsMesh.def(
+      "make_square",
+      [](raw::MjsMesh* self, std::vector<int> count,
+         std::vector<double> spacing) {
+        if (count.size() < 2 || spacing.size() < 2) {
+          throw pybind11::value_error(
+              "count and spacing must have at least 2 elements");
+        }
+        int c2 = (count.size() >= 3) ? count[2] : 1;
+        double s2 = (spacing.size() >= 3) ? spacing[2] : 0.0;
+        double params[6] = {
+            static_cast<double>(count[0]), static_cast<double>(count[1]),
+            static_cast<double>(c2), spacing[0], spacing[1], s2};
+        if (mjs_makeMesh(self, mjMESH_BUILTIN_SQUARE, params, 6)) {
+          throw pybind11::value_error(mjs_getError(mjs_getSpec(self->element)));
+        }
+      },
+      py::arg("count"), py::arg("spacing"));
+  mjsMesh.def(
+      "make_disc",
+      [](raw::MjsMesh* self, std::vector<int> count,
+         std::vector<double> spacing) {
+        if (count.size() < 2 || spacing.size() < 2) {
+          throw pybind11::value_error(
+              "count and spacing must have at least 2 elements");
+        }
+        int c2 = (count.size() >= 3) ? count[2] : 1;
+        double s2 = (spacing.size() >= 3) ? spacing[2] : 0.0;
+        double params[6] = {
+            static_cast<double>(count[0]), static_cast<double>(count[1]),
+            static_cast<double>(c2), spacing[0], spacing[1], s2};
+        if (mjs_makeMesh(self, mjMESH_BUILTIN_DISC, params, 6)) {
+          throw pybind11::value_error(mjs_getError(mjs_getSpec(self->element)));
+        }
+      },
+      py::arg("count"), py::arg("spacing"));
 
   // ============================= MJSPAIR =====================================
   mjSpec.def("delete", [](MjSpec& self, raw::MjsPair& obj) {
@@ -1635,11 +1813,11 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
   mjsActuator.def(
       "set_to_dcmotor",
       [](raw::MjsActuator* self, std::array<double, 2> motorconst,
-         double resistance,
-         std::array<double, 3> nominal, std::array<double, 3> saturation,
-         std::array<double, 2> inductance, std::array<double, 3> cogging,
-         std::array<double, 6> controller, std::array<double, 6> thermal,
-         std::array<double, 5> lugre, int ctrlspec) {
+         double resistance, std::array<double, 3> nominal,
+         std::array<double, 3> saturation, std::array<double, 2> inductance,
+         std::array<double, 3> cogging, std::array<double, 6> controller,
+         std::array<double, 6> thermal, std::array<double, 5> lugre,
+         int ctrlspec) {
         std::string err = mjs_setToDCMotor(
             self, motorconst.data(), resistance, nominal.data(),
             saturation.data(), inductance.data(), cogging.data(),
@@ -1665,18 +1843,18 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
   };
 
   py::class_<MjsTendonPath>(m, "MjsTendonPath")
-      .def("__getitem__",
-           [](MjsTendonPath& self, int i) -> const raw::MjsWrap* {
-             int num_wrap = mjs_getWrapNum(self.tendon);
-             if (i < 0 || i >= num_wrap) {
-               throw py::index_error("Index out of range.");
-             }
-             return mjs_getWrap(self.tendon, i);
-           },
-           py::return_value_policy::reference_internal)
-      .def("__len__", [](MjsTendonPath& self) {
-        return mjs_getWrapNum(self.tendon);
-      });
+      .def(
+          "__getitem__",
+          [](MjsTendonPath& self, int i) -> const raw::MjsWrap* {
+            int num_wrap = mjs_getWrapNum(self.tendon);
+            if (i < 0 || i >= num_wrap) {
+              throw py::index_error("Index out of range.");
+            }
+            return mjs_getWrap(self.tendon, i);
+          },
+          py::return_value_policy::reference_internal)
+      .def("__len__",
+           [](MjsTendonPath& self) { return mjs_getWrapNum(self.tendon); });
 
   // ============================= MJSWRAP =====================================
   mjsWrap.def_property_readonly(
@@ -1728,7 +1906,6 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       },
       py::return_value_policy::reference_internal);
 
-
   mjSpec.def("delete", [](MjSpec& self, raw::MjsTendon& obj) {
     mjs_delete(self.ptr, obj.element);
   });
@@ -1741,10 +1918,7 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       },
       py::return_value_policy::reference_internal);
   mjsTendon.def_property_readonly(
-      "path",
-      [](raw::MjsTendon& self) {
-        return MjsTendonPath{&self};
-      },
+      "path", [](raw::MjsTendon& self) { return MjsTendonPath{&self}; },
       py::return_value_policy::reference_internal);
   mjsTendon.def(
       "wrap_site",
@@ -1806,6 +1980,15 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
       throw pybind11::value_error(mjs_getError(self.ptr));
     }
   });
+  mjsTexture.def_property(
+      "classname",
+      [](raw::MjsTexture& self) -> raw::MjsDefault* {
+        return mjs_getDefault(self.element);
+      },
+      [](raw::MjsTexture& self, raw::MjsDefault& default_) -> void {
+        mjs_setDefault(self.element, &default_);
+      },
+      py::return_value_policy::reference_internal);
 
   // ============================= MJSKEY ======================================
   mjSpec.def("delete", [](MjSpec& self, raw::MjsKey& obj) {
@@ -1844,8 +2027,7 @@ PYBIND11_MODULE(_specs, m, pybind11::mod_gil_not_used()) {
 
   // ============================= MJSPLUGIN ===================================
   mjsPlugin.def_property(
-      "id",
-      [](raw::MjsPlugin& self) -> int { return mjs_getId(self.element); },
+      "id", [](raw::MjsPlugin& self) -> int { return mjs_getId(self.element); },
       [](raw::MjsPlugin& self, raw::MjsPlugin* other) {
         self.element = other->element;
       });

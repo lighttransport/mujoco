@@ -23,12 +23,16 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <implot.h>
 #include <mujoco/experimental/studio/ux/fonts.h>
 #include <NetImgui_Api.h>
@@ -55,11 +59,13 @@ namespace py = pybind11;
 // Based on SampleNoBackend::Client_Startup() from
 // netimgui/Code/Sample/SampleNoBackend/SampleNoBackend.cpp
 static bool Client_Startup(ImGuiContext*& context,
+                           ImPlotContext*& implot_context,
                            const std::string& assets_dir) {
   IMGUI_CHECKVERSION();
   context = ImGui::CreateContext();
   ImGui::SetCurrentContext(context);
-  ImPlot::CreateContext();
+  implot_context = ImPlot::CreateContext();
+  ImPlot::SetCurrentContext(implot_context);
 
   ImGuiIO& io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -101,9 +107,13 @@ static bool Client_Startup(ImGuiContext*& context,
 // Release resources.
 // Based on SampleNoBackend::Client_Shutdown() from
 // netimgui/Code/Sample/SampleNoBackend/SampleNoBackend.cpp
-static void Client_Shutdown(ImGuiContext*& context) {
+static void Client_Shutdown(ImGuiContext*& context,
+                            ImPlotContext*& implot_context) {
   NetImgui::Shutdown();
-  ImPlot::DestroyContext();
+  if (implot_context) {
+    ImPlot::DestroyContext(implot_context);
+    implot_context = nullptr;
+  }
   if (context) {
     ImGui::DestroyContext(context);
     context = nullptr;
@@ -140,9 +150,34 @@ class HeadlessUi {
  public:
   HeadlessUi(const std::string& title, int port, const std::string& assets_dir)
       : title_(title), port_(port) {
-    if (!Client_Startup(context_, assets_dir)) {
+    if (!Client_Startup(context_, implot_context_, assets_dir)) {
       return;
     }
+
+    // Python imgui.Image() calls pass bare integer ImTextureIDs
+    // (leaving ImDrawCmd::TexRef._TexData == nullptr). After ImGui::EndFrame()
+    // finalizes draw lists, resolve each draw command's TexRef to its
+    // registered ImTextureData so NetImgui::EndFrame() can track and transmit
+    // texture updates to the remote client.
+    ImGuiContextHook hook;
+    hook.Type = ImGuiContextHookType_EndFramePost;
+    hook.UserData = this;
+    hook.Callback = [](ImGuiContext* ctx, ImGuiContextHook* h) {
+      auto* self = static_cast<HeadlessUi*>(h->UserData);
+      for (ImGuiWindow* window : ctx->Windows) {
+        if (!window->DrawList) continue;
+        for (ImDrawCmd& cmd : window->DrawList->CmdBuffer) {
+          if (cmd.TexRef._TexData == nullptr) {
+            auto it =
+                self->textures_.find(static_cast<uintptr_t>(cmd.TexRef._TexID));
+            if (it != self->textures_.end() && it->second) {
+              cmd.TexRef = it->second->GetTexRef();
+            }
+          }
+        }
+      }
+    };
+    ImGui::AddContextHook(context_, &hook);
 
     VLOG(1, "Calling ConnectToApp('%s', '127.0.0.1', %d)", title_.c_str(),
          port_);
@@ -154,7 +189,18 @@ class HeadlessUi {
          NetImgui::IsConnectionPending() ? "true" : "false");
   }
 
-  ~HeadlessUi() { Client_Shutdown(context_); }
+  ~HeadlessUi() {
+    if (context_) {
+      ImGui::SetCurrentContext(context_);
+      for (auto& [id, tex] : textures_) {
+        if (tex) {
+          ImGui::UnregisterUserTexture(tex.get());
+        }
+      }
+    }
+    textures_.clear();
+    Client_Shutdown(context_, implot_context_);
+  }
 
   bool NewFrame() {
     py::gil_scoped_release no_gil;
@@ -196,12 +242,21 @@ class HeadlessUi {
       // at 1000+ FPS, starving the simulation thread of CPU cycles and GIL
       // access. Note: this sleep occurs while GIL is released, allowing the
       // simulation thread full uninterrupted execution.
+      //
+      // Schedule each frame from the previous frame's deadline rather than from
+      // the time the sleep returned, so sleep overshoot does not accumulate and
+      // slow the frame rate below 60 FPS. If more than a frame behind (e.g.
+      // after a reconnect), resync to avoid bursting to catch up.
+      constexpr auto kFramePeriod =
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+              kTargetFrameDuration);
       const auto frame_now = std::chrono::steady_clock::now();
-      const auto elapsed = frame_now - last_frame_time_;
-      if (elapsed < kTargetFrameDuration) {
-        std::this_thread::sleep_for(kTargetFrameDuration - elapsed);
+      auto deadline = last_frame_time_ + kFramePeriod;
+      if (deadline + kFramePeriod < frame_now) {
+        deadline = frame_now;
       }
-      last_frame_time_ = std::chrono::steady_clock::now();
+      std::this_thread::sleep_until(deadline);
+      last_frame_time_ = deadline;
 
       bool new_frame_result = NetImgui::NewFrame(false);
       is_drawing_remote_ = new_frame_result;
@@ -268,10 +323,30 @@ class HeadlessUi {
 
     py::gil_scoped_release no_gil;
     ImGui::SetCurrentContext(context_);
-    NetImgui::SendDataTexture(
-        static_cast<ImTextureID>(tex_id), const_cast<void*>(upload_data),
-        static_cast<uint16_t>(width), static_cast<uint16_t>(height),
-        NetImgui::eTexFormat::kTexFmtRGBA8);
+
+    std::unique_ptr<ImTextureData>& tex = textures_[tex_id];
+    const size_t rgba_bytes = static_cast<size_t>(width) * height * 4;
+    if (tex && tex->Width == width && tex->Height == height) {
+      std::memcpy(tex->GetPixels(), upload_data, rgba_bytes);
+      tex->UpdateRect = {0, 0, static_cast<uint16_t>(width),
+                         static_cast<uint16_t>(height)};
+      if (tex->Status != ImTextureStatus_WantCreate) {
+        tex->SetStatus(ImTextureStatus_WantUpdates);
+      }
+      return tex_id;
+    }
+
+    if (tex) {
+      ImGui::UnregisterUserTexture(tex.get());
+      textures_.erase(tex_id);
+      tex_id = next_tex_id_++;
+    }
+    auto new_tex = std::make_unique<ImTextureData>();
+    new_tex->Create(ImTextureFormat_RGBA32, width, height);
+    new_tex->SetStatus(ImTextureStatus_WantCreate);
+    std::memcpy(new_tex->GetPixels(), upload_data, rgba_bytes);
+    ImGui::RegisterUserTexture(new_tex.get());
+    textures_[tex_id] = std::move(new_tex);
     return tex_id;
   }
 
@@ -282,14 +357,16 @@ class HeadlessUi {
   // of the ImPlot globals, so the context pointer has to be shared explicitly
   // (same pattern as get_context/set_imgui_context).
   intptr_t GetImPlotContext() const {
-    return reinterpret_cast<intptr_t>(ImPlot::GetCurrentContext());
+    return reinterpret_cast<intptr_t>(implot_context_);
   }
 
  private:
   std::string title_;
   int port_;
   ImGuiContext* context_ = nullptr;
+  ImPlotContext* implot_context_ = nullptr;
   bool is_drawing_remote_ = false;
+  std::unordered_map<uintptr_t, std::unique_ptr<ImTextureData>> textures_;
   std::chrono::steady_clock::time_point last_frame_time_ =
       std::chrono::steady_clock::now();
   static constexpr auto kTargetFrameDuration =

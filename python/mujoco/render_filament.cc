@@ -13,12 +13,14 @@
 // limitations under the License.
 
 //  Python bindings for the MuJoCo filament renderer (mjrf) API.
+#include "render_filament.h"
 
 #include <Python.h>
 
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -30,7 +32,7 @@
 #include <mujoco/mujoco.h>
 #include "render/filament/support/model_decorations.h"
 #include "render/filament/support/model_lights.h"
-#include "render/filament/support/model_objects.h"
+#include "render/filament/support/model_resources.h"
 #include "render/filament/support/model_renderables.h"
 #include "structs.h"
 #include <pybind11/eigen.h>
@@ -63,44 +65,13 @@
 // Then, we bind the functions themselves. In almost all cases, each mjrf
 // function takes a pointer to an object as its first argument. In this case,
 // we actually bind the function as a method of the object itself.  So, e.g.
-// `mjrf_setLightEnabled(mjrfLight*, bool)` becomes `Light.set_enabled(bool)`.
+// `mjrf_setLightActive(mjrfLight*, bool)` becomes `Light.set_active(bool)`.
 //
 // Finally, to bridge the gap between Python tuple/list/numpy array types and
 // the native C types (e.g. float*), we use pybind's Eigen bindings.
 
 namespace mujoco::python {
 namespace {
-
-// Creates a new object of type T using one of the mjrf_create functions.
-template <typename T, typename... Args>
-T* Create(Args&&... args) {
-  if constexpr (std::is_same_v<T, mjrfContext>) {
-    return mjrf_createContext(std::forward<Args>(args)...);
-  } else if constexpr (std::is_same_v<T, mjrfTexture>) {
-    return mjrf_createTexture(std::forward<Args>(args)...);
-  } else if constexpr (std::is_same_v<T, mjrfMesh>) {
-    return mjrf_createMesh(std::forward<Args>(args)...);
-  } else if constexpr (std::is_same_v<T, mjrfScene>) {
-    return mjrf_createScene(std::forward<Args>(args)...);
-  } else if constexpr (std::is_same_v<T, mjrfLight>) {
-    return mjrf_createLight(std::forward<Args>(args)...);
-  } else if constexpr (std::is_same_v<T, mjrfRenderable>) {
-    return mjrf_createRenderable(std::forward<Args>(args)...);
-  } else if constexpr (std::is_same_v<T, mjrfRenderTarget>) {
-    return mjrf_createRenderTarget(std::forward<Args>(args)...);
-  } else {
-    static_assert(!sizeof(T), "Unsupported type for Create");
-  }
-}
-
-// Corresponding Destroy function matching the above Create.
-void Destroy(mjrfContext* obj)         { mjrf_destroyContext(obj); }
-void Destroy(mjrfTexture* obj)         { mjrf_destroyTexture(obj); }
-void Destroy(mjrfMesh* obj)            { mjrf_destroyMesh(obj); }
-void Destroy(mjrfScene* obj)           { mjrf_destroyScene(obj); }
-void Destroy(mjrfLight* obj)           { mjrf_destroyLight(obj); }
-void Destroy(mjrfRenderable* obj)      { mjrf_destroyRenderable(obj); }
-void Destroy(mjrfRenderTarget* obj)    { mjrf_destroyRenderTarget(obj); }
 
 // Initializers for structs.
 void Init(mjrfContextConfig& obj)      { mjrf_defaultContextConfig(&obj); }
@@ -109,7 +80,7 @@ void Init(mjrfLightParams& obj)        { mjrf_defaultLightParams(&obj); }
 void Init(mjrfMaterial& obj)           { mjrf_defaultMaterial(&obj); }
 void Init(mjrfMeshConfig& obj)         { mjrf_defaultMeshConfig(&obj); }
 void Init(mjrfMeshData& obj)           { mjrf_defaultMeshData(&obj); }
-void Init(mjrfReadPixelsRequest& obj)  { mjrf_defaultReadPixelsRequest(&obj); }
+void Init(mjrfReadRequest& obj)        { mjrf_defaultReadRequest(&obj); }
 void Init(mjrfRenderableParams& obj)   { mjrf_defaultRenderableParams(&obj); }
 void Init(mjrfRenderRequest& obj)      { mjrf_defaultRenderRequest(&obj); }
 void Init(mjrfRenderTargetConfig& obj) { mjrf_defaultRenderTargetConfig(&obj); }
@@ -120,37 +91,7 @@ void Init(mjrRect& obj)                { std::memset(&obj, 0, sizeof(obj)); }
 void Init(mjrCamera& obj)              { std::memset(&obj, 0, sizeof(obj)); }
 void Init(mjrVertexAttribute& obj)     { std::memset(&obj, 0, sizeof(obj)); }
 
-// Either owns the lifetime of the wrapped object (using a PyCapsule) or acts as
-// a simple wrapper around an existing instance of the object. The former is
-// used when creating objects in python code.  The latter is used when returning
-// objects from the C API.
-#define DEFINE_WRAPPED_OBJECT(PY_TYPE_, TYPE_)                                \
-  class PY_TYPE_ : public _impl::WrapperBase<TYPE_> {                         \
-    static void DestroyCapsule(PyObject* pyobj) {                             \
-      void* ptr = (PyCapsule_GetPointer(pyobj, nullptr));                     \
-      if (ptr) {                                                              \
-        Destroy(static_cast<TYPE_*>(ptr));                                    \
-      }                                                                       \
-    }                                                                         \
-                                                                              \
-   public:                                                                    \
-    template <typename... Args>                                               \
-    PY_TYPE_(Args&&... args)                                                  \
-        : _impl::WrapperBase<TYPE_>(                                          \
-              Create<TYPE_>(std::forward<Args>(args)...), &DestroyCapsule) {} \
-    PY_TYPE_(TYPE_* ptr) : _impl::WrapperBase<TYPE_>(ptr, nullptr) {}         \
-    PY_TYPE_(const TYPE_* ptr)                                                \
-        : _impl::WrapperBase<TYPE_>(const_cast<TYPE_*>(ptr), nullptr) {}      \
-  }
 
-DEFINE_WRAPPED_OBJECT(PyContext, mjrfContext);
-DEFINE_WRAPPED_OBJECT(PyTexture, mjrfTexture);
-DEFINE_WRAPPED_OBJECT(PyMesh, mjrfMesh);
-DEFINE_WRAPPED_OBJECT(PyScene, mjrfScene);
-DEFINE_WRAPPED_OBJECT(PyLight, mjrfLight);
-DEFINE_WRAPPED_OBJECT(PyRenderable, mjrfRenderable);
-DEFINE_WRAPPED_OBJECT(PyRenderTarget, mjrfRenderTarget);
-#undef DEFINE_WRAPPED_OBJECT
 
 template <typename T, std::size_t N>
 struct NumArray {
@@ -178,12 +119,9 @@ template <> struct is_num_array<Float3> : std::true_type {};
 template <> struct is_num_array<Float4> : std::true_type {};
 template <> struct is_num_array<Float9> : std::true_type {};
 
-void Free(mjrfReadPixelsRequest& data) {
-  if (data.output) {
-    delete[] static_cast<char*>(data.output);
-    data.output = nullptr;
-    data.num_bytes = 0;
-  }
+void Free(mjrfReadRequest& data) {
+  data.output = nullptr;
+  data.num_bytes = 0;
 }
 
 void Free(mjrfTextureData& data) {
@@ -322,19 +260,20 @@ PYBIND11_MODULE(_render_filament, m, pybind11::mod_gil_not_used()) {
       },
       py::arg("params"), py::keep_alive<0, 1>());
 
-
   // memory management
-  mjrf_read_pixels_request.def("alloc",
-    [](mjrfReadPixelsRequest& req, int size) {
-      Free(req);
-      req.output = new char[size];
-      req.num_bytes = size;
-    }, py::arg("size"));
-
-  mjrf_read_pixels_request.def("buffer", [](mjrfReadPixelsRequest& req) {
-    return py::bytes(
-        std::string(static_cast<char*>(req.output), req.num_bytes));
-  });
+  // Note: ReadRequest stores a raw pointer to `buffer`; the caller must
+  // keep the underlying Python buffer object alive until rendering finishes.
+  mjrf_read_request.def(
+      "set_buffer",
+      [](mjrfReadRequest& req, py::buffer b) {
+        py::buffer_info info = b.request(true);
+        if (!PyBuffer_IsContiguous(info.view(), 'C')) {
+          throw py::value_error("Buffer must be C-contiguous.");
+        }
+        req.output = info.ptr;
+        req.num_bytes = static_cast<int>(info.size * info.itemsize);
+      },
+      py::arg("buffer"));
 
   mjrf_texture_data.def("set_image",
     [](mjrfTextureData& data, py::bytes bytes) {
@@ -462,11 +401,12 @@ PYBIND11_MODULE(_render_filament, m, pybind11::mod_gil_not_used()) {
 
   mjrf_context.def("render",
     [](PyContext& ctx, const std::vector<mjrfRenderRequest>& req,
-        const std::vector<mjrfReadPixelsRequest>& read) {
+        const std::vector<mjrfReadRequest>& read) {
       return mjrf_render(ctx.get(), req.data(), req.size(), read.data(),
                           read.size());
     },
-    py::arg("req"), py::arg("read"));
+    py::arg("req"), py::arg("read"),
+    py::call_guard<py::gil_scoped_release>());
 
   mjrf_renderable.def("get_material", [](PyRenderable& renderable) {
     mjrfMaterial material;
@@ -474,11 +414,11 @@ PYBIND11_MODULE(_render_filament, m, pybind11::mod_gil_not_used()) {
     return material;
   });
 
-  using ModelObjects = mujoco::ModelObjects;
+  using ModelResources = mujoco::ModelResources;
   {
-    py::class_<ModelObjects> cls(m, "ModelObjects", py::module_local());
+    py::class_<ModelResources> cls(m, "ModelResources", py::module_local());
     cls.def(py::init([](PyContext& ctx, const MjModelWrapper& model) {
-              return std::make_unique<ModelObjects>(model.get(), ctx.get());
+              return std::make_unique<ModelResources>(model.get(), ctx.get());
             }),
             py::arg("ctx"), py::arg("model"), py::keep_alive<1, 2>(),
             py::keep_alive<1, 3>());
@@ -488,30 +428,60 @@ PYBIND11_MODULE(_render_filament, m, pybind11::mod_gil_not_used()) {
     using ModelRenderables = mujoco::ModelRenderables;
 
     py::class_<ModelRenderables> cls(m, "ModelRenderables", py::module_local());
-    auto init = [](PyScene& scene, ModelObjects& model_objects) {
-      return std::make_unique<ModelRenderables>(scene.get(), &model_objects);
+    auto init = [](PyScene& scene, ModelResources& model_resources) {
+      return std::make_unique<ModelRenderables>(scene.get(), &model_resources);
     };
-    cls.def(py::init(init), py::arg("scene"), py::arg("model_objects"),
+    cls.def(py::init(init), py::arg("scene"), py::arg("model_resources"),
             py::keep_alive<1, 2>(), py::keep_alive<1, 3>());
     cls.def("update", [](ModelRenderables& self, const MjDataWrapper& data) {
       self.Update(data.get());
     },
     py::arg("data"));
+    cls.def(
+        "set_options",
+        [](ModelRenderables& self, const MjvOptionWrapper& opt) {
+          self.SetOptions(*opt.get());
+        },
+        py::arg("opt"));
+    cls.def(
+        "get_renderable",
+        [](ModelRenderables& self, mjtObj obj_type, int obj_index,
+           int sub_index) -> std::optional<PyRenderable> {
+          mjrfRenderable* renderable =
+              self.GetRenderable(obj_type, obj_index, sub_index);
+          if (renderable) {
+            return PyRenderable(renderable);
+          } else {
+            return std::nullopt;
+          }
+        },
+        py::arg("obj_type"), py::arg("obj_index"), py::arg("sub_index") = -1);
   }
 
   {
     using ModelLights = mujoco::ModelLights;
 
     py::class_<mujoco::ModelLights> cls(m, "ModelLights", py::module_local());
-    auto init = [](PyScene& scene, ModelObjects& model_objects) {
-      return std::make_unique<ModelLights>(scene.get(), &model_objects);
+    auto init = [](PyScene& scene, ModelResources& model_resources) {
+      return std::make_unique<ModelLights>(scene.get(), &model_resources);
     };
-    cls.def(py::init(init), py::arg("scene"), py::arg("model_objects"),
+    cls.def(py::init(init), py::arg("scene"), py::arg("model_resources"),
             py::keep_alive<1, 2>(), py::keep_alive<1, 3>());
     cls.def("update", [](ModelLights& self, const MjDataWrapper& data) {
       self.Update(data.get());
     },
     py::arg("data"));
+    cls.def(
+        "get_light",
+        [](ModelLights& self, int index) -> std::optional<PyLight> {
+          mjrfLight* light = self.GetLight(index);
+          if (light) {
+            return PyLight(light);
+          } else {
+            return std::nullopt;
+          }
+        },
+        py::arg("index"));
   }
 
   {

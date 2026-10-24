@@ -17,7 +17,6 @@
 #include <stdio.h>
 
 #include <mujoco/mjdata.h>
-#include <mujoco/mjmacro.h>
 #include <mujoco/mjsan.h>  // IWYU pragma: keep
 #include "engine/engine_inline.h"
 #include "engine/engine_util_blas.h"
@@ -101,7 +100,7 @@ void mju_cholSolve(mjtNum* res, const mjtNum* mat, const mjtNum* vec, int n) {
 
 
 // Cholesky rank-one update: L*L' +/- x*x'; return rank
-int mju_cholUpdate(mjtNum* mat, mjtNum* x, int n, int flg_plus) {
+int mju_cholUpdate(mjtNum* restrict mat, mjtNum* restrict x, int n, int flg_plus) {
   int rank = n;
   mjtNum r, c, cinv, s, Lkk, tmp;
 
@@ -122,20 +121,12 @@ int mju_cholUpdate(mjtNum* mat, mjtNum* x, int n, int flg_plus) {
       // update diagonal
       mat[k*(n+1)] = r;
 
-      // update mat
-      if (flg_plus) {
-        for (int i=k+1; i < n; i++) {
-          mat[i*n+k] = (mat[i*n+k] + s*x[i])*cinv;
-        }
-      } else {
-        for (int i=k+1; i < n; i++) {
-          mat[i*n+k] = (mat[i*n+k] - s*x[i])*cinv;
-        }
-      }
-
-      // update x
+      // update mat and x
+      mjtNum s_signed = flg_plus ? s : -s;
       for (int i=k+1; i < n; i++) {
-        x[i] = c*x[i] - s*mat[i*n+k];
+        mjtNum m = (mat[i*n+k] + s_signed*x[i])*cinv;
+        mat[i*n+k] = m;
+        x[i] = c*x[i] - s*m;
       }
     }
   }
@@ -306,6 +297,137 @@ int mju_cholFactorSymbolic(int* restrict L_colind, int* restrict L_rownnz, int* 
   return nnz;
 }
 
+// block p is reached by block column q at slot i of its block columns: rows bs*p .. bs*p+bs-1
+// hold columns bs*q .. bs*q+bs-1 there
+static inline void blockReach(int* L_colind, const int* L_rowadr, int bs, int p, int i, int q) {
+  for (int c = 0; c < bs; c++) {
+    int* col = L_colind + L_rowadr[bs*p + c] + bs*i;
+    for (int b = 0; b < bs; b++) {
+      col[b] = bs*q + b;
+    }
+  }
+}
+
+// row r, of the block reached by block column q at slot i, is the x-th row that column q reaches
+// after its own rows: the transpose rows bs*q .. bs*q+bs-1 list it
+static inline void blockEmit(int* LT_colind, int* LT_map, const int* LT_rowadr,
+                             const int* L_rowadr, int bs, int q, int x, int r, int i) {
+  for (int a = 0; a < bs; a++) {
+    int e = LT_rowadr[bs*q + a] + bs - a + x;
+    LT_colind[e] = r;
+    LT_map[e] = L_rowadr[r] + bs*i + a;
+  }
+}
+
+// symbolic reverse-Cholesky of a matrix of dense bs x bs blocks, from its block pattern
+//   mju_cholFactorSymbolic on the expanded pattern walks the dofs of each block together: the
+//   rows of a block share their block columns, and the dof elimination tree is the block
+//   elimination tree with each block a chain (the parent of dof bs*p+c is bs*p+c-1, that of dof
+//   bs*p is the last dof of the parent block). So the walks run on the blocks, and each visit
+//   expands to its dofs in the order the dof walk visits them: the first dof of a column's
+//   neighbour, then the dofs of each ancestor added, last first, then the neighbour's other dofs
+int mju_cholFactorSymbolicBlocked(int* restrict L_colind, int* restrict L_rownnz,
+                                  int* restrict L_rowadr, int* restrict LT_colind,
+                                  int* restrict LT_rownnz, int* restrict LT_rowadr,
+                                  int* restrict LT_map, const int* rownnz, const int* rowadr,
+                                  const int* colind, int nb, int bs, int* scratch) {
+  int* restrict parent = scratch;          // block elimination tree
+  int* restrict flag = scratch + nb;       // the last block column whose walk reached the block
+  int* restrict count = scratch + 2*nb;    // counting: block columns of the block's rows
+                                           // filling: those still to fill, right to left
+
+  // counting phase: the block walks, then the dof row sizes and addresses
+  if (!L_colind) {
+    for (int p = 0; p < nb; p++) {
+      count[p] = 0;
+    }
+    for (int q = nb - 1; q >= 0; q--) {
+      parent[q] = -1;
+      flag[q] = q;
+      int ncol = 0;
+      for (int j = rowadr[q]; j < rowadr[q] + rownnz[q]; j++) {
+        for (int p = colind[j]; p > q && flag[p] != q; p = parent[p]) {
+          if (parent[p] == -1) {
+            parent[p] = q;
+          }
+          flag[p] = q;
+          count[p]++;
+          ncol++;
+        }
+      }
+      LT_rownnz[bs*q] = ncol;   // block rows its column reaches, expanded below
+    }
+    int nnz = 0, nnzT = 0;
+    for (int p = 0; p < nb; p++) {
+      int ncol = LT_rownnz[bs*p];
+      for (int a = 0; a < bs; a++) {
+        int r = bs*p + a;
+        L_rownnz[r] = bs*count[p] + a + 1;
+        L_rowadr[r] = nnz;
+        nnz += L_rownnz[r];
+        LT_rownnz[r] = bs*ncol + bs - a;
+        LT_rowadr[r] = nnzT;
+        nnzT += LT_rownnz[r];
+      }
+    }
+    return nnz;
+  }
+
+  // filling phase: the diagonal blocks, at the end of the rows of L and the head of the
+  // transpose rows
+  for (int p = 0; p < nb; p++) {
+    count[p] = (L_rownnz[bs*p] - 1) / bs;
+    int off = bs*count[p];
+    for (int c = 0; c < bs; c++) {
+      for (int b = 0; b <= c; b++) {
+        L_colind[L_rowadr[bs*p + c] + off + b] = bs*p + b;
+      }
+    }
+    for (int a = 0; a < bs; a++) {
+      for (int e = a; e < bs; e++) {
+        int x = LT_rowadr[bs*p + a] + e - a;
+        LT_colind[x] = bs*p + e;
+        LT_map[x] = L_rowadr[bs*p + e] + off + a;
+      }
+    }
+  }
+
+  // the walks again, each visit filling its block slot, right to left
+  for (int q = nb - 1; q >= 0; q--) {
+    int x = 0;
+    parent[q] = -1;
+    flag[q] = q;
+    for (int j = rowadr[q]; j < rowadr[q] + rownnz[q]; j++) {
+      int p = colind[j];
+      if (p <= q || flag[p] == q) {
+        continue;
+      }
+      int ip = --count[p];
+      blockReach(L_colind, L_rowadr, bs, p, ip, q);
+      blockEmit(LT_colind, LT_map, LT_rowadr, L_rowadr, bs, q, x++, bs*p, ip);
+      if (parent[p] == -1) {
+        parent[p] = q;
+      }
+      flag[p] = q;
+      for (int u = parent[p]; flag[u] != q; u = parent[u]) {
+        if (parent[u] == -1) {
+          parent[u] = q;
+        }
+        flag[u] = q;
+        int iu = --count[u];
+        blockReach(L_colind, L_rowadr, bs, u, iu, q);
+        for (int c = bs - 1; c >= 0; c--) {
+          blockEmit(LT_colind, LT_map, LT_rowadr, L_rowadr, bs, q, x++, bs*u + c, iu);
+        }
+      }
+      for (int c = 1; c < bs; c++) {
+        blockEmit(LT_colind, LT_map, LT_rowadr, L_rowadr, bs, q, x++, bs*p + c, ip);
+      }
+    }
+  }
+  return 0;
+}
+
 // numeric reverse-Cholesky: compute L values given fixed sparsity pattern, returns rank
 //  L_colind must already contain the correct sparsity pattern (from mju_cholFactorSymbolic)
 //  LT_map[k] gives index in L for LT_colind[k]
@@ -351,20 +473,25 @@ int mju_cholFactorNumeric(mjtNum* restrict L, int n, mjtNum mindiag,
 
     // factor row r diagonal, handle rank-deficient case
     mjtNum diag = dense[r];
-    if (diag < mindiag) {
+    int deficient = diag < mindiag;
+    if (deficient) {
       diag = mindiag;
       rank--;
     }
 
-    // scale off-diagonals
+    // scale off-diagonals; if deficient clear them, decoupling the row as mju_cholFactor does
     mjtNum L_rr = mju_sqrt(diag);
     mjtNum L_rr_inv = 1.0 / L_rr;
     int L_adr = L_rowadr[r];
     int L_nnz = L_rownnz[r];
     const int* colptr = L_colind + L_adr;
     mjtNum* Lptr = L + L_adr;
-    for (int i = 0; i < L_nnz - 1; i++) {
-      Lptr[i] = dense[colptr[i]] * L_rr_inv;
+    if (deficient) {
+      mju_zero(Lptr, L_nnz - 1);
+    } else {
+      for (int i = 0; i < L_nnz - 1; i++) {
+        Lptr[i] = dense[colptr[i]] * L_rr_inv;
+      }
     }
 
     // store diagonal
@@ -486,13 +613,38 @@ int mju_cholUpdateSparse(mjtNum* restrict mat, const mjtNum* restrict x, int n, 
 
 //---------------------------- banded Cholesky -----------------------------------------------------
 
+// integer min and max without double evaluation
+static inline int minInt(int a, int b) {
+  return a < b ? a : b;
+}
+static inline int maxInt(int a, int b) {
+  return a > b ? a : b;
+}
+
+
+// address of diagonal element i in band-dense matrix representation
+int mju_bandDiag(int i, int ntotal, int nband, int ndense) {
+  int nsparse = ntotal - ndense;
+
+  // sparse part
+  if (i < nsparse) {
+    return i*nband + nband - 1;
+  }
+
+  // dense part
+  else {
+    return nsparse*nband + (i-nsparse)*ntotal + i;
+  }
+}
+
+
 // band-dense Cholesky decomposition
 //  returns minimum value in the factorized diagonal, or 0 if rank-deficient
 //  mat has (ntotal-ndense) x nband + ndense x ntotal elements
 //  the first (ntotal-ndense) x nband store the band part, left of diagonal, inclusive
 //  the second ndense x ntotal store the band part as entire dense rows
 //  add diagadd+diagmul*mat_ii to diagonal before factorization
-mjtNum mju_cholFactorBand(mjtNum* mat, int ntotal, int nband, int ndense,
+mjtNum mju_cholFactorBand(mjtNum* restrict mat, int ntotal, int nband, int ndense,
                           mjtNum diagadd, mjtNum diagmul) {
   int nsparse = ntotal - ndense;
   mjtNum mindiag = -1;
@@ -500,17 +652,18 @@ mjtNum mju_cholFactorBand(mjtNum* mat, int ntotal, int nband, int ndense,
   // sparse part, including sparse-sparse and sparse-dense
   for (int j=0; j < nsparse; j++) {
     // number of non-zeros left of (j,j)
-    int width_jj = mjMIN(j, nband-1);
+    int width_jj = minInt(j, nband-1);
 
     // number of non-zeros below (j,j), sparse part
-    int height = mjMIN(nsparse-j-1, nband-1);
+    int height = minInt(nsparse-j-1, nband-1);
 
     // address of (j,j)
-    int adr_jj = (j+1)*nband-1;
+    int adr_jj = (j+1)*nband - 1;
 
     // compute L(j,j), before sqrt
-    mjtNum left_ij = width_jj > 0 ? mju_dot(mat+adr_jj-width_jj, mat+adr_jj-width_jj, width_jj) : 0;
-    mjtNum Ljj = diagadd + diagmul*mat[adr_jj] + mat[adr_jj] - left_ij;
+    mjtNum left_jj = width_jj > 1 ? mju_dot(mat+adr_jj-width_jj, mat+adr_jj-width_jj, width_jj) :
+                     (width_jj == 1 ? mat[adr_jj-1]*mat[adr_jj-1] : 0);
+    mjtNum Ljj = diagadd + diagmul*mat[adr_jj] + mat[adr_jj] - left_jj;
 
     // update mindiag
     if (Ljj < mindiag || mindiag < 0) {
@@ -524,29 +677,27 @@ mjtNum mju_cholFactorBand(mjtNum* mat, int ntotal, int nband, int ndense,
 
     // compute Ljj, scale = 1/Ljj
     Ljj = mju_sqrt(Ljj);
-    mjtNum scale = 1/Ljj;
+    mjtNum scale = 1 / Ljj;
 
-    // compute L(i,j) for i>j, sparse part
-    for (int i=j+1; i <= j+height; i++)   {
+    // compute L(i,j) for i > j, sparse part
+    int adr_ij = adr_jj + nband - 1;
+    for (int i=j+1; i <= j+height; i++, adr_ij += nband-1) {
       // number of non-zeros left of (i,j)
-      int width_ij = mjMIN(j, nband-1-i+j);
-
-      // address of (i,j)
-      int adr_ij = (i+1)*nband-1-i+j;
+      int width_ij = minInt(j, nband-1-i+j);
 
       // in-place computation of L(i,j)
-      left_ij = width_ij > 0 ? mju_dot(mat+adr_jj-width_ij, mat+adr_ij-width_ij, width_ij) : 0;
+      mjtNum left_ij = width_ij > 1 ? mju_dot(mat+adr_jj-width_ij, mat+adr_ij-width_ij, width_ij) :
+                       (width_ij == 1 ? mat[adr_jj-1]*mat[adr_ij-1] : 0);
       mat[adr_ij] = scale * (mat[adr_ij] - left_ij);
     }
 
-    // compute L(i,j) for i>j, dense part
-    for (int i=nsparse; i < ntotal; i++)   {
-      // address of (i,j)
-      int adr_ij = nsparse*nband + (i-nsparse)*ntotal + j;
-
+    // compute L(i,j) for i >= nsparse, dense part
+    adr_ij = nsparse*nband + j;
+    for (int i=nsparse; i < ntotal; i++, adr_ij += ntotal) {
       // in-place computation of L(i,j)
       //  number of non-zeros left of (i,j) now equals width_jj
-      left_ij = width_jj > 0 ? mju_dot(mat+adr_jj-width_jj, mat+adr_ij-width_jj, width_jj) : 0;
+      mjtNum left_ij = width_jj > 1 ? mju_dot(mat+adr_jj-width_jj, mat+adr_ij-width_jj, width_jj) :
+                       (width_jj == 1 ? mat[adr_jj-1]*mat[adr_ij-1] : 0);
       mat[adr_ij] = scale * (mat[adr_ij] - left_ij);
     }
 
@@ -575,13 +726,11 @@ mjtNum mju_cholFactorBand(mjtNum* mat, int ntotal, int nband, int ndense,
 
     // compute Ljj, scale = 1/Ljj
     Ljj = mju_sqrt(Ljj);
-    mjtNum scale = 1/Ljj;
+    mjtNum scale = 1 / Ljj;
 
-    // compute L(i,j) for i>j
-    for (int i=j+1; i < ntotal; i++) {
-      // address of off-diagonal element
-      int adr_ij = adr_jj + ntotal*(i-j);
-
+    // compute L(i,j) for i > j
+    int adr_ij = adr_jj + ntotal;
+    for (int i=j+1; i < ntotal; i++, adr_ij += ntotal) {
       // in-place computation of L(i,j)
       mat[adr_ij] = scale * (mat[adr_ij] - mju_dot(mat+adr_jj-j, mat+adr_ij-j, j));
     }
@@ -595,9 +744,9 @@ mjtNum mju_cholFactorBand(mjtNum* mat, int ntotal, int nband, int ndense,
 
 
 // solve with band-Cholesky decomposition
-void mju_cholSolveBand(mjtNum* res, const mjtNum* mat, const mjtNum* vec,
+void mju_cholSolveBand(mjtNum* res, const mjtNum* restrict mat, const mjtNum* vec,
                        int ntotal, int nband, int ndense) {
-  int width, height, nsparse = ntotal - ndense;
+  int nsparse = ntotal - ndense;
 
   // copy into result if different
   if (res != vec) {
@@ -607,77 +756,67 @@ void mju_cholSolveBand(mjtNum* res, const mjtNum* mat, const mjtNum* vec,
   //------- forward substitution: solve L*res = vec
 
   // sparse part
-  for (int i=0; i < nsparse; i++) {
+  for (int i=0, adr_ii=nband-1; i < nsparse; i++, adr_ii += nband) {
     // number of non-zeros left of (i,i)
-    width = mjMIN(i, nband-1);
+    int width = minInt(i, nband-1);
 
-    if (width) {
-      res[i] -= mju_dot(mat+(i+1)*nband-1-width, res+i-width, width);
+    // off-diagonal
+    if (width > 1) {
+      res[i] -= mju_dot(mat + adr_ii - width, res + i - width, width);
+    } else if (width == 1) {
+      res[i] -= mat[adr_ii - 1] * res[i - 1];
     }
 
     // diagonal
-    res[i] /= mat[(i+1)*nband-1];
+    res[i] /= mat[adr_ii];
   }
 
   // dense part
-  for (int i=nsparse; i < ntotal; i++) {
-    res[i] -= mju_dot(mat+nsparse*nband+(i-nsparse)*ntotal, res, i);
+  for (int i=nsparse, row_i=nsparse*nband; i < ntotal; i++, row_i += ntotal) {
+    // off-diagonal
+    if (i) {
+      res[i] -= mju_dot(mat + row_i, res, i);
+    }
 
     // diagonal
-    res[i] /= mat[nsparse*nband+(i-nsparse)*ntotal+i];
+    res[i] /= mat[row_i + i];
   }
 
   //------- backward substitution: solve L'*res = res
 
   // dense part
-  for (int i=ntotal-1; i >= nsparse; i--) {
-    for (int j=i+1; j < ntotal; j++) {
-      res[i] -= mat[nsparse*nband+(j-nsparse)*ntotal+i] * res[j];
+  for (int i=ntotal-1, row_i=nsparse*nband+(ndense-1)*ntotal; i >= nsparse; i--, row_i -= ntotal) {
+    // diagonal
+    res[i] /= mat[row_i + i];
+
+    // update res[0..i-1] with row i of L
+    if (i && res[i]) {
+      mju_addToScl(res, mat + row_i, -res[i], i);
     }
-
-    // diagonal
-    res[i] /= mat[nsparse*nband+(i-nsparse)*ntotal+i];
   }
 
   // sparse part
-  for (int i=nsparse-1; i >= 0; i--) {
-    // number of non-zeros below (i,i), sparse part
-    height = mjMIN(nsparse-1-i, nband-1);
-
-    // sparse rows
-    for (int j=i+1; j <= i+height; j++)
-      res[i] -= mat[(j+1)*nband-1-(j-i)] * res[j];
-
-    // dense rows
-    for (int j=nsparse; j < ntotal; j++)
-      res[i] -= mat[nsparse*nband+(j-nsparse)*ntotal+i] * res[j];
+  for (int i=nsparse-1, adr_ii=nsparse*nband-1; i >= 0; i--, adr_ii -= nband) {
+    // number of non-zeros left of (i,i)
+    int width = minInt(i, nband-1);
 
     // diagonal
-    res[i] /= mat[(i+1)*nband-1];
-  }
-}
+    res[i] /= mat[adr_ii];
 
-
-// address of diagonal element i in band-dense matrix representation
-int mju_bandDiag(int i, int ntotal, int nband, int ndense) {
-  int nsparse = ntotal-ndense;
-
-  // sparse part
-  if (i < nsparse) {
-    return i*nband + nband-1;
-  }
-
-  // dense part
-  else {
-    return nsparse*nband + (i-nsparse)*ntotal + i;
+    // update res[i-width..i-1] with row i of L
+    if (width > 1 && res[i]) {
+      mju_addToScl(res + i - width, mat + adr_ii - width, -res[i], width);
+    } else if (width == 1) {
+      res[i - 1] -= mat[adr_ii - 1] * res[i];
+    }
   }
 }
 
 
 // convert band matrix to dense matrix
-void mju_band2Dense(mjtNum* res, const mjtNum* mat, int ntotal, int nband, int ndense,
-                    mjtBool flg_sym) {
-  int nsparse = ntotal-ndense;
+void mju_band2Dense(mjtNum* restrict res, const mjtNum* restrict mat,
+                    int ntotal, int nband, int ndense, mjtBool flg_sym) {
+  int nsparse = ntotal - ndense;
 
   // clear all
   mju_zero(res, ntotal*ntotal);
@@ -685,7 +824,7 @@ void mju_band2Dense(mjtNum* res, const mjtNum* mat, int ntotal, int nband, int n
   // sparse part
   for (int i=0; i < nsparse; i++) {
     // number of non-zeros left of (i,i)
-    int width = mjMIN(i, nband-1);
+    int width = minInt(i, nband-1);
 
     // copy data
     mju_copy(res + i*ntotal + i-width, mat + (i+1)*nband - (width+1), width+1);
@@ -708,13 +847,14 @@ void mju_band2Dense(mjtNum* res, const mjtNum* mat, int ntotal, int nband, int n
 
 
 // convert dense matrix to band matrix
-void mju_dense2Band(mjtNum* res, const mjtNum* mat, int ntotal, int nband, int ndense) {
-  int nsparse = ntotal-ndense;
+void mju_dense2Band(mjtNum* restrict res, const mjtNum* restrict mat,
+                    int ntotal, int nband, int ndense) {
+  int nsparse = ntotal - ndense;
 
   // sparse part
   for (int i=0; i < nsparse; i++) {
     // number of non-zeros left of (i,i)
-    int width = mjMIN(i, nband-1);
+    int width = minInt(i, nband-1);
 
     // copy data
     mju_copy(res + (i+1)*nband - (width+1), mat + i*ntotal + i-width, width+1);
@@ -727,34 +867,36 @@ void mju_dense2Band(mjtNum* res, const mjtNum* mat, int ntotal, int nband, int n
 }
 
 
-// multiply band-diagonal matrix with vector
-void mju_bandMulMatVec(mjtNum* res, const mjtNum* mat, const mjtNum* vec,
-                       int ntotal, int nband, int ndense, int nvec, mjtBool flg_sym) {
-  int nsparse = ntotal-ndense;
+// multiply band-diagonal matrix with vector, res must not alias vec
+void mju_bandMulMatVec(mjtNum* restrict res, const mjtNum* restrict mat,
+                       const mjtNum* restrict vec, int ntotal, int nband, int ndense,
+                       int nvec, mjtBool flg_sym) {
+  int nsparse = ntotal - ndense;
 
   // handle multiple vectors
   for (int j=0; j < nvec; j++) {
     // precompute pointer to corresponding vector in vec and res
-    const mjtNum* vec_j = vec + ntotal*j;
-    mjtNum* res_j = res + ntotal*j;
+    const mjtNum* restrict vec_j = vec + ntotal*j;
+    mjtNum* restrict res_j = res + ntotal*j;
 
     // sparse part
-    for (int i=0; i < nsparse; i++) {
-      int width = mjMIN(i+1, nband);
-      int adr = i*nband + nband - width;
-      int offset = mjMAX(0, i-nband+1);
+    int row_end = nband;
+    for (int i=0; i < nsparse; i++, row_end += nband) {
+      int width = minInt(i+1, nband);
+      int adr = row_end - width;
+      int offset = i + 1 - width;
       res_j[i] = mju_dot(mat+adr, vec_j+offset, width);  // lower triangle
-      if (flg_sym) {
+      if (flg_sym && width > 1) {
         // strict upper triangle
         mju_addToScl(res_j+offset, mat+adr, vec_j[i], width-1);
       }
     }
 
     // dense part
-    for (int i=nsparse; i < ntotal; i++) {
-      int adr = nsparse*nband + (i-nsparse)*ntotal;
-      res_j[i] = mju_dot(mat+adr, vec_j, i+1);
-      if (flg_sym) {
+    int adr = nsparse*nband;
+    for (int i=nsparse; i < ntotal; i++, adr += ntotal) {
+      res_j[i] = mju_dot(mat+adr, vec_j, i+1);          // lower triangle
+      if (flg_sym && i > 0) {
         // strict upper triangle
         mju_addToScl(res_j, mat+adr, vec_j[i], i);
       }
@@ -1092,12 +1234,34 @@ void mju_solve3(mjtNum x[3], const mjtNum A[9], const mjtNum b[3]) {
 
 //--------------------------- eigen decomposition --------------------------------------------------
 
-// eigenvalue decomposition of symmetric 3x3 matrix
-static const mjtNum eigEPS = mjMINVAL * 1000;
+// off-diagonal tolerance and eigenvalue swap threshold, relative to max element
+#ifdef mjUSESINGLE
+static const mjtNum eigTOL = 2e-6f;
+static const mjtNum eigEPS = 1e-5f;
+#else
+static const mjtNum eigTOL = 4e-15;
+static const mjtNum eigEPS = 1e-12;
+#endif
+
+// eigenvalue decomposition of symmetric 3x3 matrix, using eigTOL; returns number of iterations
 int mju_eig3(mjtNum eigval[3], mjtNum eigvec[9], mjtNum quat[4], const mjtNum mat[9]) {
+  return mju_eig3Tol(eigval, eigvec, quat, mat, eigTOL);
+}
+
+
+// same as mju_eig3, stop when off-diagonal elements are below reltol times the largest element
+int mju_eig3Tol(mjtNum eigval[3], mjtNum eigvec[9], mjtNum quat[4], const mjtNum mat[9],
+                mjtNum reltol) {
   mjtNum D[9], tmp[9];
-  mjtNum tau, t, c;
+  mjtNum tau, t;
   int iter, rk, ck, rotk;
+
+  // off-diagonal tolerance: no smaller than the roundoff level of D, about 16 epsilons
+  mjtNum scale = 0;
+  for (int i=0; i < 9; i++) {
+    scale = mju_max(scale, mju_abs(mat[i]));
+  }
+  mjtNum tol = scale * mju_max(reltol, eigTOL);
 
   // initialize with unit quaternion
   quat[0] = 1;
@@ -1131,32 +1295,23 @@ int mju_eig3(mjtNum eigval[3], mjtNum eigvec[9], mjtNum quat[4], const mjtNum ma
     }
 
     // terminate if max off-diagonal element too small
-    if (mju_abs(D[3*rk+ck]) < eigEPS) {
+    if (mju_abs(D[3*rk+ck]) <= tol) {
       break;
     }
 
-    // 2x2 symmetric Schur decomposition
+    // 2x2 symmetric Schur decomposition: t = tan(angle)
     tau = (D[4*ck]-D[4*rk])/(2*D[3*rk+ck]);
     if (tau >= 0) {
       t = 1.0/(tau + mju_sqrt(1 + tau*tau));
     } else {
       t = -1.0/(-tau + mju_sqrt(1 + tau*tau));
     }
-    c = 1.0/mju_sqrt(1 + t*t);
 
-    // terminate if cosine too close to 1
-    if (c > 1.0-eigEPS) {
-      break;
-    }
-
-    // express rotation as quaternion
+    // express rotation as quaternion, using h = tan(angle/2): accurate for small angles
+    mjtNum h = t/(1 + mju_sqrt(1 + t*t));
+    tmp[0] = 1/mju_sqrt(1 + h*h);
     tmp[1] = tmp[2] = tmp[3] = 0;
-    tmp[rotk+1] = (tau >= 0 ? -mju_sqrt(0.5-0.5*c) : mju_sqrt(0.5-0.5*c));
-    if (rotk == 1) {
-      tmp[rotk+1] = -tmp[rotk+1];
-    }
-    tmp[0] = mju_sqrt(1.0 - tmp[rotk+1]*tmp[rotk+1]);
-    mju_normalize4(tmp);
+    tmp[rotk+1] = (rotk == 1 ? h : -h) * tmp[0];
 
     // accumulate quaternion rotation
     mju_mulQuat(quat, quat, tmp);
@@ -1164,11 +1319,12 @@ int mju_eig3(mjtNum eigval[3], mjtNum eigvec[9], mjtNum quat[4], const mjtNum ma
   }
 
   // sort eigenvalues in decreasing order (bubble sort: 0, 1, 0)
+  mjtNum eps = scale * eigEPS;
   for (int j=0; j < 3; j++) {
     int j1 = j%2;       // lead index
 
     // only swap if the eigenvalues are different
-    if (eigval[j1]+eigEPS < eigval[j1+1]) {
+    if (eigval[j1]+eps < eigval[j1+1]) {
       // swap eigenvalues
       t = eigval[j1];
       eigval[j1] = eigval[j1+1];
@@ -1438,9 +1594,9 @@ int mju_QCQP(mjtNum* res, const mjtNum* Ain, const mjtNum* bin,
 //     index       - set of free dimensions    nfree          allocated: n
 //   notes:
 //     the initial value of res is used to warmstart the solver
-//     R must have allocatd size n*(n+7), but only nfree*nfree values are used in output
+//     R must have allocated size n*(n+7), but only nfree*nfree values are used in output
 //     index (if given) must have allocated size n, but only nfree values are used in output
-//     only lower triangles of H and R and read from and written to, respectively
+//     only lower triangles of H and R are read from and written to, respectively
 int mju_boxQP(mjtNum* res, mjtNum* R, int* index,
               const mjtNum* H, const mjtNum* g, int n,
               const mjtNum* lower, const mjtNum* upper) {
@@ -1493,18 +1649,6 @@ enum mjtStatusBoxQP {
 };
 
 
-// multiply symmetric matrix with vector on both sides: return vec'*mat*vec
-//   assumes symmetry of mat, ignores upper triangle
-static mjtNum mulVecMatVecSym(const mjtNum* vec, const mjtNum* mat, int n) {
-  mjtNum res = 0;
-  for (int i=0; i < n; i++) {
-    res += vec[i] * mat[n*i+i] * vec[i];           // diagonal
-    res += 2 * vec[i] * mju_dot(mat+n*i, vec, i);  // off-diagonal
-  }
-  return res;
-}
-
-
 // multiply symmetric matrix with vector: res = mat*vec
 //   assumes symmetry of mat, ignores upper triangle, res must not alias vec
 static void mulSymVec(mjtNum* restrict res, const mjtNum* mat, const mjtNum* vec, int n) {
@@ -1513,8 +1657,93 @@ static void mulSymVec(mjtNum* restrict res, const mjtNum* mat, const mjtNum* vec
     res[i] = mat[n*i+i]*vec[i] + mju_dot(mat+n*i, vec, i);
 
     // strict upper mirror contribution: res[k] += mat[i,k] * vec[i] for k < i
-    mju_addToScl(res, mat+n*i, vec[i], i);
+    if (vec[i]) {
+      mju_addToScl(res, mat+n*i, vec[i], i);
+    }
   }
+}
+
+
+// delete row and column p from m-by-m Cholesky factor R, return rank of (m-1)-by-(m-1) factor
+static int cholDelete(mjtNum* restrict R, mjtNum* restrict temp, int m, int p) {
+  // shift rows 1..p-1 to stride m-1
+  for (int i=1; i < p; i++) {
+    for (int j=0; j <= i; j++) {
+      R[i*(m-1)+j] = R[i*m+j];
+    }
+  }
+
+  // zero leading entries of update vector
+  mju_zero(temp, p);
+
+  // shift rows p+1..m-1 to rows p..m-2 (stride m-1) and extract column p into temp
+  for (int i=p+1; i < m; i++) {
+    for (int j=0; j < p; j++) {
+      R[(i-1)*(m-1)+j] = R[i*m+j];
+    }
+    temp[i-1] = R[i*m+p];
+    for (int j=p+1; j <= i; j++) {
+      R[(i-1)*(m-1)+(j-1)] = R[i*m+j];
+    }
+  }
+
+  // rank-1 update on trailing (m-1-p) block
+  return mju_cholUpdate(R, temp, m-1, 1);
+}
+
+
+// insert variable idx at position p into m-by-m Cholesky factor R, return rank of (m+1)-by-(m+1)
+static int cholInsert(mjtNum* restrict R, mjtNum* restrict temp, mjtNum* restrict rowp,
+                      const mjtNum* H, int n, const int* index, int m, int p, int idx) {
+  // solve L_11 * l_21 = h_21 for new row p (entries 0..p-1)
+  for (int j=0; j < p; j++) {
+    mjtNum s = H[idx*n+index[j]];
+    if (j) {
+      s -= mju_dot(R+j*m, rowp, j);
+    }
+    rowp[j] = s / R[j*(m+1)];
+  }
+
+  // diagonal entry l_22
+  mjtNum diag = H[idx*(n+1)] - mju_dot(rowp, rowp, p);
+  if (diag < mjMINVAL) {
+    return -1;
+  }
+  mjtNum l22 = mju_sqrt(diag);
+  rowp[p] = l22;
+
+  // compute new column p below diagonal: l_32 = (h_32 - L_31 * l_21) / l_22
+  mju_zero(temp, p+1);
+  mjtNum inv_l22 = 1 / l22;
+  for (int i=p; i < m; i++) {
+    temp[i+1] = (H[index[i]*n+idx] - mju_dot(R+i*m, rowp, p)) * inv_l22;
+  }
+
+  // expand R from stride m to stride m+1 (in-place backward pass)
+  for (int i=m-1; i >= p; i--) {
+    for (int j=i; j >= p; j--) {
+      R[(i+1)*(m+1)+(j+1)] = R[i*m+j];
+    }
+    R[(i+1)*(m+1)+p] = temp[i+1];
+    for (int j=p-1; j >= 0; j--) {
+      R[(i+1)*(m+1)+j] = R[i*m+j];
+    }
+  }
+
+  // write new row p
+  for (int j=0; j <= p; j++) {
+    R[p*(m+1)+j] = rowp[j];
+  }
+
+  // shift rows p-1..1 to stride m+1
+  for (int i=p-1; i >= 1; i--) {
+    for (int j=i; j >= 0; j--) {
+      R[i*(m+1)+j] = R[i*m+j];
+    }
+  }
+
+  // rank-1 downdate on trailing (m-p) block
+  return mju_cholUpdate(R, temp, m+1, 0);
 }
 
 
@@ -1535,10 +1764,9 @@ int mju_boxQPoption(mjtNum* res, mjtNum* R, int* index,               // outputs
                     char* log, int logsz)                             // logging
 {
   int status = mjBOXQP_NO_DESCENT;  // initial status: no descent direction found
-  int factorize = 1;                // always factorize on the first iteration
-  int nfree = n;                    // initialise nfree with n
+  int nfree = n;                    // initialize nfree with n
   int nfactor = 0;
-  mjtNum sdotg, improvement=0, value=0, norm2=0;
+  mjtNum value = 0, norm2 = 0;
 
   // basic checks
   if (n <= 0) {
@@ -1547,7 +1775,7 @@ int mju_boxQPoption(mjtNum* res, mjtNum* R, int* index,               // outputs
   if (upper && lower) {
     for (int i=0; i < n; i++) {
       if (lower[i] >= upper[i]) {
-        mjERROR("upper bounds must be stricly larger than lower bounds");
+        mjERROR("upper bounds must be strictly larger than lower bounds");
       }
     }
   }
@@ -1584,6 +1812,7 @@ int mju_boxQPoption(mjtNum* res, mjtNum* R, int* index,               // outputs
     if (rank == n) {
       mju_cholSolve(res, R, g, n);
       mju_scl(res, res, -1, n);
+      value = 0.5 * mju_dot(res, g, n);
       nfactor = 1;
       status = mjBOXQP_UNBOUNDED;
     } else {
@@ -1610,33 +1839,30 @@ int mju_boxQPoption(mjtNum* res, mjtNum* R, int* index,               // outputs
 
   // ------ main loop
   int iter, logptr = 0;
-  mjtNum oldvalue;
   for (iter=0; iter < maxiter; iter++) {
+    // stop if already resolved (e.g. unbounded fast path or line-search failure)
     if (status != mjBOXQP_NO_DESCENT) {
       break;
     }
 
-    // compute objective: value = 0.5*res'*H*res + res'*g
-    value = 0.5 * mulVecMatVecSym(res, H, n) + mju_dot(res, g, n);
-
-    // save last value
-    oldvalue = value;
-
-    // compute gradient
+    // compute gradient and objective: value = 0.5*res'*H*res + res'*g
     mulSymVec(grad, H, res, n);
+    if (iter == 0) {
+      value = 0.5 * mju_dot(res, grad, n) + mju_dot(res, g, n);
+    }
     mju_addTo(grad, g, n);
 
-    // find clamped dimensions
+    // save last value
+    mjtNum oldvalue = value;
+
+    // find clamped dimensions, count free dimensions
+    int oldnfree = nfree;
+    nfree = 0;
     for (int i=0; i < n; i++) {
       clamped[i] = ( lower && res[i] == lower[i] && grad[i] > 0 ) ||
                    ( upper && res[i] == upper[i] && grad[i] < 0 );
-    }
-
-    // build index of free dimensions, count them
-    nfree = 0;
-    for (int i=0; i < n; i++) {
       if (!clamped[i]) {
-        index[nfree++] = i;
+        nfree++;
       }
     }
 
@@ -1646,15 +1872,90 @@ int mju_boxQPoption(mjtNum* res, mjtNum* R, int* index,               // outputs
       break;
     }
 
-    // re-factorize if clamped dimensions have changed
+    // update or re-factorize if clamped dimensions have changed
+    int rank = nfree;
+    int factorize = (iter == 0);
     if (iter) {
-      factorize = 0;
+      // count newly clamped and unclamped dimensions
+      int nclamp = 0, nunclamp = 0;
       for (int i=0; i < n; i++) {
-        if (clamped[i] != oldclamped[i]) {
-          factorize = 1;
-          break;
+        if (clamped[i] && !oldclamped[i]) {
+          nclamp++;
+        } else if (!clamped[i] && oldclamped[i]) {
+          nunclamp++;
         }
       }
+
+      // maybe update Cholesky factor with rank-1 operations
+      if (nclamp + nunclamp > 0) {
+        // use rank-1 updates rather than full re-factorization when:
+        //  - at least one previously free variable remains free (nclamp < oldnfree)
+        //  - insertions are weighted 2x deletions because cholInsert adds a triangular solve
+        //  - weighted count <= max(2, nfree/8): flop crossover is nfree/3, but cholFactor uses
+        //    row-wise SIMD mju_dot while updates shift R and do column-strided Givens rotations
+        if (nclamp < oldnfree && nclamp + 2*nunclamp <= maxInt(2, nfree/8)) {
+          int m = oldnfree;
+          int rank_ok = 1;
+
+          // delete newly clamped dimensions in reverse order
+          for (int p=m-1; p >= 0; p--) {
+            if (clamped[index[p]]) {
+              if (cholDelete(R, temp, m, p) != m-1) {
+                rank_ok = 0;
+                break;
+              }
+              for (int j=p; j < m-1; j++) {
+                index[j] = index[j+1];
+              }
+              m--;
+            }
+          }
+
+          // insert newly unclamped dimensions
+          if (nunclamp && rank_ok) {
+            int p = 0;
+            for (int i=0; i < n; i++) {
+              if (!clamped[i]) {
+                if (oldclamped[i]) {
+                  if (cholInsert(R, temp, search, H, n, index, m, p, i) != m+1) {
+                    rank_ok = 0;
+                    break;
+                  }
+                  for (int j=m; j > p; j--) {
+                    index[j] = index[j-1];
+                  }
+                  index[p] = i;
+                  m++;
+                }
+                p++;
+              }
+            }
+          }
+
+          if (!rank_ok) {
+            factorize = 1;
+          }
+        } else {
+          factorize = 1;
+        }
+      }
+    }
+
+    // full factorization if required
+    if (factorize) {
+      int j = 0;
+      for (int i=0; i < n; i++) {
+        if (!clamped[i]) {
+          index[j++] = i;
+        }
+      }
+      for (int i=0; i < nfree; i++) {
+        for (int k=0; k < i+1; k++) {
+          R[i*nfree+k] = H[index[i]*n+index[k]];
+        }
+      }
+      rank = mju_cholFactor(R, nfree, mjMINVAL);
+      nfactor++;
     }
 
     // save last clamped
@@ -1662,52 +1963,19 @@ int mju_boxQPoption(mjtNum* res, mjtNum* R, int* index,               // outputs
       oldclamped[i] = clamped[i];
     }
 
-    // get search direction: search = g + H_all,clamped * res_clamped
-    for (int i=0; i < n; i++) {
-      temp[i] = clamped[i] ? res[i] : 0;
-    }
-    mulSymVec(search, H, temp, n);
-    mju_addTo(search, g, n);
-
-    // search = compress_free(search)
-    for (int i=0; i < nfree; i++) {
-      search[i] = search[index[i]];
-    }
-
-    // R = compress_free(H)
-    if (factorize) {
-      for (int i=0; i < nfree; i++) {
-        for (int j=0; j < i+1; j++) {
-          R[i*nfree+j] = H[index[i]*n+index[j]];
-        }
-      }
-    }
-
-    // re-factorize and increment counter, if required
-    int rank = factorize ? mju_cholFactor(R, nfree, mjMINVAL) : nfree;
-    nfactor += factorize;
-
     // abort if factorization failed
     if (rank != nfree) {
       status = mjBOXQP_NOT_SPD;
       break;
     }
 
-    // temp = H_free,free \ search_free
-    mju_cholSolve(temp, R, search, nfree);
-
-    // search_free = expand_free(-temp) - x_free
-    mju_zero(search, n);
-    for (int i=0; i < nfree; i++) {
-      search[index[i]] = -temp[i] -res[index[i]];
-    }
-
     // ------ check gradient
 
-    // squared norm of free gradient
+    // squared norm of free gradient, compress grad_free into temp
     norm2 = 0;
     for (int i=0; i < nfree; i++) {
       mjtNum grad_i = grad[index[i]];
+      temp[i] = grad_i;
       norm2 += grad_i*grad_i;
     }
 
@@ -1717,28 +1985,57 @@ int mju_boxQPoption(mjtNum* res, mjtNum* R, int* index,               // outputs
       break;
     }
 
+    // get search direction: solve H_free,free * temp = grad_free
+    mju_cholSolve(temp, R, temp, nfree);
+
+    // search = -temp, compute directional derivative sdotg
+    mjtNum sdotg = 0;
+    for (int i=0; i < nfree; i++) {
+      search[i] = -temp[i];
+      sdotg -= temp[i] * grad[index[i]];
+    }
+
     // sanity check: make sure we have a descent direction
-    if ((sdotg = mju_dot(search, grad, n)) >= 0) {
+    if (sdotg >= 0) {
       break;  // SHOULD NOT OCCUR
     }
 
-    // ------ projected Armijo line search
-    mjtNum step = 1;
-    int nstep = 0;
+    // ------ projected Armijo line search in free subspace
+    mjtNum step = 1, improvement = 0, reduction = 0;
+    int nstep = 0, clipped = 0;
     do {
-      // candidate = clamp(x + step*search)
-      mju_scl(candidate, search, step, n);
-      mju_addTo(candidate, res, n);
-      for (int i=0; i < n; i++) {
-        if (lower && candidate[i] < lower[i]) {
-          candidate[i] = lower[i];
-        } else if (upper && candidate[i] > upper[i]) {
-          candidate[i] = upper[i];
+      // candidate = clamp(res_free + step*search)
+      clipped = 0;
+      for (int i=0; i < nfree; i++) {
+        int idx = index[i];
+        mjtNum c = res[idx] + step*search[i];
+        if (lower && c < lower[idx]) {
+          c = lower[idx];
+          clipped = 1;
+        } else if (upper && c > upper[idx]) {
+          c = upper[idx];
+          clipped = 1;
         }
+        candidate[i] = c;
       }
 
-      // new objective value
-      value = 0.5 * mulVecMatVecSym(candidate, H, n) + mju_dot(candidate, g, n);
+      // objective reduction: -grad_free'*delta - 0.5*||R'*delta||^2
+      if (!clipped) {
+        reduction = -step*(1 - 0.5*step)*sdotg;
+      } else {
+        mju_zero(temp, nfree);
+        mjtNum ddotg = 0;
+        for (int i=0; i < nfree; i++) {
+          int idx = index[i];
+          mjtNum di = candidate[i] - res[idx];
+          if (di) {
+            ddotg += di * grad[idx];
+            mju_addToScl(temp, R+i*nfree, di, i+1);
+          }
+        }
+        reduction = -ddotg - 0.5*mju_dot(temp, temp, nfree);
+      }
+      value = oldvalue - reduction;
 
       // increment and break if step is too small
       nstep++;
@@ -1749,7 +2046,7 @@ int mju_boxQPoption(mjtNum* res, mjtNum* R, int* index,               // outputs
       }
 
       // repeat until relative improvement >= Armijo
-      improvement = (value - oldvalue) / (step*sdotg);
+      improvement = -reduction / (step*sdotg);
     } while (improvement < armijo);
 
 
@@ -1758,15 +2055,23 @@ int mju_boxQPoption(mjtNum* res, mjtNum* R, int* index,               // outputs
       int written = snprintf(log+logptr, logsz-logptr,
                              "iter %-3d:  |grad|: %-8.2g  reduction: %-8.2g  improvement: %-8.4g  "
                              "linesearch: %g^%-2d  factorized: %d  nfree: %d\n",
-                             iter+1, mju_sqrt(norm2), oldvalue-value, improvement,
+                             iter+1, mju_sqrt(norm2), reduction, improvement,
                              backtrack, nstep-1, factorize, nfree);
       if (written > 0) {
-        logptr = mjMIN(logptr + written, logsz);
+        logptr = minInt(logptr + written, logsz);
       }
     }
 
     // accept candidate
-    mju_copy(res, candidate, n);
+    for (int i=0; i < nfree; i++) {
+      res[index[i]] = candidate[i];
+    }
+
+    // stop if unclipped step produced no floating-point decrease in objective
+    if (!clipped && value >= oldvalue) {
+      status = nfree == n ? mjBOXQP_UNBOUNDED : mjBOXQP_TOL_GRAD;
+      break;
+    }
   }
 
   // max iterations exceeded

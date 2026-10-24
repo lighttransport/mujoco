@@ -32,6 +32,7 @@ try:
   import generate_mjcf_table  # pyrefly: ignore[missing-import]
   import generate_read_table  # pyrefly: ignore[missing-import]
   import generate_schema  # pyrefly: ignore[missing-import]
+  import generate_units  # pyrefly: ignore[missing-import]
   import generate_xsd  # pyrefly: ignore[missing-import]
   import mjcf_schema  # pyrefly: ignore[missing-import]
 except ImportError:
@@ -67,6 +68,7 @@ _EXTRA_DOCUMENTED_TYPES = {
     'mjStringVec',
     # function pointer typedefs (callbacks)
     'mjfAct',
+    'mjfBatchFunc',
     'mjfCanDecode',
     'mjfCloseResource',
     'mjfCollision',
@@ -173,9 +175,12 @@ class DocTest(googletest.TestCase):
         sources += file.read()
     errors = []
     dispatched = set(generate_read_table.SENSOR_DISPATCH)
+    dispatched |= set(
+        schema.enums[generate_read_table.ACTUATOR_DISPATCH_ENUM].keywords()
+    )
     for name in generate_read_table.table_driven_elements(schema):
       if name in dispatched:
-        continue  # consumed through kSensorDispatch
+        continue  # consumed through kSensorDispatch / kActuatorDispatch
       array = generate_read_table.array_name(name)
       if array not in sources:
         errors.append(
@@ -183,8 +188,9 @@ class DocTest(googletest.TestCase):
             'consumed: migrate its reader to ReadAttrTable or add the '
             'element to NOT_TABLE_DRIVEN'
         )
-    if 'kSensorDispatch' not in sources:
-      errors.append("'kSensorDispatch' is never consumed")
+    for dispatch in ('kSensorDispatch', 'kActuatorDispatch'):
+      if dispatch not in sources:
+        errors.append(f"'{dispatch}' is never consumed")
     for _, array in generate_read_table.EMIT_GROUPS.values():
       if array not in sources:
         errors.append(
@@ -197,6 +203,37 @@ class DocTest(googletest.TestCase):
       )
     if errors:
       self.fail('read-table coverage:\n' + '\n'.join(errors))
+
+  def test_flag_defaults(self):
+    """Checks option flag defaults against the disable/enable bit enums.
+
+    The flag element is unbound (its attributes lower to bits of
+    disableflags/enableflags), so SchemaDefaultsTest cannot verify its
+    declared defaults. The rule is mechanical: a disable bit is on by
+    default, so its flag defaults to 'enable'; an enable bit defaults
+    to 'disable'.
+    """
+    with open(_get_path('include', 'mujoco', 'mjtype.h'),
+              encoding='utf-8') as file:
+      content = file.read()
+    dsbl = set(re.findall(r'mjDSBL_(\w+)', content))
+    enbl = set(re.findall(r'mjENBL_(\w+)', content))
+    schema = mjcf_schema.parse_file(_get_path('src', 'xml', 'mjcf.schema'))
+    errors = []
+    for attr in schema.expanded_attrs(schema.elements['flag']):
+      name = attr.name.upper()
+      if name in dsbl:
+        expected = 'enable'
+      elif name in enbl:
+        expected = 'disable'
+      else:
+        errors.append(f'flag.{attr.name}: no mjDSBL_/mjENBL_ member')
+        continue
+      if attr.default != expected:
+        errors.append(f'flag.{attr.name}: declared {attr.default!r}, '
+                      f'but the bit implies {expected!r}')
+    if errors:
+      self.fail('flag defaults:\n' + '\n'.join(errors))
 
   def test_schema_enum_coverage(self):
     """Checks schema enums against the C enums they bind.
@@ -276,6 +313,18 @@ class DocTest(googletest.TestCase):
   def test_schema(self):
     """Checks that XMLschema.rst matches the generated output."""
     _check_up_to_date(self, 'doc/XMLschema.rst', generate_schema.generate())
+
+  def test_units(self):
+    """Checks that XMLunits.rst matches the schema-generated output."""
+    _check_up_to_date(self, 'doc/XMLunits.rst', generate_units.generate())
+
+  def test_dims(self):
+    """Checks that every real-valued attribute declares its dimension."""
+    schema = mjcf_schema.parse_file(_get_path('src', 'xml', 'mjcf.schema'))
+    missing = [f'{scope}/{attr.name} (line {attr.line})'
+               for scope, attr in mjcf_schema.missing_dims(schema)]
+    if missing:
+      self.fail('attributes without a dim facet:\n  ' + '\n  '.join(missing))
 
   def test_functions(self):
     """Checks that functions.rst matches the generated output."""

@@ -17,9 +17,20 @@ from collections.abc import Sequence
 
 from absl import app
 import mujoco
-import mujoco._render_filament as mjrf
+from mujoco import mjrf
 from mujoco.experimental.studio import window
 from mujoco.rendering.filament import renderer
+import numpy as np
+
+
+def _update_target(
+    r: renderer.Renderer, win: window.Window, buf: np.ndarray
+) -> np.ndarray:
+  w, h = win.GetWidth(), win.GetHeight()
+  if buf.shape != (h, w, 3):
+    buf = np.empty((h, w, 3), dtype=np.uint8)
+    r.target("out", buf)
+  return buf
 
 
 def main(argv: Sequence[str]) -> None:
@@ -51,26 +62,27 @@ def main(argv: Sequence[str]) -> None:
   r = renderer.Renderer(ctx)
 
   # create GPU objects (textures, meshes, etc.) from the model
-  model_objects = mjrf.ModelObjects(ctx, model)
+  model_resources = mjrf.ModelResources(ctx, model)
 
   # add model lights and renderables to a scene
-  model_lights = mjrf.ModelLights(r.scene("scn"), model_objects)
-  model_renderables = mjrf.ModelRenderables(r.scene("scn"), model_objects)
+  model_lights = mjrf.ModelLights(r.scene("scn"), model_resources)
+  model_renderables = mjrf.ModelRenderables(r.scene("scn"), model_resources)
 
   # define multiple views
+  views: dict[str, renderer.View] = {}
   dx = 1.0 / ncam
   dy = 1.0 / len(modes)
   for y, mode in enumerate(modes):
     for x in range(ncam):
       vp = (x * dx, y * dy, dx, dy)
-      r.view(
-          f"v_{x}_{y}",
+      views[f"v_{x}_{y}"] = renderer.View(
           scene="scn",
           target="out",
           viewport=vp,
           draw_mode=mode,
       )
 
+  buf = np.empty((0, 0, 3), dtype=np.uint8)
   while win.NewFrame():
     # simulate one step
     mujoco.mj_step(model, data)
@@ -89,18 +101,18 @@ def main(argv: Sequence[str]) -> None:
         else:
           vcam.type = int(mujoco.mjtCamera.mjCAMERA_FIXED)
           vcam.fixedcamid = x
-        r.update_camera(
-            f"v_{x}_{y}", mujoco.mjv_camera2GLCamera(model, data, vcam)
+        views[f"v_{x}_{y}"].camera = mujoco.mjv_camera2GLCamera(
+            model, data, vcam
         )
 
     # ensure our output buffer is of the right size
-    r.target("out", (win.GetWidth(), win.GetHeight()))
+    buf = _update_target(r, win, buf)
 
     # render the scene
-    r.render()
+    r.render(list(views.values()))
 
     # present the output image to the window
-    win.Present(r.get_image("out").pixels)
+    win.Present(buf)
 
 
 if __name__ == "__main__":

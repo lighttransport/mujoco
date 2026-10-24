@@ -36,6 +36,7 @@
 #include "engine/engine_island.h"
 #include "engine/engine_macro.h"
 #include "engine/engine_memory.h"
+#include "engine/engine_metric.h"
 #include "engine/engine_passive.h"
 #include "engine/engine_plugin.h"
 #include "engine/engine_sensor.h"
@@ -63,9 +64,9 @@ void mj_checkPos(const mjModel* m, mjData* d) {
       mj_warning(d, mjWARN_BADQPOS, i);
       if (!mjDISABLED(mjDSBL_AUTORESET)) {
         mj_resetData(m, d);
+        d->warning[mjWARN_BADQPOS].number++;
+        d->warning[mjWARN_BADQPOS].lastinfo = i;
       }
-      d->warning[mjWARN_BADQPOS].number++;
-      d->warning[mjWARN_BADQPOS].lastinfo = i;
       return;
     }
   }
@@ -84,9 +85,9 @@ void mj_checkVel(const mjModel* m, mjData* d) {
       mj_warning(d, mjWARN_BADQVEL, i);
       if (!mjDISABLED(mjDSBL_AUTORESET)) {
         mj_resetData(m, d);
+        d->warning[mjWARN_BADQVEL].number++;
+        d->warning[mjWARN_BADQVEL].lastinfo = i;
       }
-      d->warning[mjWARN_BADQVEL].number++;
-      d->warning[mjWARN_BADQVEL].lastinfo = i;
       return;
     }
   }
@@ -105,10 +106,8 @@ void mj_checkAcc(const mjModel* m, mjData* d) {
       mj_warning(d, mjWARN_BADQACC, i);
       if (!mjDISABLED(mjDSBL_AUTORESET)) {
         mj_resetData(m, d);
-      }
-      d->warning[mjWARN_BADQACC].number++;
-      d->warning[mjWARN_BADQACC].lastinfo = i;
-      if (!mjDISABLED(mjDSBL_AUTORESET)) {
+        d->warning[mjWARN_BADQACC].number++;
+        d->warning[mjWARN_BADQACC].lastinfo = i;
         mj_forward(m, d);
       }
       return;
@@ -175,7 +174,7 @@ void mj_fwdPosition(const mjModel* m, mjData* d) {
   // implicit effective metric Mtilde = M + K: build (or deactivate) for this step. Arena
   // lifetime and skip semantics mirror the constraint data: built once per position stage,
   // value-refreshed in the velocity stage, consumed downstream.
-  mjd_effBuild(m, d, mj_isMetric(m), /*flg_factor=*/1);
+  mj_effBuild(m, d, mj_isMetric(m), /*flg_factor=*/1);
 
   TM_END1(mjTIMER_POSITION);
 }
@@ -232,7 +231,7 @@ void mj_fwdVelocity(const mjModel* m, mjData* d) {
   mj_tendonBias(m, d, d->qfrc_bias);
 
   // refresh the metric's velocity-stage values
-  mjd_effShift(m, d);
+  mj_effShift(m, d);
 
 
   TM_END(mjTIMER_VELOCITY);
@@ -389,15 +388,13 @@ void mj_fwdActuation(const mjModel* m, mjData* d) {
   mj_markStack(d);
   mjtNum *ctrl = mjSTACKALLOC(d, nu, mjtNum);
 
-  // read from ctrl or history buffer for delayed actuators
+  // copy controls, overwrite delayed actuators from history buffer
+  mju_copy(ctrl, d->ctrl, nu);
   for (int i = 0; i < nactuator; i++) {
-    int adr = m->actuator_ctrladr[i];
     if (m->actuator_delay[i]) {
-      // delayed: read from history buffer (scalar input)
-      int interp = m->actuator_history[2*i+1];
-      ctrl[adr] = mj_readCtrl(m, d, i, d->time, interp);
-    } else {
-      mju_copy(ctrl + adr, d->ctrl + adr, m->actuator_ctrlnum[i]);
+      int adr = m->actuator_ctrladr[i];
+      const mjtNum* ptr = mj_readCtrl(m, d, i, d->time, ctrl + adr, -1);
+      if (ptr) mju_copy(ctrl + adr, ptr, m->actuator_ctrlnum[i]);
     }
   }
 
@@ -1041,7 +1038,7 @@ void mj_fwdAcceleration(const mjModel* m, mjData* d) {
       if (d->efm_ca) {
         mju_addTo(qfrc_eff, d->efm_ca, nv);
       }
-      mjd_effSolve(m, d, d->qacc_smooth, qfrc_eff);
+      mj_effSolve(m, d, d->qacc_smooth, qfrc_eff);
     } else {
       // awake dofs only: sleep islands follow the metric couplings, so the metric has no
       // terms across the awake/asleep boundary and zeroed asleep entries remain exactly
@@ -1052,7 +1049,7 @@ void mj_fwdAcceleration(const mjModel* m, mjData* d) {
         mju_addToInd(qfrc_eff, d->efm_ca, index, nv);
       }
       mjtNum* qacc_eff = mjSTACKALLOC(d, m->nv, mjtNum);
-      mjd_effSolve(m, d, qacc_eff, qfrc_eff);
+      mj_effSolve(m, d, qacc_eff, qfrc_eff);
       mju_copyInd(d->qacc_smooth, qacc_eff, index, nv);
     }
     mj_freeStack(d);
@@ -1121,7 +1118,7 @@ static void warmstart(const mjModel* m, mjData* d) {
       mju_sub(da, d->qacc_warmstart, d->qacc_smooth, nv);
       mj_mulM(m, d, Mda, da);
       if (d->efm_active) {
-        mjd_effMulAdd(m, d, Mda, da, /*flg_contact=*/1);
+        mj_effMulAdd(m, d, Mda, da, /*flg_contact=*/1);
       }
       cost_warmstart += 0.5 * mju_dot(da, Mda, nv);
 
@@ -1167,17 +1164,6 @@ static void solveIslandTask(const mjModel* m, mjData* d, void* arg, int thread_i
 }
 
 
-// any flex with metric terms (stiffness or passive contact)
-static int effFlexAny(const mjModel* m) {
-  for (int f=0; f < m->nflex; f++) {
-    if (mj_effFlexPossible(m, f)) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
-
 // discrete: reinstate the free-body gyroscopic derivative for decoupled standalone free
 // bodies, re-solving their rows of qacc against the local unsymmetric metric. Guarded by
 // mjd_freeGyroPossible: no constraint Jacobian support and no off-diagonal metric coupling
@@ -1212,13 +1198,6 @@ static void mj_discreteGyro(const mjModel* m, mjData* d) {
 }
 
 
-// contact rows the IPC mode published into the metric's contact class for its inner solve
-// (engine_ipc.c): the primal solve must run for them even when nefc==0
-static int ipcRows(const mjModel* m, const mjData* d) {
-  return mjENABLED(mjENBL_IPC) && d->nefmcon > 0;
-}
-
-
 // compute efc_b, efc_force, qfrc_constraint; update qacc
 static void fwdConstraint(const mjModel* m, mjData* d, mjtSolver solver, int flg_island) {
   TM_START;
@@ -1227,9 +1206,9 @@ static void fwdConstraint(const mjModel* m, mjData* d, mjtSolver solver, int flg
   // always clear qfrc_constraint
   mju_zero(d->qfrc_constraint, nv);
 
-  // no constraints and no IPC contact rows: copy unconstrained acc, clear forces, return
+  // no constraints: copy unconstrained acc, clear forces, return
   // (with the effective metric active, qacc_smooth is already the implicit answer)
-  if (!nefc && !ipcRows(m, d)) {
+  if (!nefc) {
     mju_copy(d->qacc, d->qacc_smooth, nv);
     mju_zeroInt(d->solver_niter, mjNISLAND);
     mj_discreteGyro(m, d);
@@ -1245,15 +1224,8 @@ static void fwdConstraint(const mjModel* m, mjData* d, mjtSolver solver, int flg
   warmstart(m, d);
   mju_zeroInt(d->solver_niter, mjNISLAND);
 
-  // check if islands are supported
-  // islands are supported under the discrete metric: findEdges unions the trees of
-  // metric-coupled tendons, and the solver contexts see an island-local view (gathered
-  // shift, mapped products, gathered M+diag backbone factor). Only flex with metric terms
-  // still forces a monolithic solve: the flex operators (stencils, 3x3 block factors)
-  // have no island-local form.
-  // TODO: island-local flex operators, then remove the flex condition.
-  int islands_supported = flg_island && nisland > 0 &&
-                          !(mj_isMetric(m) && effFlexAny(m));
+  // check if islands are supported (IPC folds its subproblem monolithically)
+  int islands_supported = flg_island && nisland > 0 && !mjENABLED(mjENBL_IPC);
 
   // run solver over constraint islands
   if (islands_supported) {
@@ -1325,7 +1297,7 @@ static void fwdConstraint(const mjModel* m, mjData* d, mjtSolver solver, int flg
 void mj_fwdConstraint(const mjModel* m, mjData* d) {
   // check for invalid solver type, on the entry callers invoke (mj_fwdConstraintCG pins a valid
   // one); the condition mirrors fwdConstraint's early-out
-  if ((d->nefc || ipcRows(m, d)) && m->opt.solver != mjSOL_PGS &&
+  if (d->nefc && m->opt.solver != mjSOL_PGS &&
       m->opt.solver != mjSOL_CG && m->opt.solver != mjSOL_NEWTON) {
     mjERROR("unknown solver type %d", m->opt.solver);
   }
@@ -1357,8 +1329,10 @@ static void advanceStart(const mjModel* m, mjData* d, const mjtNum* act_dot) {
       if (nsample == 0) continue;
 
       // get history buffer pointer and insert ctrl at current time
+      int dim = m->actuator_ctrlnum[i];
       mjtNum* buf = d->history + m->actuator_historyadr[i];
-      *mju_historyInsert(buf, nsample, /*dim=*/1, d->time) = d->ctrl[m->actuator_ctrladr[i]];
+      mjtNum* slot = mju_historyInsert(buf, nsample, dim, d->time);
+      mju_copy(slot, d->ctrl + m->actuator_ctrladr[i], dim);
     }
 
     // advance sensor history buffers
@@ -1747,10 +1721,14 @@ void mj_checkDiscrete(const mjModel* m) {
     mjERROR("flag ipc does not support flag sleep");
   }
 
-  // passive flex contact is too stiff for explicit integration: it is carried by the
-  // effective metric, which requires the discrete integrator
+  // SNH and passive flex contact require the discrete integrator's effective metric
   if (!mj_isMetric(m)) {
     for (int f=0; f < m->nflex; f++) {
+      int stiffnessadr = m->flex_stiffnessadr[f];
+      if (!m->flex_interp[f] && m->flex_dim[f] == 3 && stiffnessadr >= 0 &&
+          m->flex_stiffness[stiffnessadr+21] != 0) {
+        mjERROR("stable Neo-Hookean elasticity requires integrator='discrete'");
+      }
       if (mj_effFlexContactPossible(m, f)) {
         mjERROR("passive flex contact requires an integrator with the effective metric: "
                 "set integrator='discrete'");
@@ -1765,11 +1743,24 @@ void mj_checkDiscrete(const mjModel* m) {
         if (mj_effFlexStiffPossible(m, f)) {
           mjERROR("flex elasticity is no longer integrated implicitly under "
                   "integrator='implicit' and 'implicitfast': set "
-                  "integrator='discrete'");
+                  "integrator='discrete', or 'Euler' with a small timestep");
         }
       }
     }
     return;
+  }
+  for (int f=0; f < m->nflex; f++) {
+    if (!m->flex_rigid[f] && (m->flex_edgestiffness[f] > 0 || m->flex_edgedamping[f] > 0)) {
+      mjERROR("discrete integrator: flex edge stiffness and damping are not supported; "
+              "use <elasticity> or <edge equality> instead");
+    }
+  }
+  if (m->opt.solver == mjSOL_NEWTON) {
+    for (int f=0; f < m->nflex; f++) {
+      if (!m->flex_interp[f] && mj_effFlexStiffPossible(m, f) && !mj_flexSimple(m, f)) {
+        mjERROR("discrete integrator: flex with general attachments requires solver='CG'");
+      }
+    }
   }
   if (m->opt.solver == mjSOL_NEWTON && !mjd_flexInterpAssemblable(m)) {
     mjERROR("discrete integrator: interpolated flex with non-simple nodes not yet "
@@ -1782,16 +1773,13 @@ void mj_checkDiscrete(const mjModel* m) {
     // (mj_effCouplings), and the backbone IS the metric; under a primal solver, the
     // noslip post-pass consumes the backbone AR as an approximation. Flex cannot be
     // excluded: explicit flex elasticity is the divergence the metric exists to prevent
-    if (effFlexAny(m)) {
+    if (mj_effFlexAny(m)) {
       mjERROR("discrete integrator: PGS and noslip not yet supported with flex");
     }
   }
   if (mjENABLED(mjENBL_SLEEP)) {
     if (mjDISABLED(mjDSBL_ISLAND)) {
       mjERROR("discrete integrator: sleep without islands not yet supported");
-    }
-    if (effFlexAny(m)) {
-      mjERROR("discrete integrator: sleep with flex not yet supported");
     }
   }
 }
@@ -1995,7 +1983,7 @@ void mj_forwardSkip(const mjModel* m, mjData* d, int skipstage, int skipsensor) 
   }
 
   mj_fwdActuation(m, d);
-  mjd_effActuation(m, d);
+  mj_effActuation(m, d, /*flg_factor=*/1);
   if (mj_isMetric(m)) {
     mj_regularizeConstraint(m, d, /*flg_AR=*/1);
     mj_referenceConstraint(m, d);
@@ -2107,7 +2095,7 @@ void mj_step1(const mjModel* m, mjData* d) {
 void mj_step2(const mjModel* m, mjData* d) {
   TM_START;
   mj_fwdActuation(m, d);
-  mjd_effActuation(m, d);
+  mj_effActuation(m, d, /*flg_factor=*/1);
   if (mj_isMetric(m)) {
     mj_regularizeConstraint(m, d, /*flg_AR=*/1);
     mj_referenceConstraint(m, d);

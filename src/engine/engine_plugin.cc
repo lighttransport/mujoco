@@ -30,7 +30,7 @@ void mjp_defaultPlugin(mjpPlugin* plugin) {
   std::memset(plugin, 0, sizeof(*plugin));
 }
 
-void mjp_defaultResourceProvider(mjpResourceProvider* provider) {
+void mjp_defaultProvider(mjpResourceProvider* provider) {
   std::memset(provider, 0, sizeof(*provider));
 }
 
@@ -43,12 +43,12 @@ int mjp_registerPlugin(const mjpPlugin* plugin) {
   return -1;
 }
 
-int mjp_registerResourceProvider(const mjpResourceProvider* provider) {
+int mjp_registerProvider(const mjpResourceProvider* provider) {
   mju_error("Plugin support disabled in this build");
   return -1;
 }
 
-int mjp_registerResourceProviderInternal(const mjpResourceProvider* provider) {
+int mjp_registerProviderInternal(const mjpResourceProvider* provider) {
   mju_error("Plugin support disabled in this build");
   return -1;
 }
@@ -57,7 +57,7 @@ int mjp_pluginCount(void) {
   return 0;
 }
 
-int mjp_resourceProviderCount(void) {
+int mjp_providerCount(void) {
   return 0;
 }
 
@@ -83,11 +83,11 @@ const mjpPlugin* mjp_getPluginAtSlotUnsafe(int slot, int nslot) {
   return nullptr;
 }
 
-const mjpResourceProvider* mjp_getResourceProvider(const char* resource_name) {
+const mjpResourceProvider* mjp_findProvider(const char* resource_name) {
   return nullptr;
 }
 
-const mjpResourceProvider* mjp_getResourceProviderAtSlot(int slot) {
+const mjpResourceProvider* mjp_getProviderAtSlot(int slot) {
   return nullptr;
 }
 
@@ -109,6 +109,30 @@ void mjp_registerDecoder(const mjpDecoder* decoder) {
 
 const mjpDecoder* mjp_findDecoder(const mjResource* resource, const char* content_type) {
   return nullptr;
+}
+
+void mjp_registerEncoder(const mjpEncoder* encoder) {
+  mju_error("Plugin support disabled in this build");
+}
+
+void mjp_defaultEncoder(mjpEncoder* encoder) {
+  std::memset(encoder, 0, sizeof(*encoder));
+}
+
+const mjpEncoder* mjp_findEncoder(const char* filename, const char* content_type) {
+  return nullptr;
+}
+
+void mjp_registerArchiveProvider(const mjpResourceProvider* provider) {
+  mju_error("Plugin support disabled in this build");
+}
+
+const mjpResourceProvider* mjp_findArchiveProvider(const char* resource_name) {
+  return nullptr;
+}
+
+int mjp_archiveProviderCount(void) {
+  return 0;
 }
 
 #else
@@ -234,23 +258,26 @@ void ForEachPipeSeparated(std::string_view str, Fn&& fn) {
   }
 }
 
+struct ArchiveTag {};
+
 // resource provider helpers
-std::string_view ResourceProviderKey(const mjpResourceProvider& provider) {
+std::string_view ProviderKey(const mjpResourceProvider& provider) {
   return std::string_view(provider.prefix, strklen(provider.prefix));
 }
 
-bool ResourceProviderEqual(const mjpResourceProvider& p1, const mjpResourceProvider& p2) {
+bool ProviderEqual(const mjpResourceProvider& p1, const mjpResourceProvider& p2) {
   return (mujoco::CaseInsensitiveEqual(p1.prefix, p2.prefix) &&
           p1.open == p2.open &&
           p1.read == p2.read &&
           p1.close == p2.close &&
+          p1.mount == p2.mount &&
+          p1.unmount == p2.unmount &&
           p1.modified == p2.modified &&
           p1.write == p2.write &&
           p1.data == p2.data);
 }
 
-bool ResourceProviderCopy(mjpResourceProvider& dst, const mjpResourceProvider& src,
-                          char (&err)[512]) {
+bool ProviderCopy(mjpResourceProvider& dst, const mjpResourceProvider& src, char (&err)[512]) {
   std::unique_ptr<char[]> prefix = CopyName(src.prefix);
   if (!prefix) {
     if (strklen(src.prefix) == -1) {
@@ -334,7 +361,7 @@ bool GlobalTable<mjpPlugin>::CopyObject(mjpPlugin& dst, const mjpPlugin& src, Er
 
   // check and copy plugin attributes
   std::unique_ptr<std::unique_ptr<char[]>[]> attributes_list;
-  if (src.nattribute) {
+  if (src.nattribute > 0) {
     attributes_list.reset(new(std::nothrow) std::unique_ptr<char[]>[src.nattribute]);
     if (!attributes_list) {
       std::snprintf(err, sizeof(err), "failed to allocate memory for plugin attribute list");
@@ -358,11 +385,11 @@ bool GlobalTable<mjpPlugin>::CopyObject(mjpPlugin& dst, const mjpPlugin& src, Er
 
   // release the attribute names from unique_ptr into a plain array
   const char** attributes = nullptr;
-  if (src.nattribute) {
+  if (src.nattribute > 0) {
     attributes = new(std::nothrow) const char*[src.nattribute];
     if (!attributes) {
       std::snprintf(err, sizeof(err), "failed to allocate memory for plugin attribute array");
-      return -1;
+      return false;
     }
     for (int i = 0; i < src.nattribute; ++i) {
       attributes[i] = attributes_list[i].release();
@@ -376,6 +403,9 @@ bool GlobalTable<mjpPlugin>::CopyObject(mjpPlugin& dst, const mjpPlugin& src, Er
   return true;
 }
 
+
+
+// Standard URI resource provider table specialization
 template <>
 const char* GlobalTable<mjpResourceProvider>::HumanReadableTypeName() {
   return "resource provider";
@@ -383,18 +413,39 @@ const char* GlobalTable<mjpResourceProvider>::HumanReadableTypeName() {
 
 template <>
 std::string_view GlobalTable<mjpResourceProvider>::ObjectKey(const mjpResourceProvider& plugin) {
-  return ResourceProviderKey(plugin);
+  return ProviderKey(plugin);
 }
 
 // check if two resource providers are identical
 template <>
 bool GlobalTable<mjpResourceProvider>::ObjectEqual(const mjpResourceProvider& p1, const mjpResourceProvider& p2) {
-  return ResourceProviderEqual(p1, p2);
+  return ProviderEqual(p1, p2);
 }
 
 template <>
 bool GlobalTable<mjpResourceProvider>::CopyObject(mjpResourceProvider& dst, const mjpResourceProvider& src, ErrorMessage& err) {
-  return ResourceProviderCopy(dst, src, err);
+  return ProviderCopy(dst, src, err);
+}
+
+// Archive resource provider table specialization
+template <>
+const char* GlobalTable<mjpResourceProvider, ArchiveTag>::HumanReadableTypeName() {
+  return "archive resource provider";
+}
+
+template <>
+std::string_view GlobalTable<mjpResourceProvider, ArchiveTag>::ObjectKey(const mjpResourceProvider& plugin) {
+  return ProviderKey(plugin);
+}
+
+template <>
+bool GlobalTable<mjpResourceProvider, ArchiveTag>::ObjectEqual(const mjpResourceProvider& p1, const mjpResourceProvider& p2) {
+  return ProviderEqual(p1, p2);
+}
+
+template <>
+bool GlobalTable<mjpResourceProvider, ArchiveTag>::CopyObject(mjpResourceProvider& dst, const mjpResourceProvider& src, ErrorMessage& err) {
+  return ProviderCopy(dst, src, err);
 }
 
 template <>
@@ -558,6 +609,8 @@ bool GlobalTable<mjpEncoder>::CopyObject(mjpEncoder& dst, const mjpEncoder& src,
   return true;
 }
 
+
+
 // globally register a plugin (thread-safe), return new slot id
 int mjp_registerPlugin(const mjpPlugin* plugin) {
   if (!plugin->name) {
@@ -621,12 +674,12 @@ const char* mj_getPluginConfig(const mjModel* m, int plugin_id, const char* attr
 }
 
 // set default resource provider definition
-void mjp_defaultResourceProvider(mjpResourceProvider* provider) {
+void mjp_defaultProvider(mjpResourceProvider* provider) {
   std::memset(provider, 0, sizeof(*provider));
 }
 
 // globally register a resource provider (thread-safe), return new slot id
-int mjp_registerResourceProvider(const mjpResourceProvider* provider) {
+int mjp_registerProvider(const mjpResourceProvider* provider) {
   // check if prefix is valid URI scheme format
   if (!IsValidURISchemeFormat(provider->prefix)) {
     mju_warning("provider->prefix is '%s' which is not a valid URI scheme format",
@@ -643,12 +696,12 @@ int mjp_registerResourceProvider(const mjpResourceProvider* provider) {
 }
 
 // return the number of globally registered resource providers
-int mjp_resourceProviderCount() {
+int mjp_providerCount() {
   return GlobalTable<mjpResourceProvider>::GetSingleton().count();
 }
 
 // look up a resource provider that matches its prefix against the given resource scheme
-const mjpResourceProvider* mjp_getResourceProvider(const char* resource_name) {
+const mjpResourceProvider* mjp_findProvider(const char* resource_name) {
   if (!resource_name || !resource_name[0]) {
     return nullptr;
   }
@@ -670,7 +723,7 @@ const mjpResourceProvider* mjp_getResourceProvider(const char* resource_name) {
 }
 
 // look up a resource provider by slot number
-const mjpResourceProvider* mjp_getResourceProviderAtSlot(int slot) {
+const mjpResourceProvider* mjp_getProviderAtSlot(int slot) {
   // shift slot to be zero-indexed
   return GlobalTable<mjpResourceProvider>::GetSingleton().GetAtSlot(slot - 1);
 }
@@ -799,26 +852,79 @@ const mjpEncoder* mjp_findEncoder(const char* filename,
   return nullptr;
 }
 
-// load plugins from a dynamic library
-void mj_loadPluginLibrary(const char* path) {
+// registers an archive resource provider
+void mjp_registerArchiveProvider(const mjpResourceProvider* provider) {
+  if (!provider || !provider->open || !provider->read || !provider->close) {
+    mju_error("archive provider must provide open, read, and close callbacks.");
+    return;
+  }
+
+  if (!provider->prefix) {
+    mju_error("archive provider must provide prefix (file extensions).");
+    return;
+  }
+
+  char ext_buf[kMaxNameLength + 1];
+  ForEachPipeSeparated(provider->prefix, [&](std::string_view ext) {
+    if (ext.size() <= kMaxNameLength) {
+      std::memcpy(ext_buf, ext.data(), ext.size());
+      ext_buf[ext.size()] = '\0';
+      mjpResourceProvider provider_copy = *provider;
+      provider_copy.prefix = ext_buf;
+      GlobalTable<mjpResourceProvider, ArchiveTag>::GetSingleton().AppendIfUnique(provider_copy);
+    }
+  });
+}
+
+// find an archive resource provider that matches a given resource or content type
+const mjpResourceProvider* mjp_findArchiveProvider(const char* resource_name) {
+  std::string extension = resource_name ? getext(resource_name) : "";
+  if (extension.empty()) {
+    return nullptr;
+  }
+
+  return GlobalTable<mjpResourceProvider, ArchiveTag>::GetSingleton().GetByKey(
+      extension.c_str(), nullptr);
+}
+
+// return the number of globally registered archive resource providers
+int mjp_archiveProviderCount() {
+  return GlobalTable<mjpResourceProvider, ArchiveTag>::GetSingleton().count();
+}
+
+
+// load plugins from a dynamic library, return false and write error message on failure
+static bool LoadPluginLibrary(const char* path, char* error, int error_sz) {
 #if defined(_WIN32) || defined(__CYGWIN__)
+  (void)error;
+  (void)error_sz;
   LoadLibraryA(path);
 #else
   void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
   if (!handle) {
-    const char* error = dlerror();
-    if (error) {
-      mju_error("Error loading plugin library '%s': %s\n", path, error);
+    const char* dlerr = dlerror();
+    if (dlerr) {
+      std::snprintf(error, error_sz, "Error loading plugin library '%s': %s\n", path, dlerr);
     } else {
-      mju_error("Unknown error loading plugin library '%s'\n", path);
+      std::snprintf(error, error_sz, "Unknown error loading plugin library '%s'\n", path);
     }
+    return false;
   }
 #endif
+  return true;
 }
 
-// scan a directory and load all dynamic libraries
-void mj_loadAllPluginLibraries(const char* directory,
-                               mjfPluginLibraryLoadCallback callback) {
+// load plugins from a dynamic library
+void mj_loadPluginLibrary(const char* path) {
+  char error[1024];
+  if (!LoadPluginLibrary(path, error, sizeof(error))) {
+    mju_error("%s", error);
+  }
+}
+
+// scan a directory and load all dynamic libraries, return false and write error message on failure
+static bool LoadAllPluginLibraries(const char* directory, mjfPluginLibraryLoadCallback callback,
+                                   char* error, int error_sz) {
   auto load_dso_and_call_callback = [&](const std::string& filename,
                                         const std::string& dso_path) {
     int nplugin_before;
@@ -828,7 +934,9 @@ void mj_loadAllPluginLibraries(const char* directory,
     {
       auto lock = plugin_table.LockExclusively();
       nplugin_before = mjp_pluginCount();
-      mj_loadPluginLibrary(dso_path.c_str());
+      if (!LoadPluginLibrary(dso_path.c_str(), error, error_sz)) {
+        return false;
+      }
       nplugin_after = mjp_pluginCount();
     }
 
@@ -837,6 +945,7 @@ void mj_loadAllPluginLibraries(const char* directory,
       int first = count ? nplugin_before : -1;
       callback(filename.c_str(), first, count);
     }
+    return true;
   };
 
   // define platform-specific strings
@@ -846,7 +955,7 @@ void mj_loadAllPluginLibraries(const char* directory,
   HANDLE hfile = FindFirstFileA(
       (directory + sep + "*.dll").c_str(), &find_data);
   if (!hfile) {
-    return;
+    return true;
   }
 
   // go through each file in the directory
@@ -855,7 +964,10 @@ void mj_loadAllPluginLibraries(const char* directory,
     const std::string name(find_data.cFileName);
     // load the library and check for plugins
     const std::string dso_path = directory + sep + name;
-    load_dso_and_call_callback(name.c_str(), dso_path.c_str());
+    if (!load_dso_and_call_callback(name.c_str(), dso_path.c_str())) {
+      FindClose(hfile);
+      return false;
+    }
     keep_going = FindNextFileA(hfile, &find_data);
   }
   FindClose(hfile);
@@ -869,7 +981,7 @@ void mj_loadAllPluginLibraries(const char* directory,
 
   DIR* dirp = opendir(directory);
   if (!dirp) {
-    return;
+    return true;
   }
 
   // go through each entry in the directory
@@ -882,12 +994,26 @@ void mj_loadAllPluginLibraries(const char* directory,
       // use stat to resolve symlinks and check that the target is a regular file
       struct stat file_stat;
       if (stat(dso_path.c_str(), &file_stat) == 0 && S_ISREG(file_stat.st_mode)) {
-        load_dso_and_call_callback(name.c_str(), dso_path.c_str());
+        if (!load_dso_and_call_callback(name.c_str(), dso_path.c_str())) {
+          closedir(dirp);
+          return false;
+        }
       }
     }
   }
   closedir(dirp);
 #endif
+  return true;
+}
+
+// scan a directory and load all dynamic libraries
+void mj_loadAllPluginLibraries(const char* directory,
+                               mjfPluginLibraryLoadCallback callback) {
+  // mju_error may longjmp: call it after the lock and C++ objects are destroyed
+  char error[1024] = "";
+  if (!LoadAllPluginLibraries(directory, callback, error, sizeof(error))) {
+    mju_error("%s", error);
+  }
 }
 
 #endif

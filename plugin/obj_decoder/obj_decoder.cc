@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -20,15 +22,25 @@
 #include <mujoco/mjplugin.h>
 #include <mujoco/mjspec.h>
 #include <mujoco/mujoco.h>
-#include <tiny_obj_loader.h>
+#include "tiny_obj_loader.h"
 
 namespace {
 
-mjSpec* Decode(mjResource* resource, const mjVFS* vfs) {
+void SetError(char* error, int error_sz, const char* format, ...) {
+  if (!error || error_sz <= 0) return;
+  va_list args;
+  va_start(args, format);
+  vsnprintf(error, error_sz, format, args);
+  va_end(args);
+}
+
+mjSpec* Decode(mjResource* resource, const mjVFS* vfs, char* error,
+               int error_sz) {
   const void* bytes = nullptr;
   int buffer_sz = mju_readResource(resource, &bytes);
   if (buffer_sz < 0) {
-    mju_warning("obj_decoder: could not read OBJ file '%s'", resource->name);
+    SetError(error, error_sz, "obj_decoder: could not read OBJ file '%s'",
+             resource->name);
     return nullptr;
   }
 
@@ -37,7 +49,8 @@ mjSpec* Decode(mjResource* resource, const mjVFS* vfs) {
   obj_reader.ParseFromString(std::string(buffer, buffer_sz), std::string());
 
   if (!obj_reader.Valid()) {
-    mju_warning("obj_decoder: could not parse OBJ file '%s'", resource->name);
+    SetError(error, error_sz, "obj_decoder: could not parse OBJ file '%s': %s",
+             resource->name, obj_reader.Error().c_str());
     return nullptr;
   }
 
@@ -80,7 +93,8 @@ mjSpec* Decode(mjResource* resource, const mjVFS* vfs) {
       for (size_t face = 0, idx = 0; idx < obj_mesh.indices.size();) {
         int nfacevert = obj_mesh.num_face_vertices[face];
         if (nfacevert < 3 || nfacevert > 4) {
-          mju_warning(
+          SetError(
+              error, error_sz,
               "obj_decoder: only tri or quad meshes are supported (file '%s')",
               resource->name);
           mj_deleteSpec(spec);
@@ -108,7 +122,18 @@ mjSpec* Decode(mjResource* resource, const mjVFS* vfs) {
         }
 
         if (!usertexcoord.empty()) {
-          userfacetexcoord.push_back(mesh_index.texcoord_index);
+          if (mesh_index.texcoord_index < 0 ||
+              mesh_index.texcoord_index >=
+                  static_cast<int>(usertexcoord.size() / 2)) {
+            mju_warning(
+                "obj_decoder: invalid or missing face texture coordinate in "
+                "'%s'; discarding texture coordinates",
+                resource->name);
+            usertexcoord.clear();
+            userfacetexcoord.clear();
+          } else {
+            userfacetexcoord.push_back(mesh_index.texcoord_index);
+          }
         }
       }
     } else if (!obj_shape.lines.indices.empty()) {

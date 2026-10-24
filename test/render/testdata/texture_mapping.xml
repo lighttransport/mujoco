@@ -1,0 +1,98 @@
+<mujoco>
+  <asset>
+    <mesh file="bunny.obj" scale="20 20 20"/>
+    <texture file="test-pattern.png" type="2d"/>
+    <texture name="white" type="2d" builtin="flat" rgb1="1 1 1" width="2" height="2"/>
+    <texture name="gray" type="2d"  builtin="flat" rgb1="0.5 0.5 0.5" width="2" height="2"/>
+
+    <material name="phong-f-1-1" texture="test-pattern" texuniform="false" texrepeat="1 1"/>
+    <material name="pbr-f-1-1"                          texuniform="false" texrepeat="1 1">
+      <layer role="rgb" texture="test-pattern"/>
+      <layer role="metallic" texture="white"/>
+      <layer role="roughness" texture="white"/>
+    </material>
+
+    <material name="phong-f-2-2.2" texture="test-pattern" texuniform="false" texrepeat="2 2.2"/>
+    <material name="pbr-f-2-2.2"                          texuniform="false" texrepeat="2 2.2">
+      <layer role="rgb" texture="test-pattern"/>
+      <layer role="metallic" texture="white"/>
+      <layer role="roughness" texture="white"/>
+    </material>
+
+    <material name="phong-f-0.5-0.7" texture="test-pattern" texuniform="false" texrepeat="0.5 0.7"/>
+    <material name="pbr-f-0.5-0.7"                          texuniform="false" texrepeat="0.5 0.7">
+      <layer role="rgb" texture="test-pattern"/>
+      <layer role="metallic" texture="white"/>
+      <layer role="roughness" texture="white"/>
+    </material>
+
+    <material name="phong-t-1-1" texture="test-pattern" texuniform="true" texrepeat="1 1"/>
+    <material name="pbr-t-1-1"                          texuniform="true" texrepeat="1 1">
+      <layer role="rgb" texture="test-pattern"/>
+      <layer role="metallic" texture="white"/>
+      <layer role="roughness" texture="white"/>
+    </material>
+
+    <material name="phong-t-2-2.2" texture="test-pattern" texuniform="true" texrepeat="2 2.2"/>
+    <material name="pbr-t-2-2.2"                          texuniform="true" texrepeat="2 2.2">
+      <layer role="rgb" texture="test-pattern"/>
+      <layer role="metallic" texture="white"/>
+      <layer role="roughness" texture="white"/>
+    </material>
+
+    <material name="phong-t-0.5-0.7" texture="test-pattern" texuniform="true" texrepeat="0.5 0.7"/>
+    <material name="pbr-t-0.5-0.7"                          texuniform="true" texrepeat="0.5 0.7">
+      <layer role="rgb" texture="test-pattern"/>
+      <layer role="metallic" texture="white"/>
+      <layer role="roughness" texture="white"/>
+    </material>
+  </asset>
+
+  <custom>
+    <numeric name="filament.fallback.environment_light_intensity" data="10000"/>
+  </custom>
+
+  <worldbody>
+    <camera name="default" pos="-1.319 -13.531 30.789" xyaxes="1.000 -0.002 0.000 0.002 0.929 0.370"/>
+
+    <geom type="box" size="0.7 1.0 1.2"            material="phong-t-1-1"     pos="-12 -11 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="phong-t-2-2.2"   pos="-12  -7 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="phong-t-0.5-0.7" pos="-12  -3 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="phong-f-1-1"     pos="-12   3 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="phong-f-2-2.2"   pos="-12   7 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="phong-f-0.5-0.7" pos="-12  11 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="pbr-t-1-1"       pos=" -8 -11 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="pbr-t-2-2.2"     pos=" -8  -7 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="pbr-t-0.5-0.7"   pos=" -8  -3 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="pbr-f-1-1"       pos=" -8   3 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="pbr-f-2-2.2"     pos=" -8   7 0"/>
+    <geom type="box" size="0.7 1.0 1.2"            material="pbr-f-0.5-0.7"   pos=" -8  11 0"/>
+
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="phong-t-1-1"     pos=" -4 -11 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="phong-t-2-2.2"   pos=" -4  -7 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="phong-t-0.5-0.7" pos=" -4  -3 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="phong-f-1-1"     pos=" -4   3 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="phong-f-2-2.2"   pos=" -4   7 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="phong-f-0.5-0.7" pos=" -4  11 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="pbr-t-1-1"       pos="  0 -11 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="pbr-t-2-2.2"     pos="  0  -7 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="pbr-t-0.5-0.7"   pos="  0  -3 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="pbr-f-1-1"       pos="  0   3 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="pbr-f-2-2.2"     pos="  0   7 0"/>
+    <geom type="mesh" mesh="bunny" euler="90 0 0"  material="pbr-f-0.5-0.7"   pos="  0  11 0"/>
+
+    <flexcomp name="f00" type="grid" radius="0.01" material="phong-t-1-1"     pos="  4 -11 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f04" type="grid" radius="0.01" material="phong-t-2-2.2"   pos="  4  -7 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f08" type="grid" radius="0.01" material="phong-t-0.5-0.7" pos="  4  -3 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f02" type="grid" radius="0.01" material="phong-f-1-1"     pos="  4   3 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f06" type="grid" radius="0.01" material="phong-f-2-2.2"   pos="  4   7 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f10" type="grid" radius="0.01" material="phong-f-0.5-0.7" pos="  4  11 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f01" type="grid" radius="0.01" material="pbr-t-1-1"       pos="  8 -11 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f05" type="grid" radius="0.01" material="pbr-t-2-2.2"     pos="  8  -7 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f09" type="grid" radius="0.01" material="pbr-t-0.5-0.7"   pos="  8  -3 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f03" type="grid" radius="0.01" material="pbr-f-1-1"       pos="  8   3 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f07" type="grid" radius="0.01" material="pbr-f-2-2.2"     pos="  8   7 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+    <flexcomp name="f11" type="grid" radius="0.01" material="pbr-f-0.5-0.7"   pos="  8  11 0" zaxis="0 0 1" count="6 6 1" mass="1" spacing="0.5 0.6 0.7" dim="2"><edge equality="true" solref="0.15 0.2" stiffness="0" damping="0"/></flexcomp>
+
+  </worldbody>
+</mujoco>

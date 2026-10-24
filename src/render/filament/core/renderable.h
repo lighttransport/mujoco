@@ -90,10 +90,10 @@ class Renderable : public mjrfRenderable {
   std::uint16_t SetBlendOrder(std::uint16_t blend_order);
 
   // Disables this renderable from casting shadows.
-  void SetCastShadows(bool cast_shadows);
+  void SetCastShadows(bool cast_shadow);
 
   // Disables this renderable from receiving shadows.
-  void SetReceiveShadows(bool receive_shadows);
+  void SetReceiveShadows(bool receive_shadow);
 
   // If true, forces this renderable to use wireframe rendering.
   void SetWireframe(bool wireframe);
@@ -134,9 +134,9 @@ class Renderable : public mjrfRenderable {
   // of which instance, as well as other render state, to use with each render
   // request.
   struct DrawState {
-    MaterialManager::MaterialKey material_key;
-    bool cast_shadows = true;
-    bool receive_shadows = true;
+    MaterialManager::MaterialKey material_key = 0;
+    bool cast_shadow = true;
+    bool receive_shadow = true;
     bool wireframe = false;
   };
 
@@ -165,6 +165,7 @@ class Renderable : public mjrfRenderable {
   // transform offset based on the transform of the Renderable itself.
   using GetTransformFn = std::function<filament::math::mat4f(int, const Trs&)>;
 
+  void ClearParts();
   void AppendMesh(const Mesh* mesh);
   void InitPartEntity(Part& part);
   void UpdateTransform();

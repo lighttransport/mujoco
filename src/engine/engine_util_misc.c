@@ -35,35 +35,36 @@
 // check for intersection of two 2D line segments
 static mjtBool is_intersect(const mjtNum* p1, const mjtNum* p2,
                             const mjtNum* p3, const mjtNum* p4) {
-  mjtNum a, b;
+  mjtNum u[2] = {p2[0] - p1[0], p2[1] - p1[1]};
+  mjtNum v[2] = {p4[0] - p3[0], p4[1] - p3[1]};
 
   // compute determinant, check
-  mjtNum det = (p4[1]-p3[1])*(p2[0]-p1[0]) - (p4[0]-p3[0])*(p2[1]-p1[1]);
+  mjtNum det = v[1]*u[0] - v[0]*u[1];
   if (mju_abs(det) < mjMINVAL) {
     return false;
   }
 
   // compute intersection point on each line
-  a = ((p4[0]-p3[0])*(p1[1]-p3[1]) - (p4[1]-p3[1])*(p1[0]-p3[0])) / det;
-  b = ((p2[0]-p1[0])*(p1[1]-p3[1]) - (p2[1]-p1[1])*(p1[0]-p3[0])) / det;
+  mjtNum s = (det > 0 ? 1 : -1);
+  mjtNum w[2] = {p1[0] - p3[0], p1[1] - p3[1]};
+  mjtNum d[2] = {p2[0] - p4[0], p2[1] - p4[1]};
+  mjtNum a0 = (v[0]*w[1] - v[1]*w[0]) * s;
+  mjtNum a1 = (v[0]*d[1] - v[1]*d[0]) * s;
+  mjtNum b0 = (u[0]*w[1] - u[1]*w[0]) * s;
+  mjtNum b1 = (u[0]*d[1] - u[1]*d[0]) * s;
 
-  return ((a >= 0 && a <= 1 && b >= 0 && b <= 1) ? true : false);
+  return (a0 >= 0 && a1 < 0 && b0 >= 0 && b1 < 0);
 }
 
 
 // curve length along circle
 static mjtNum length_circle(const mjtNum* p0, const mjtNum* p1, int ind, mjtNum radius) {
-  mjtNum p0n[2] = {p0[0], p0[1]};
-  mjtNum p1n[2] = {p1[0], p1[1]};
-
   // compute angle between 0 and pi
-  mju_normalize(p0n, 2);
-  mju_normalize(p1n, 2);
-  mjtNum angle = mju_acos(mju_dot(p0n, p1n, 2));
+  mjtNum cross = p0[1]*p1[0] - p0[0]*p1[1];
+  mjtNum angle = mju_atan2(mju_abs(cross), mju_dot(p0, p1, 2));
 
   // flip if necessary
-  mjtNum cross = p0[1]*p1[0]-p0[0]*p1[1];
-  if ((cross > 0 && ind) || (cross < 0 && !ind)) {
+  if (angle > 1e-6 && ((cross > 0 && ind) || (cross < 0 && !ind))) {
     angle = 2*mjPI - angle;
   }
 
@@ -158,7 +159,6 @@ static mjtNum wrap_circle(mjtNum pnt[4], const mjtNum end[4], const mjtNum* side
 static mjtNum wrap_inside(mjtNum pnt[4], const mjtNum end[4], mjtNum radius) {
   // algorithm parameters
   const int maxiter = 20;
-  const mjtNum zinit = 1 - 1e-7;
   const mjtNum tolerance = 1e-6;
 
   // constants
@@ -207,8 +207,9 @@ static mjtNum wrap_inside(mjtNum pnt[4], const mjtNum end[4], mjtNum radius) {
   mjtNum G = mju_acos(cosG);
 
   // init
-  mjtNum z = zinit;
-  mjtNum f = mju_asin(A*z) + mju_asin(B*z) - 2*mju_asin(z) + G;
+  mjtNum phi = mjPI/2;
+  mjtNum z = mju_sin(phi);
+  mjtNum f = mju_asin(A*z) + mju_asin(B*z) - 2*phi + G;
 
   // make sure init is not on the other side
   if (f > 0) {
@@ -219,9 +220,8 @@ static mjtNum wrap_inside(mjtNum pnt[4], const mjtNum end[4], mjtNum radius) {
   int iter;
   for (iter=0; iter < maxiter && mju_abs(f) > tolerance; iter++) {
     // derivative
-    mjtNum df = A/mju_max(mjMINVAL, mju_sqrt(1-z*z*A*A)) +
-                B/mju_max(mjMINVAL, mju_sqrt(1-z*z*B*B)) -
-                2/mju_max(mjMINVAL, mju_sqrt(1-z*z));
+    mjtNum df = mju_cos(phi)*(A/mju_max(mjMINVAL, mju_sqrt(1-z*z*A*A)) +
+                              B/mju_max(mjMINVAL, mju_sqrt(1-z*z*B*B))) - 2;
 
     // check sign; SHOULD NOT OCCUR
     if (df > -mjMINVAL) {
@@ -229,16 +229,17 @@ static mjtNum wrap_inside(mjtNum pnt[4], const mjtNum end[4], mjtNum radius) {
     }
 
     // new point
-    mjtNum z1 = z - f/df;
+    mjtNum phi1 = phi - f/df;
 
     // make sure we are moving to the left; SHOULD NOT OCCUR
-    if (z1 > z) {
+    if (phi1 > phi) {
       return 0;
     }
 
     // update solution
-    z = z1;
-    f = mju_asin(A*z) + mju_asin(B*z) - 2*mju_asin(z) + G;
+    phi = phi1;
+    z = mju_sin(phi);
+    f = mju_asin(A*z) + mju_asin(B*z) - 2*phi + G;
 
     // exit if positive; SHOULD NOT OCCUR
     if (f > tolerance) {
@@ -256,10 +257,10 @@ static mjtNum wrap_inside(mjtNum pnt[4], const mjtNum end[4], mjtNum radius) {
   mjtNum ang;
   if (end[0]*end[3] - end[1]*end[2] > 0) {
     mju_copy(vec, end, 2);
-    ang = mju_asin(z) - mju_asin(A*z);
+    ang = phi - mju_asin(A*z);
   } else {
     mju_copy(vec, end+2, 2);
-    ang = mju_asin(z) - mju_asin(B*z);
+    ang = phi - mju_asin(B*z);
   }
   mju_normalize(vec, 2);
   pnt[0] = radius*(mju_cos(ang)*vec[0] - mju_sin(ang)*vec[1]);
@@ -621,11 +622,13 @@ void mju_evalBasisArray(mjtNum* basis, const mjtNum x[3], int order) {
 //   coord: [0,1]^3 parametric coordinates
 //   cellnum: cell counts (cx, cy, cz)
 //   order: interpolation order (1=trilinear, 2=triquadratic)
-//   local: output local parametric coordinates within cell [0,1]^3
+//   cell: flat cell index (ci*cy*cz + cj*cz + ck), or -1 to compute from coord
+//   local: output local parametric coordinates within cell (extrapolated within [-0.02, 1.02]^3 if
+//          cell differs from the natural cell of coord)
 //   nodeindices: output array of global node indices for the cell (size (order+1)^3, may be NULL)
 //   returns: number of nodes per cell (order+1)^3
-int mju_cellLookup(const mjtNum coord[3], const int cellnum[3], int order, mjtNum local[3],
-                   int* nodeindices) {
+int mju_cellLookup(const mjtNum coord[3], const int cellnum[3], int order, int cell,
+                   mjtNum local[3], int* nodeindices) {
   int cx = cellnum[0], cy = cellnum[1], cz = cellnum[2];
 
   // find containing cell
@@ -636,10 +639,20 @@ int mju_cellLookup(const mjtNum coord[3], const int cellnum[3], int order, mjtNu
   cj = mjMIN(cj, cy - 1); cj = mjMAX(cj, 0);
   ck = mjMIN(ck, cz - 1); ck = mjMAX(ck, 0);
 
-  // local parametric coordinates within cell
-  local[0] = mju_clip(coord[0] * cx - ci, 0, 1);
-  local[1] = mju_clip(coord[1] * cy - cj, 0, 1);
-  local[2] = mju_clip(coord[2] * cz - ck, 0, 1);
+  // if precomputed cell differs from natural cell, redirect and extrapolate within [-0.02, 1.02]
+  if (cell >= 0 && cell != ci * cy * cz + cj * cz + ck) {
+    ck = cell % cz;
+    cj = (cell / cz) % cy;
+    ci = cell / (cy * cz);
+    const mjtNum kMaxExtrap = 0.02;  // must match kSliverMargin in user_flexcomp.cc
+    local[0] = mju_clip(coord[0] * cx - ci, -kMaxExtrap, 1 + kMaxExtrap);
+    local[1] = mju_clip(coord[1] * cy - cj, -kMaxExtrap, 1 + kMaxExtrap);
+    local[2] = mju_clip(coord[2] * cz - ck, -kMaxExtrap, 1 + kMaxExtrap);
+  } else {
+    local[0] = mju_clip(coord[0] * cx - ci, 0, 1);
+    local[1] = mju_clip(coord[1] * cy - cj, 0, 1);
+    local[2] = mju_clip(coord[2] * cz - ck, 0, 1);
+  }
 
   // build node indices for this cell
   if (nodeindices) {
@@ -1986,7 +1999,10 @@ const char* mju_warningText(int warning, size_t info) {
 
   switch ((mjtWarning) warning) {
   case mjWARN_INERTIA:
-    mjSNPRINTF(str, "Inertia matrix is too close to singular at DOF %zu. Check model.", info);
+    mjSNPRINTF(str,
+               "Inertia matrix is too close to singular, or the effective-metric solve failed to "
+               "converge, at DOF %zu. Check model.",
+               info);
     break;
 
   case mjWARN_CONTACTFULL:

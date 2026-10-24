@@ -14,13 +14,13 @@
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_LIBDIR}")
 set(USD_DECODER_SRCS
+    newton_tokens.cc
+    newton_tokens.h
     usd_decoder.cc
     kinematic_tree.cc
     kinematic_tree.h
     material_parsing.cc
     material_parsing.h
-    newton_tokens.cc
-    newton_tokens.h
 )
 
 add_library(usd_decoder_plugin SHARED ${USD_DECODER_SRCS})

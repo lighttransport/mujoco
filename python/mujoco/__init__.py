@@ -37,11 +37,14 @@ _SYSTEM = platform.system()
 if _SYSTEM == 'Windows':
   ctypes.WinDLL(os.path.join(os.path.dirname(__file__), 'mujoco.dll'))
 elif _SYSTEM == 'Darwin':
-  proc_translated = subprocess.run(
-      ['sysctl', '-n', 'sysctl.proc_translated'], capture_output=True).stdout
+  # sysctl is in /usr/sbin, which is not on minimal PATHs (e.g. the
+  # environment Bazel runs tests in), so don't rely on PATH lookup.
   try:
+    proc_translated = subprocess.run(
+        ['/usr/sbin/sysctl', '-n', 'sysctl.proc_translated'],
+        capture_output=True).stdout
     is_rosetta = bool(int(proc_translated))
-  except ValueError:
+  except (OSError, ValueError):
     is_rosetta = False
   if is_rosetta and platform.machine() == 'x86_64':
     raise ImportError(
@@ -63,17 +66,17 @@ import numpy as np
 MJTNUM_DTYPE = np.float32 if MJTNUM_BYTES == 4 else np.float64  # pylint: disable=undefined-variable
 
 try:
-  from mujoco._render import *  # pytype: disable=import-error
+  from mujoco._render import *
 except ImportError:
   pass
 
 try:
-  from mujoco.rendering.classic.renderer import Renderer  # pytype: disable=import-error
+  from mujoco.rendering.classic.renderer import Renderer  # pyrefly: ignore[missing-import]
 except ImportError:
   pass
 
 try:
-  from mujoco.rendering.classic.gl_context import *  # pytype: disable=import-error
+  from mujoco.rendering.classic.gl_context import *  # pyrefly: ignore[missing-import]
 except ImportError:
   pass
 
@@ -112,11 +115,12 @@ def to_zip(spec: _specs.MjSpec, file: Union[str, IO[bytes]]) -> None:
     spec: The mjSpec to save to a file.
     file: The path to the file to save to or the file object to write to.
   """
-  files_to_zip = spec.assets
+  files_to_zip = dict(spec.assets)
   files_to_zip[spec.modelname + '.xml'] = spec.to_xml()
   if isinstance(file, str):
     directory = os.path.dirname(file)
-    os.makedirs(directory, exist_ok=True)
+    if directory:
+      os.makedirs(directory, exist_ok=True)
     file = open(file, 'wb')
   with zipfile.ZipFile(file, 'w') as zip_file:
     for filename, contents in files_to_zip.items():

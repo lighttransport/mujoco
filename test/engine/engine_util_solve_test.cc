@@ -84,54 +84,36 @@ TEST_F(QCQP3Test, DegenerateAMatrix) {
 
 using BoxQPTest = MujocoTest;
 
-// utility: compute QP objective = 0.5*x'*H*x + x'*g
-mjtNum objective(const mjtNum* x, const mjtNum* H, const mjtNum* g, int n) {
-  return 0.5 * mju_mulVecMatVec(x, H, x, n) + mju_dot(x, g, n);
-}
-
 // utility: test if res is the minimum of a given box-QP problem
 bool isQPminimum(const mjtNum* res, const mjtNum* H, const mjtNum* g, int n,
                  const mjtNum* lower, const mjtNum* upper) {
   const mjtNum eps = MjEps(1e-4, 5e-2);      // epsilon used for nudging
   const mjtNum threshold = MjTol(0, -2e-3);  // comparison threshold
-  bool is_minimum = true;
-  mjtNum* res_nudge = (mjtNum*)mju_malloc(sizeof(mjtNum) * n);
-
-  // get solution value
-  mjtNum value = objective(res, H, g, n);
-  mjtNum value_nudge;
-
-  // compare to nudged solution
-  mju_copy(res_nudge, res, n);
   for (int i = 0; i < n; i++) {
+    mjtNum grad_i = mju_dot(H + i * n, res, n) + g[i];
+    mjtNum Hii = H[i * n + i];
+
     // nudge down
-    res_nudge[i] = res[i] - eps;
+    mjtNum lo = res[i] - eps;
     if (lower) {
-      res_nudge[i] = mju_max(lower[i], res_nudge[i]);
+      lo = mju_max(lower[i], lo);
     }
-    value_nudge = objective(res_nudge, H, g, n);
-    if (value_nudge - value < threshold) {
-      is_minimum = false;
-      break;
+    mjtNum dlo = lo - res[i];
+    if (dlo * grad_i + 0.5 * Hii * dlo * dlo < threshold) {
+      return false;
     }
 
     // nudge up
-    res_nudge[i] = res[i] + eps;
+    mjtNum hi = res[i] + eps;
     if (upper) {
-      res_nudge[i] = mju_min(upper[i], res_nudge[i]);
+      hi = mju_min(upper[i], hi);
     }
-    value_nudge = objective(res_nudge, H, g, n);
-    if (value_nudge - value < threshold) {
-      is_minimum = false;
-      break;
+    mjtNum dhi = hi - res[i];
+    if (dhi * grad_i + 0.5 * Hii * dhi * dhi < threshold) {
+      return false;
     }
-
-    // reset
-    res_nudge[i] = res[i];
   }
-
-  mju_free(res_nudge);
-  return is_minimum;
+  return true;
 }
 
 // utility: define QP with pseudorandom values
@@ -353,12 +335,6 @@ TEST_F(BoxQPTest, BoundedQP) {
 
 // test mju_boxQP on a set of random bounded QPs
 TEST_F(BoxQPTest, BoundedQPvariations) {
-  if constexpr (sizeof(mjtNum) == sizeof(float)) {
-    GTEST_SKIP()
-        << "BoxQP test permutations contain ill-conditioned matrices which "
-           "natively fail to find descent directions under float32 precision";
-  }
-
   int nmax = 100;
 
   // allocate maximum size on heap
@@ -407,7 +383,8 @@ TEST_F(BoxQPTest, BoundedQPvariations) {
               << "n " << n << '\n'
               << "scaleH " << scaleH << '\n'
               << "scaleg " << scaleg << '\n'
-              << "scalebounds " << scalebounds << '\n';
+              << "scalebounds " << scalebounds << '\n'
+              << log;
 
           // wrap log with string, count factorizations
           string slog(log);
@@ -1101,7 +1078,128 @@ TEST_F(EngineUtilSolveTest, CholFactorSymbolicNumeric) {
   }
 }
 
+// A pivot lost to rounding leaves its row's coupling in place. The clamp must
+// decouple the row, as mju_cholFactor does: dividing the coupling by
+// sqrt(mindiag) would drive every later pivot of the factorization negative.
+TEST_F(EngineUtilSolveTest, CholFactorNumericClampDecouples) {
+  MjModelPtr model = LoadModelFromString("<mujoco/>");
+  MjDataPtr d = MakeData(model);
+
+  // reverse elimination: row 2 has pivot 1, leaving row 1 with pivot 0 and
+  // coupling 0.5 to row 0, whose pivot is 1 once row 1 is decoupled
+  constexpr int n = 3;
+  mjtNum H[n * n] = {1, .5, 0, .5, 1, 1, 0, 1, 1};
+  mjtNum sparseH[n * n];
+  int H_rownnz[n], H_rowadr[n], H_colind[n * n];
+  mju_dense2sparse(sparseH, H, n, n, H_rownnz, H_rowadr, H_colind, n * n);
+
+  // symbolic factorization
+  int L_rownnz[n], L_rowadr[n], LT_rownnz[n], LT_rowadr[n];
+  int nnz = mju_cholFactorSymbolic(nullptr, L_rownnz, L_rowadr, nullptr,
+                                   LT_rownnz, LT_rowadr, nullptr, H_rownnz,
+                                   H_rowadr, H_colind, n, d.get());
+  int L_colind[n * n], LT_colind[n * n], LT_map[n * n];
+  mju_cholFactorSymbolic(L_colind, L_rownnz, L_rowadr, LT_colind, LT_rownnz,
+                         LT_rowadr, LT_map, H_rownnz, H_rowadr, H_colind, n,
+                         d.get());
+
+  // numeric factorization: only row 1 is clamped
+  mjtNum L[n * n], scratch[n];
+  int rank = mju_cholFactorNumeric(
+      L, n, mjMINVAL, L_rownnz, L_rowadr, L_colind, LT_rownnz, LT_rowadr,
+      LT_colind, LT_map, sparseH, H_rownnz, H_rowadr, H_colind, scratch);
+  EXPECT_EQ(rank, n - 1);
+
+  // row 1 is decoupled: clamped diagonal, zero off-diagonals
+  int adr1 = L_rowadr[1], nnz1 = L_rownnz[1];
+  EXPECT_EQ(L[adr1 + nnz1 - 1], mju_sqrt(mjMINVAL));
+  for (int i = 0; i < nnz1 - 1; i++) {
+    EXPECT_EQ(L[adr1 + i], 0);
+  }
+
+  // row 0 keeps its pivot, every entry is bounded
+  EXPECT_EQ(L[L_rowadr[0] + L_rownnz[0] - 1], 1);
+  for (int i = 0; i < nnz; i++) {
+    EXPECT_LE(mju_abs(L[i]), 1) << "entry " << i;
+  }
+}
+
 // ----------------------------- dense LU --------------------------------------
+
+// mju_cholFactorSymbolicBlocked on a block pattern computes the same arrays,
+// entry for entry, as mju_cholFactorSymbolic on the expanded dof pattern
+TEST_F(EngineUtilSolveTest, CholFactorSymbolicBlocked) {
+  std::mt19937 rng(7);
+  for (int bs = 1; bs <= 3; bs++) {
+    for (int trial = 0; trial < 20; trial++) {
+      int nb = 1 + trial;
+      std::uniform_real_distribution<double> unif(0, 1);
+      double density = trial % 2 ? 0.15 : 0.4;
+
+      // a random symmetric block pattern, columns ascending, diagonal listed
+      // on odd trials only
+      vector<vector<int>> rows(nb);
+      vector<vector<bool>> adj(nb, vector<bool>(nb, false));
+      for (int p = 0; p < nb; p++) {
+        for (int q = p + 1; q < nb; q++) {
+          if (unif(rng) < density) adj[p][q] = adj[q][p] = true;
+        }
+      }
+      vector<int> rownnz(nb), rowadr(nb), colind;
+      for (int p = 0; p < nb; p++) {
+        rowadr[p] = colind.size();
+        for (int q = 0; q < nb; q++) {
+          if (adj[p][q] || (q == p && trial % 2)) colind.push_back(q);
+        }
+        rownnz[p] = colind.size() - rowadr[p];
+      }
+
+      // the expanded dof pattern: dense blocks, dense diagonal blocks
+      int n = bs * nb;
+      vector<int> drownnz(n), drowadr(n), dcolind;
+      for (int r = 0; r < n; r++) {
+        drowadr[r] = dcolind.size();
+        for (int c = 0; c < n; c++) {
+          if (r / bs == c / bs || adj[r / bs][c / bs]) dcolind.push_back(c);
+        }
+        drownnz[r] = dcolind.size() - drowadr[r];
+      }
+
+      // counting
+      vector<int> L_rownnz(n), L_rowadr(n), LT_rownnz(n), LT_rowadr(n);
+      vector<int> bL_rownnz(n), bL_rowadr(n), bLT_rownnz(n), bLT_rowadr(n);
+      vector<int> scratch(3 * nb);
+      int nnz = mju_cholFactorSymbolic(
+          nullptr, L_rownnz.data(), L_rowadr.data(), nullptr, LT_rownnz.data(),
+          LT_rowadr.data(), nullptr, drownnz.data(), drowadr.data(),
+          dcolind.data(), n, nullptr);
+      int bnnz = mju_cholFactorSymbolicBlocked(
+          nullptr, bL_rownnz.data(), bL_rowadr.data(), nullptr,
+          bLT_rownnz.data(), bLT_rowadr.data(), nullptr, rownnz.data(),
+          rowadr.data(), colind.data(), nb, bs, scratch.data());
+      ASSERT_EQ(bnnz, nnz) << "bs " << bs << " trial " << trial;
+      EXPECT_EQ(bL_rownnz, L_rownnz);
+      EXPECT_EQ(bL_rowadr, L_rowadr);
+      EXPECT_EQ(bLT_rownnz, LT_rownnz);
+      EXPECT_EQ(bLT_rowadr, LT_rowadr);
+
+      // filling
+      vector<int> L_colind(nnz), LT_colind(nnz), LT_map(nnz);
+      vector<int> bL_colind(nnz), bLT_colind(nnz), bLT_map(nnz);
+      mju_cholFactorSymbolic(L_colind.data(), L_rownnz.data(), L_rowadr.data(),
+                             LT_colind.data(), LT_rownnz.data(),
+                             LT_rowadr.data(), LT_map.data(), drownnz.data(),
+                             drowadr.data(), dcolind.data(), n, nullptr);
+      mju_cholFactorSymbolicBlocked(
+          bL_colind.data(), L_rownnz.data(), L_rowadr.data(), bLT_colind.data(),
+          LT_rownnz.data(), LT_rowadr.data(), bLT_map.data(), rownnz.data(),
+          rowadr.data(), colind.data(), nb, bs, scratch.data());
+      EXPECT_EQ(bL_colind, L_colind) << "bs " << bs << " trial " << trial;
+      EXPECT_EQ(bLT_colind, LT_colind) << "bs " << bs << " trial " << trial;
+      EXPECT_EQ(bLT_map, LT_map) << "bs " << bs << " trial " << trial;
+    }
+  }
+}
 
 using DenseLUTest = MujocoTest;
 
@@ -1306,6 +1404,119 @@ TEST_F(DenseLUTest, ZeroDiagonal) {
   mju_mulMatVec(Ax, A_orig, x, n, n);
   mjtNum eps = MjTol(1e-14, 1e-6);
   EXPECT_THAT(AsVector(Ax, n), Pointwise(MjNear(eps, eps), AsVector(b, n)));
+}
+
+// --------------------------------- mju_eig3 ----------------------------------
+
+using Eig3Test = MujocoTest;
+
+// residuals of the decomposition mat = eigvec * diag(eigval) * eigvec':
+// reconstruction error relative to the largest element of mat, and deviation of
+// eigvec from orthonormality
+static void Eig3Residual(mjtNum* recon, mjtNum* orth, const mjtNum mat[9],
+                         const mjtNum eigval[3], const mjtNum eigvec[9]) {
+  mjtNum scale = 0;
+  for (int i = 0; i < 9; i++) scale = mju_max(scale, mju_abs(mat[i]));
+
+  *recon = *orth = 0;
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      mjtNum A = 0, I = 0;
+      for (int k = 0; k < 3; k++) {
+        A += eigvec[3 * i + k] * eigval[k] * eigvec[3 * j + k];
+        I += eigvec[3 * k + i] * eigvec[3 * k + j];
+      }
+      *recon = mju_max(*recon, mju_abs(A - mat[3 * i + j]) / scale);
+      *orth = mju_max(*orth, mju_abs(I - (i == j)));
+    }
+  }
+}
+
+// the decomposition converges to roundoff, whatever the scale of the matrix
+TEST_F(Eig3Test, ConvergesAtAnyScale) {
+  for (mjtNum scale : {1e-15, 1.0, 1e15}) {
+    mjtNum mat[9] = {2, .1, .2, .1, 3, .3, .2, .3, 4};
+    mju_scl(mat, mat, scale, 9);
+
+    mjtNum eigval[3], eigvec[9], quat[4];
+    EXPECT_LT(mju_eig3(eigval, eigvec, quat, mat), 20);
+
+    // eigenvalues are decreasing
+    EXPECT_GT(eigval[0], eigval[1]);
+    EXPECT_GT(eigval[1], eigval[2]);
+
+    mjtNum recon, orth;
+    Eig3Residual(&recon, &orth, mat, eigval, eigvec);
+    EXPECT_LE(recon, MjTol(1e-13, 3e-5)) << "scale " << scale;
+    EXPECT_LE(orth, MjTol(5e-14, 5e-6)) << "scale " << scale;
+  }
+}
+
+// repeated and nearly repeated eigenvalues, where the Jacobi rotation is
+// ill-defined, converge in a few iterations
+TEST_F(Eig3Test, RepeatedEigenvalues) {
+  std::mt19937_64 rng;
+  rng.seed(3);
+  std::normal_distribution<double> dist(0, 1);
+
+  const mjtNum eps = std::numeric_limits<mjtNum>::epsilon();
+  const mjtNum spectrum[4][3] = {
+      {3, 1, 1}, {3, 3, 1}, {1, 1, 1}, {1 + 100 * eps, 1, 1 - 100 * eps}};
+
+  for (const mjtNum* w : spectrum) {
+    int max_iter = 0;
+    mjtNum max_recon = 0;
+    for (int n = 0; n < 1000; n++) {
+      // random rotation
+      mjtNum R[9], q[4] = {(mjtNum)dist(rng), (mjtNum)dist(rng),
+                           (mjtNum)dist(rng), (mjtNum)dist(rng)};
+      mju_normalize4(q);
+      mju_quat2Mat(R, q);
+
+      // mat = R * diag(w) * R', exactly symmetric
+      mjtNum mat[9];
+      for (int i = 0; i < 3; i++) {
+        for (int j = i; j < 3; j++) {
+          mat[3 * i + j] = mat[3 * j + i] = R[3 * i] * w[0] * R[3 * j] +
+                                            R[3 * i + 1] * w[1] * R[3 * j + 1] +
+                                            R[3 * i + 2] * w[2] * R[3 * j + 2];
+        }
+      }
+
+      mjtNum eigval[3], eigvec[9], quat[4], recon, orth;
+      max_iter = mjMAX(max_iter, mju_eig3(eigval, eigvec, quat, mat));
+      Eig3Residual(&recon, &orth, mat, eigval, eigvec);
+      max_recon = mju_max(max_recon, recon);
+    }
+    EXPECT_LT(max_iter, 20)
+        << "spectrum " << w[0] << " " << w[1] << " " << w[2];
+    EXPECT_LE(max_recon, MjTol(1e-13, 3e-5))
+        << "spectrum " << w[0] << " " << w[1] << " " << w[2];
+  }
+}
+
+// a loose tolerance stops early: off-diagonal elements are below the tolerance
+// and eigvec is orthonormal, as the broadphase requires of its frame
+TEST_F(Eig3Test, Tolerance) {
+  const mjtNum mat[9] = {2, .1, .2, .1, 3, .3, .2, .3, 4};
+  const mjtNum reltol = 1e-3;
+
+  mjtNum eigval[3], eigvec[9], quat[4];
+  int tight = mju_eig3(eigval, eigvec, quat, mat);
+  int loose = mju_eig3Tol(eigval, eigvec, quat, mat, reltol);
+  EXPECT_LT(loose, tight);
+
+  // D = eigvec' * mat * eigvec
+  mjtNum tmp[9], D[9];
+  mju_mulMatTMat(tmp, eigvec, mat, 3, 3, 3);
+  mju_mulMatMat(D, tmp, eigvec, 3, 3, 3);
+  EXPECT_LE(mju_abs(D[1]), reltol * 4);
+  EXPECT_LE(mju_abs(D[2]), reltol * 4);
+  EXPECT_LE(mju_abs(D[5]), reltol * 4);
+
+  mjtNum recon, orth;
+  Eig3Residual(&recon, &orth, mat, eigval, eigvec);
+  EXPECT_LE(orth, MjTol(5e-14, 5e-6));
 }
 
 }  // namespace

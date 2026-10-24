@@ -90,6 +90,36 @@ will appear in the reference documentation as
       <p style="display: none"></p>
 
 
+.. _CDimension:
+
+Attribute dimensions
+~~~~~~~~~~~~~~~~~~~~
+
+MuJoCo does not fix a system of units, see :ref:`Units`. The table below gives the physical dimension of every
+real-valued attribute in terms of length :math:`L`, mass :math:`M` and time :math:`T`, and the symbols
+
+============ ===========================================================================================================
+:math:`A`    Plane angle, dimensionless. Orientations and the :at:`range`, :at:`ref` and :at:`springref` of hinge and
+             ball joints are read in the unit set by :ref:`compiler/angle<compiler-angle>`. Other angles are radians,
+             unless their description says otherwise.
+:math:`Q`    The coordinate of the joint, tendon or actuator transmission: an angle for hinge and ball joints, a length
+             for slide joints and spatial tendons. The coordinate of a :ref:`fixed tendon<tendon-fixed>` is
+             :ref:`coef<fixed-joint-coef>` times the coordinates of its joints.
+:math:`F`    The generalized force conjugate to :math:`Q`, of dimension :math:`M\,L^2\,T^{-2}\,Q^{-1}`: a torque when
+             :math:`Q` is an angle, a force when it is a length.
+============ ===========================================================================================================
+
+Integer attributes are counts, indices or flags, and dimensionless. Raw asset data is in the asset's own units:
+mesh :at:`vertex` and :at:`refpos` and flexcomp :at:`point` and :at:`origin` are dimensionless, and :at:`scale`,
+which converts them to lengths, has dimension :math:`L`. A dimension marked *varies* depends on other attributes of the
+element, for example the outputs selected by a sensor's :at:`data`; *other* marks quantities not expressible in these
+terms, such as user data and the electrical parameters of :ref:`dcmotor<actuator-dcmotor>`.
+
+.. collapse:: Dimensions of all attributes
+
+   .. include:: XMLunits.rst
+
+
 .. _CXSD:
 
 XSD schema
@@ -154,9 +184,8 @@ exceptions:
    objects that the tendon passes through or wraps around.
 -  The order of repeated sections matters when the same attribute is set multiple times to different values. In that
    case the last setting takes effect for the entire model.
--  The order of multiple actuator shortcuts in the same defaults class matters, because each shortcut sets the
-   attributes of the single :ref:`general <actuator-general>` element in that defaults class, overriding the previous
-   settings.
+-  The order of multiple actuator elements in the same defaults class matters, because a class has a single actuator
+   default and each shortcut resets its gain, bias and dynamics parameters; see :ref:`CActShortcuts`.
 
 In the remainder of this chapter we describe all valid MJCF elements and their attributes. Some elements can be used in
 multiple contexts, in which case their meaning depends on the parent element. This is why we always show the parent as a
@@ -169,7 +198,8 @@ Meta elements
 
 These elements are not strictly part of the low-level MJCF format definition, but rather instruct the compiler to
 perform some operation on the model. A general property of meta-elements is that they disappear from the model upon
-saving the XML. There are currently six meta-elements in MJCF:
+saving the XML; the exception is :ref:`frame<frame>`, which is preserved. There are currently six meta-elements in
+MJCF:
 
 - :ref:`include<include>`, :ref:`frame<frame>`, and :ref:`replicate<replicate>` which are outside of the schema.
 - :ref:`composite<body-composite>`, :ref:`flexcomp<body-flexcomp>` and :ref:`attach<body-attach>` which are part of the
@@ -181,46 +211,10 @@ saving the XML. There are currently six meta-elements in MJCF:
 ^^^^^^^^^^^^^
 
 The frame meta-element is a pure coordinate transformation that can wrap any group of elements in the kinematic tree
-(under :ref:`worldbody<body>`). After compilation, frame elements disappear and their transformation is accumulated
-in their direct children. The attributes of the frame meta-element are documented :ref:`below<body-frame>`.
-
-.. collapse:: Usage example of frame
-
-   Loading this model and saving it:
-
-   .. code-block:: xml
-
-      <mujoco>
-        <worldbody>
-          <frame quat="0 0 1 0">
-             <geom name="Alice" quat="0 1 0 0" size="1"/>
-          </frame>
-
-          <frame pos="0 1 0">
-            <geom name="Bob" pos="0 1 0" size="1"/>
-            <body name="Carl" pos="1 0 0">
-              ...
-            </body>
-          </frame>
-        </worldbody>
-      </mujoco>
-
-   Results in this model:
-
-   .. code-block:: xml
-
-      <mujoco>
-        <worldbody>
-          <geom name="Alice" quat="0 0 0 1" size="1"/>
-          <geom name="Bob" pos="0 2 0" size="1"/>
-          <body name="Carl" pos="1 1 0">
-            ...
-          </body>
-        </worldbody>
-      </mujoco>
-
-   Note that in the saved model, the frame elements have disappeared but their transformation was accumulated with those
-   of their child elements.
+(under :ref:`worldbody<body>`). At compile time the transformation is accumulated into the frame's direct children;
+frames have no counterpart in :ref:`mjModel`. Unlike the other meta-elements, frames are preserved when the model is
+saved: the frame is written with its pose and its contents in frame-relative coordinates, so a saved model reloads
+with the same frames. The attributes of the frame meta-element are documented :ref:`below<body-frame>`.
 
 .. _replicate:
 
@@ -234,11 +228,13 @@ replicating 200 times, suffixes will be ``000, 001, ...`` etc). All referencing 
 and namespaced appropriately. Detailed examples of models using replicate can be found in the
 `model/replicate/ <https://github.com/google-deepmind/mujoco/tree/main/model/replicate>`__ directory.
 
-There are some caveats concerning :ref:`keyframes<keyframe>` when using replicate. Since :ref:`mjs_attach` is used to
-self-attach multiple times the enclosed kinematic tree, if this tree contains further :ref:`attach<body-attach>`
-elements, keyframes will not be replicated nor namespaced by :ref:`replicate<replicate>`, but they will be attached and
-namespaced once by the innermost call of :ref:`mjs_attach`. See the limitations discussed in
-:ref:`attachment<meAttachment>`.
+Direct children of replicate are replicated into its parent body. Joints are therefore not allowed as direct children;
+wrap them in a :ref:`body<body>`.
+
+:ref:`Keyframes<keyframe>` are not replicated: a keyframe describes the model with all replicas in place, so its vectors
+follow the layout of the compiled model. If the enclosed tree contains :ref:`attach<body-attach>` elements, the
+keyframes of the attached model are added once, namespaced by the :el:`attach` element only, and set the state of the
+first replica. See the limitations discussed in :ref:`attachment<meAttachment>`.
 
 .. _replicate-count:
 
@@ -481,7 +477,8 @@ adjust it properly through the XML.
    gradient norm. For Newton, it is additionally applied to the Newton decrement :math:`\tfrac{1}{2} g^T H^{-1} g`, the
    predicted cost improvement of the next iteration. Before the first iteration, CG and Newton also apply it to a
    :ref:`convergence certificate<soAlgorithms>` of the warmstarted solution, possibly terminating with zero iterations.
-   Set the tolerance to 0 to disable early termination.
+   The cost improvement and the gradient are scaled by the inverse trace of the inertia matrix, of the whole model or
+   of a constraint :ref:`island<soIsland>`. Set the tolerance to 0 to disable early termination.
 
 .. _option-ls_iterations:
 
@@ -510,7 +507,7 @@ adjust it properly through the XML.
 
 .. _option-ccd_iterations:
 
-:at:`ccd_iterations`: :at-val:`int, "50"`
+:at:`ccd_iterations`: :at-val:`int, "35"`
    Maximum number of iterations of the algorithm used for convex collisions. This rarely needs to be adjusted,
    except in situations where some geoms have very large aspect ratios.
 
@@ -591,7 +588,7 @@ from its default.
 .. _option-flag-spring:
 
 :at:`spring`: :at-val:`[disable, enable], "enable"`
-   This flag disables passive joint and tendon springs. If passive :ref:`damper <option-flag-damper>` forces are
+   This flag disables passive joint, tendon and flex springs. If passive :ref:`damper <option-flag-damper>` forces are
    also disabled, **all** passive forces are disabled, including gravity compensation, fluid forces, forces computed by
    the :ref:`mjcb_passive` callback, and forces computed by :ref:`plugins <exPlugin>` when passed the
    :ref:`mjPLUGIN_PASSIVE<mjtPluginCapabilityBit>` capability flag.
@@ -599,9 +596,9 @@ from its default.
 .. _option-flag-damper:
 
 :at:`damper`: :at-val:`[disable, enable], "enable"`
-   This flag disables passive joint and tendon dampers. If passive :ref:`spring <option-flag-spring>` forces are also
-   disabled, **all** passive forces are disabled, including gravity compensation, fluid forces, forces computed by the
-   :ref:`mjcb_passive` callback, and forces computed by :ref:`plugins <exPlugin>` when passed the
+   This flag disables passive joint, tendon and flex dampers. If passive :ref:`spring <option-flag-spring>` forces are
+   also disabled, **all** passive forces are disabled, including gravity compensation, fluid forces, forces computed by
+   the :ref:`mjcb_passive` callback, and forces computed by :ref:`plugins <exPlugin>` when passed the
    :ref:`mjPLUGIN_PASSIVE<mjtPluginCapabilityBit>` capability flag.
 
 .. _option-flag-gravity:
@@ -832,11 +829,12 @@ has any effect. The settings here are global and apply to the entire model.
 .. _compiler-settotalmass:
 
 :at:`settotalmass`: :at-val:`real, "-1"`
-   If this value is positive, the compiler will scale the masses and inertias of all bodies in the model, so that the
-   total mass equals the value specified here. The world body has mass 0 and does not participate in any mass-related
-   computations. This scaling is performed last, after all other operations affecting the body mass and inertia. The
-   same scaling operation can be applied at runtime to the compiled mjModel with the function
-   :ref:`mj_setTotalmass`.
+   This attribute is deprecated and will be removed in a future release; compiling a model which sets it gives a
+   warning. If this value is positive, the compiler will scale the masses and inertias of all bodies in the model, so
+   that the total mass equals the value specified here. The world body has mass 0 and does not participate in any
+   mass-related computations. This scaling is performed last, after all other operations affecting the body mass and
+   inertia. The same scaling operation can be applied at runtime to the compiled mjModel with the function
+   :ref:`mj_setTotalmass`, followed by :ref:`mj_setConst`.
 
 .. _compiler-balanceinertia:
 
@@ -917,18 +915,24 @@ has any effect. The settings here are global and apply to the entire model.
    This attribute instructs the compiler to discard all model elements which are purely visual and have no effect on the
    physics (with one exception, see below). This often enables smaller :ref:`mjModel` structs and faster simulation.
 
-   - All materials are discarded.
-   - All textures are discarded.
+   - All materials and textures are discarded, unless they are referenced by a sensor or a custom
+     :ref:`tuple<custom-tuple>`.
    - All geoms with :ref:`contype<body-geom-contype>` |-| = |-| :ref:`conaffinity<body-geom-conaffinity>` |-| =0 are
-     discarded, if they are not referenced in another MJCF element. If a discarded geom was used for inferring body
-     inertia, an explicit :ref:`inertial<body-inertial>` element is added to the body.
-   - All meshes which are not referenced by any geom (in particular those discarded above) are discarded.
+     discarded, if they are not referenced in another MJCF element and do not use the ellipsoid
+     :ref:`fluid model<body-geom-fluidshape>`. If a discarded geom was used for inferring body inertia, an explicit
+     :ref:`inertial<body-inertial>` element is added to the body. This is not possible when
+     :ref:`inertiafromgeom<compiler-inertiafromgeom>` is "true", which is then a compilation error.
+   - All meshes which are not used by a remaining geom or by a site, and are not referenced in another MJCF element,
+     are discarded (in particular those of the geoms discarded above).
 
    The resulting compiled model will have exactly the same dynamics as the original model. The only engine-level
    computation which might change is the output of :ref:`raycasting<mj_ray>` computations, as used for example by
    :ref:`rangefinder<sensor-rangefinder>` sensors, since raycasting reports distances to visual geoms. When visualizing
    models compiled with this flag, it is important to remember that collision geoms are often placed in a
    :ref:`group<body-geom-group>` which is invisible by default.
+
+   Discarding is an operation on the model itself, :ref:`mjs_discardVisual`, which is applied before compiling. A model
+   which is saved or compiled again afterwards is the one without the visual elements.
 
 .. _compiler-usethread:
 
@@ -944,6 +948,19 @@ has any effect. The settings here are global and apply to the entire model.
 
    - They are referenced by another element in the model.
    - They contain a site which is referenced by a :ref:`force<sensor-force>` or :ref:`torque<sensor-torque>` sensor.
+   - Their :ref:`fuse<body-fuse>` attribute is "false".
+   - They have a :ref:`plugin<body-plugin>` or a :ref:`sleep<body-sleep>` policy.
+   - They have mass, and either a :ref:`gravcomp<body-gravcomp>` different from that of their parent, or the model is in
+     a fluid (non-zero :ref:`density<option-density>` or :ref:`viscosity<option-viscosity>`); in a fluid, bodies with
+     an ellipsoid-fluid geom are kept too.
+   - :ref:`inertiafromgeom<compiler-inertiafromgeom>` is "true" and the compiler adjusted their inertia or their
+     parent's (:ref:`boundmass<compiler-boundmass>`, :ref:`boundinertia<compiler-boundinertia>`,
+     :ref:`balanceinertia<compiler-balanceinertia>`), so that the geoms of both in one body would have a different
+     inertia.
+
+   Fusing is an operation on the model itself, :ref:`mjs_fuseStatic`, which is applied before compiling: each fused
+   body becomes a :ref:`frame<frame>` in its parent. A model which is saved or compiled again afterwards is the fused
+   one.
 
    This optimization is particularly useful when importing URDF models which often have many dummy bodies, but can also
    be used to optimize MJCF models. After optimization, the new model has identical kinematics and dynamics as the
@@ -987,6 +1004,24 @@ has any effect. The settings here are global and apply to the entire model.
 :at:`saveinertial`: :at-val:`[false, true], "false"`
    If set to "true", the compiler will save explicit :ref:`inertial <body-inertial>` clauses for all bodies.
 
+.. _compiler-savecompiled:
+
+:at:`savecompiled`: :at-val:`[false, true], "true"`
+   This attribute and the next one say how the model is saved as MJCF; like :at:`saveinertial`, they are not saved
+   themselves. If "true", the values which compilation made of the model are saved: for example the size of a geom
+   which was fitted to a mesh, or the pose of a body after :ref:`alignment<compiler-alignfree>` with its free joint.
+   If "false", the model is saved as it is written in the :ref:`mjSpec`, and the saved file compiles to the same
+   model; the spec need not have been compiled.
+
+.. _compiler-savecanonical:
+
+:at:`savecanonical`: :at-val:`[false, true], "true"`
+   If "true", orientations are saved as quaternions, angles in radians, sizes and poses which were given with
+   :at:`fromto` as :at:`size`, :at:`pos` and :at:`quat`, a :at:`fullinertia` as :at:`diaginertia` and :at:`quat`, and
+   every actuator as :el:`general`. If "false", they are saved in the notation in which they were written. This
+   attribute has an effect only if :ref:`savecompiled<compiler-savecompiled>` is "false": compiled values are always
+   saved in the canonical notation.
+
 .. _compiler-conflict:
 
 :at:`conflict`: :at-val:`[warning, merge, error], "warning"`
@@ -1007,6 +1042,18 @@ has any effect. The settings here are global and apply to the entire model.
    :at-val:`error`
       Any conflict between authored values results in a compile error. This is the strictest mode and is useful for
       detecting unintended attribute mismatches.
+
+.. _compiler-passthrough:
+
+:at:`passthrough`: :at-val:`[none, textures], "none"`
+   Which assets the compiler leaves :ref:`by reference<CAssetReference>` instead of loading into :ref:`mjModel`. With
+   "textures", a texture loaded from a single file is not read: the model holds its resolved path and the parameters a
+   consumer needs to load it, and no pixels. Textures which the compiler would transform (flipped, composite
+   :ref:`grids<asset-texture-gridsize>`, six :ref:`separate files<asset-texture-fileright>`), procedural textures,
+   textures given as a buffer and files served from memory by a :ref:`virtual file system<Virtualfilesystem>` stay
+   embedded. The per-texture :ref:`embed<asset-texture-embed>` attribute overrides this policy. The policy is that of
+   the model being compiled, so it also applies to the textures of :ref:`attached<body-attach>` models. Only textures
+   can be by reference for now; other asset types will be added to the list of values.
 
 .. _compiler-lengthrange:
 
@@ -1032,7 +1079,8 @@ disable length range computations altogether, include this element and set mode=
    value will be used and the automatic computation will be skipped. The range is considered defined if the first number
    is smaller than the second number. The only reason to set this attribute to "false" is to force re-computation of
    actuator length ranges - which is needed when the model geometry is modified. Note that the automatic computation
-   relies on simulation and can be slow, so saving the model and using the existing values when possible is recommended.
+   relies on simulation and can be slow, so saving the model with the values which compilation made
+   (:ref:`savecompiled<compiler-savecompiled>`) and using the existing values when possible is recommended.
 
 .. _compiler-lengthrange-uselimit:
 
@@ -1117,7 +1165,9 @@ compilation.
    This attribute specifies the size of memory allocated for dynamic arrays in the ``mjData.arena`` memory space, in
    bytes. The default setting of ``-1`` instructs the compiler to guess how much space to allocate. Appending the digits
    with one of the letters {K, M, G, T, P, E} sets the unit to be {kilo, mega, giga, tera, peta, exa}-byte,
-   respectively. Thus "16M" means "allocate 16 megabytes of ``arena`` memory".
+   respectively. Thus "16M" means "allocate 16 megabytes of ``arena`` memory". If the Newton solver runs out of
+   ``arena`` memory while building its Hessian or Cholesky factor (for example under heavy flex contact fill-in), it
+   raises ``mjWARN_CNSTRFULL`` and falls back to CG for that step; increase ``memory`` if this warning persists.
    See the :ref:`Memory allocation <CSize>` section for details.
 
 .. _size-njmax:
@@ -1218,9 +1268,11 @@ parameters.
 .. _statistic-meaninertia:
 
 :at:`meaninertia`: :at-val:`real, optional`
-   If this attribute is specified, it replaces the value of mjModel.stat.meaninertia computed by the compiler. The
-   computed value is the average diagonal element of the joint-space inertia matrix when the model is in qpos0. At
-   runtime this value scales the solver cost and gradient used for early termination.
+   This attribute is deprecated and will be removed in a future release; compiling a model which sets it gives a
+   warning. If it is specified, it replaces the value of mjModel.stat.meaninertia computed by the compiler. The
+   computed value is the average diagonal element of the joint-space inertia matrix when the model is in qpos0. It
+   does not affect simulation: the solvers scale their termination criteria by the trace of the current inertia
+   matrix, see :ref:`tolerance<option-tolerance>`.
 
 .. _statistic-meansize:
 
@@ -1577,11 +1629,58 @@ The full list of processing steps applied by the compiler to each mesh is as fol
       **res_x**: integer > 0: The horizontal resolution of the plate.
       |br| **res_y**: integer > 0: The vertical resolution of the plate.
 
+   :at-val:`grid` (count[3], spacing[3], [dim])
+      A regular grid of vertices. If ``dim`` is 3 (default), creates a volumetric tetrahedral mesh. If ``dim`` is 2,
+      creates a triangulated 2D surface mesh.
+
+      **count**: 3 integers > 0: Number of vertices along each axis; must be 1 along the axes beyond ``dim``.
+      |br| **spacing**: 3 reals: Spacing between grid points along each axis.
+      |br| **dim**: optional integer in [2, 3] (default 3): Mesh dimensionality.
+
+   :at-val:`box` (count[3], spacing[3], [dim])
+      A procedural box mesh. If ``dim`` is 3 (default), creates a volumetric tetrahedral mesh. If ``dim`` is 2,
+      creates an open-top triangular surface mesh (the ``+z`` face is omitted).
+
+      **count**: 3 integers >= 2: Grid resolution along each axis.
+      |br| **spacing**: 3 reals: Spacing along each axis.
+      |br| **dim**: optional integer in [2, 3] (default 3): Mesh dimensionality.
+
+   :at-val:`cylinder` (count[3], spacing[3], [dim])
+      A procedural cylinder mesh. If ``dim`` is 3 (default), creates a volumetric tetrahedral mesh. If ``dim`` is 2,
+      creates an open-top triangular surface mesh (the ``+z`` face is omitted).
+
+      **count**: 3 integers >= 2: Grid resolution along each axis.
+      |br| **spacing**: 3 reals: Spacing along each axis.
+      |br| **dim**: optional integer in [2, 3] (default 3): Mesh dimensionality.
+
+   :at-val:`ellipsoid` (count[3], spacing[3], [dim])
+      A procedural ellipsoid mesh. If ``dim`` is 3 (default), creates a volumetric tetrahedral mesh. If ``dim`` is 2,
+      creates an open-top triangular surface mesh (the ``+z`` face is omitted).
+
+      **count**: 3 integers >= 2: Grid resolution along each axis.
+      |br| **spacing**: 3 reals: Spacing along each axis.
+      |br| **dim**: optional integer in [2, 3] (default 3): Mesh dimensionality.
+
+   :at-val:`square` (count[3], spacing[3])
+      A 2D triangulated square surface mesh.
+
+      **count**: 3 integers (first 2 must be > 0, last must be 1): Number of vertices along the x and y axes.
+      |br| **spacing**: 3 reals: Spacing along each axis.
+
+   :at-val:`disc` (count[3], spacing[3])
+      A 2D triangulated disc surface mesh.
+
+      **count**: 3 integers (first 2 must be > 0, last must be 1): Number of vertices along the radial and angular
+      directions.
+      |br| **spacing**: 3 reals: Spacing along each axis.
+
 .. _asset-mesh-params:
 
 :at:`params`: :at-val:`real(nparam), optional`
    The parameters used to generate a builtin mesh. The number and type of parameters and their semantic depends on the
-   mesh type. See :ref:`mesh/builtin<asset-mesh-builtin>` for details.
+   mesh type. See :ref:`mesh/builtin<asset-mesh-builtin>` for details. The ``square`` and ``disc`` types, and the
+   ``grid``, ``box``, ``cylinder`` and ``ellipsoid`` types with ``dim`` < 3, change a :at-val:`legacy`
+   :ref:`inertia<asset-mesh-inertia>` (including an explicit one) to :at-val:`shell`, since they have no volume.
 
 .. _asset-mesh-material:
 
@@ -1756,6 +1855,11 @@ Only ``image/png`` and ``image/ktx`` are supported.
    a single file with the file attribute, the explicit name can be omitted and the file name (without the path and
    extension) becomes the texture name. If the name after parsing is empty and the texture type is not "skybox", the
    compiler will generate an error.
+
+.. _asset-texture-class:
+
+:at:`class`: :at-val:`string, optional`
+   Defaults class for setting unspecified attributes.
 
 .. _asset-texture-type:
 
@@ -1951,7 +2055,18 @@ Only ``image/png`` and ``image/ktx`` are supported.
 
 :at:`nchannel`: :at-val:`int, "3"`
    The number of channels in the texture image file. This allows loading 4-channel textures (RGBA) or single-channel
-   textures (e.g., for Physics-Based Rendering properties such as roughness or metallic).
+   textures (e.g., for Physics-Based Rendering properties such as roughness or metallic). Procedural, cube and skybox
+   textures must have 3 channels.
+
+.. _asset-texture-embed:
+
+:at:`embed`: :at-val:`[false, true, auto], "auto"`
+   Whether the pixels of this texture are in :ref:`mjModel` or the texture is left :ref:`by reference<CAssetReference>`.
+   "auto" follows the :ref:`passthrough<compiler-passthrough>` policy of the compiler. "true" keeps the pixels in the
+   model whatever the policy says, for example for a texture which is written into at runtime. "false" asks for the
+   texture to be by reference whatever the policy says, and is a compile error for a texture which cannot be: one which
+   is procedural, given as a buffer or as six separate files, flipped, a composite grid, or whose file is served from
+   memory by a :ref:`virtual file system<Virtualfilesystem>`.
 
 
 .. _asset-material:
@@ -2226,9 +2341,9 @@ defined. Its body name is automatically defined as "world".
    can be expensive. Trees initialized as sleeping can be placed in unstable configurations like deep penetration or in
    mid-air, but will only move when woken up. Also note that this policy can fail. For example if a tree marked as
    sleep="init" is in contact with a tree not marked as such (i.e., they are in the same :ref:`island<soIsland>`) then
-   it is impossible to put the tree to sleep; such `models
-   <https://github.com/google-deepmind/mujoco/blob/main/test/engine/testdata/sleep/init_island_fail.xml>`__ will lead to
-   a compilation error.
+   it is impossible to put the tree to sleep; for such `models
+   <https://github.com/google-deepmind/mujoco/blob/main/test/engine/testdata/sleep/init_island_fail.xml>`__ a warning
+   is issued and the trees which could not be slept start awake.
 
    See :ref:`implementation notes<siSleep>` for more details.
 
@@ -2257,6 +2372,14 @@ defined. Its body name is automatically defined as "world".
    any runtime parameter change that violates the simple conditions will trigger a validation error unless
    ``simple="false"`` was explicitly declared in the XML.
 
+.. _body-fuse:
+
+:at:`fuse`: :at-val:`[false, auto], "auto"`
+   Whether this body can be fused with its parent when static bodies are fused, by the
+   :ref:`fusestatic<compiler-fusestatic>` compiler option or by :ref:`mjs_fuseStatic`. With the default :at-val:`auto`
+   a static body is fused unless one of the conditions listed there prevents it. Setting this attribute to
+   :at-val:`false` keeps the body.
+
 .. _body-user:
 
 :at:`user`: :at-val:`real(nbody_user), "0 0 ..."`
@@ -2269,8 +2392,10 @@ defined. Its body name is automatically defined as "world".
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 This element specifies the mass and inertial properties of the body. If this element is not included in a given body,
-the inertial properties are inferred from the geoms attached to the body. When a compiled MJCF model is saved, the XML
-writer saves the inertial properties explicitly using this element, even if they were inferred from geoms. The inertial
+the inertial properties are inferred from the geoms attached to the body. A saved model has this element where it was
+written; the inferred properties are saved with it as well when :ref:`saveinertial<compiler-saveinertial>` is set, and
+in a model saved with the values which compilation made (:ref:`savecompiled<compiler-savecompiled>`, the default) also
+when :ref:`settotalmass<compiler-settotalmass>` scaled them or the saved file would not infer them again. The inertial
 frame is such that its center coincides with the center of mass of the body, and its axes coincide with the principal
 axes of inertia of the body. Thus the inertia matrix is diagonal in this frame.
 
@@ -2563,7 +2688,8 @@ an XML shortcut for
 While this joint can evidently be created with the :ref:`joint <body-joint>` element, default joint settings could
 affect it. This is usually undesirable as physical free bodies do not have nonzero stiffness, damping, friction or
 armature. To avoid this complication, the :el:`freejoint` element was introduced, ensuring joint defaults are *not
-inherited*. If the XML model is saved, it will appear as a regular joint of type :at:`free`.
+inherited*. In a model which is saved :ref:`as it was compiled<compiler-savecompiled>` it appears as a regular joint
+of type :at:`free`.
 
 
 .. _body-freejoint-name:
@@ -2589,8 +2715,9 @@ inherited*. If the XML model is saved, it will appear as a regular joint of type
    more stable simulation. While this behaviour is a strict improvement, it modifies the semantics of the free joint,
    making ``qpos`` and ``qvel`` values saved in older versions (for example, in :ref:`keyframes<keyframe>`) invalid.
 
-   Note that the :at:`align` attribute is never saved to XML. Instead, the pose of simple free bodies and their children
-   will be modified such that the body frame and inertial frame are aligned.
+   Note that when the values which compilation made are saved (:ref:`savecompiled<compiler-savecompiled>`), the
+   :at:`align` attribute is not saved. Instead, the pose of simple free bodies and their children will be modified such
+   that the body frame and inertial frame are aligned.
 
 .. _body-geom:
 
@@ -3484,7 +3611,7 @@ cable, which produces an inextensible chain of bodies connected with ball joints
 
 .. _body-composite-initial:
 
-:at:`initial`: :at-val:`[free, ball, none], "0"`
+:at:`initial`: :at-val:`[free, ball, none], "ball"`
    Behavior of the first point. Free: free joint. Ball: ball joint. None: no dof.
 
 .. _body-composite-curve:
@@ -3873,14 +4000,17 @@ saving the XML:
 
    **box** generates a 3D box object, however flex bodies are only generated on the outer shell. Each flex body has a
    radial slider joint allowing it to move in and out from the center of the box. The parent body would normally be a
-   floating body. The box surface is triangulated, and each flex element is a tetrahedron connecting the center of the
-   box with one triangle face. :at:`count` and :at:`spacing` determine the count and spacing of the flex bodies, similar
-   to the **grid** type in 3D. Note that the resulting flex has the same topology as the box generated by
-   :el:`composite`.
+   floating body. The box surface is triangulated, and when :at:`dim=3` (default) each flex element is a tetrahedron
+   connecting the center of the box with one triangle face. When :at:`dim=2`, an open-top surface shell of triangle
+   elements is generated (the ``+z`` top face is omitted, as in ``model/flex/basket.xml``). :at:`count` and
+   :at:`spacing` determine the count and spacing of the flex bodies, similar to the **grid** type in 3D. Note that when
+   :at:`dim=3`, the resulting flex has the same topology as the box generated by :el:`composite`.
 
-   **cylinder** is the same as **box**, except the points are projected on the surface of a cylinder.
+   **cylinder** is the same as **box**, except the points are projected on the surface of a cylinder (when :at:`dim=2`,
+   the ``+z`` top face is likewise omitted).
 
-   **ellipsoid** is the same as **box**, except the points are projected on the surface of an ellipsoid.
+   **ellipsoid** is the same as **box**, except the points are projected on the surface of an ellipsoid (when
+   :at:`dim=2`, the ``+z`` top cap is likewise omitted).
 
    **disc** is the same as **box**, except the points are projected on the surface of a disc. It is only compatible
    with :at:`dim=2`.
@@ -3903,7 +4033,7 @@ saving the XML:
    and `format 2.2 <https://gmsh.info//doc/texinfo/gmsh.html#MSH-file-format-version-2-_0028Legacy_0029>`__
    (ascii or binary). The file extension can be anything; the parser recognizes the format by examining
    the file header. This is a very rich file format, allowing all kinds of elements with different dimensionality and
-   topology. MuJoCo only supports GMSH element types 1, 2, 4 which happen to correspond to our 1D, 2D and 3D flexes and
+   topology. MuJoCo only supports GMSH element types 2 and 4 which happen to correspond to our 2D and 3D flexes and
    assumes that the nodes are specified in a single block. Only the Nodes and Elements sections of the GMHS file are
    processed, and used to populate the point and element data of the flexcomp. The parser will generate an error if the
    GMSH file contains meshes that are not supported by MuJoCo. :at:`dim` is automatically set to the dimensionality
@@ -3975,6 +4105,18 @@ saving the XML:
    specified in :ref:`mesh assets<asset-mesh>`, excluding the legacy .msh format. Volumetric meshes are supported only
    in GMSH format. See :ref:`here<gmsh-file-docs>` for more information on GMSH files.
 
+.. _body-flexcomp-mesh:
+
+:at:`mesh`: :at-val:`string, optional`
+   The name of a :ref:`mesh asset<asset-mesh>` from which a **surface** (triangular) or **volumetric** (tetrahedral)
+   mesh is referenced. Can be used in place of :at:`file`. If specified without an explicit :at:`type`, the flexcomp
+   type defaults to ``mesh``; any type other than ``mesh`` or ``gmsh`` is an error. The asset's :at:`scale`,
+   :at:`refpos` and :at:`refquat` are applied to the vertices and volumetric nodes, which are otherwise expressed in the
+   frame of the asset, so that the flex coincides with a geom using the same mesh at the same position. In contrast,
+   :at:`file` uses the raw file coordinates. For :at:`dim` = 3, :at:`origin` is expressed in the same frame. The mesh
+   asset is read when the flexcomp is expanded, i.e. when the model is parsed or :ref:`mjs_makeFlex` is called, so later
+   changes to the mesh asset do not affect the flex.
+
 .. _body-flexcomp-rigid:
 
 :at:`rigid`: :at-val:`[true, false], "false"`
@@ -4004,7 +4146,7 @@ saving the XML:
 .. _body-flexcomp-scale:
 
 :at:`scale`: :at-val:`real(3), "1 1 1"`
-   Scaling of all point coordinates, for types that specify coordinates explicitly. Scaling is applied after the pose
+   Scaling of all point coordinates, for types that specify coordinates explicitly. Scaling is applied before the pose
    transformation.
 
 .. _body-flexcomp-radius:
@@ -4092,9 +4234,11 @@ element is used to adjust the properties of all edges in the flex.
 .. _flexcomp-elasticity-damping:
 .. _flexcomp-elasticity-thickness:
 .. _flexcomp-elasticity-elastic2d:
+.. _flexcomp-elasticity-section:
+.. _flexcomp-elasticity-sectionsize:
 
 .. |body/flexcomp/elasticity attrib list| replace::
-   :at:`young`, :at:`poisson`, :at:`damping`, :at:`thickness`, :at:`elastic2d`
+   :at:`young`, :at:`poisson`, :at:`damping`, :at:`thickness`, :at:`elastic2d`, :at:`section`, :at:`sectionsize`
 
 |body/flexcomp/elasticity attrib list|
    Same as in :ref:`flex/elasticity<flex-elasticity>`.
@@ -4194,9 +4338,6 @@ the saved XML file. Note that this element is a subset of the functionality of t
 
    - All assets from the child model will be copied in, whether they are referenced or not.
    - Circular references are not checked for and will lead to infinite loops.
-   - When attaching a model with :ref:`keyframes<keyframe>`, model compilation is required for the re-indexing to be
-     finalized. If a second attachment is performed without compilation, the keyframes from the first attachment will be
-     lost.
 
 .. _body-attach-model:
 
@@ -4216,6 +4357,7 @@ the saved XML file. Note that this element is a subset of the functionality of t
 :at:`frame`: :at-val:`string, optional`
    Name of the frame in the child model to attach here. If neither this attribute nor :ref:`body<body-attach-body>` is
    specified (only one allowed), the contents of the world body will be attached in a new :ref:`frame<body-frame>`.
+   Frames which enclose it in the child model are not attached.
 
 .. _body-attach-prefix:
 
@@ -4229,8 +4371,8 @@ the saved XML file. Note that this element is a subset of the functionality of t
 :el-prefix:`body/` |-| **frame** |*|
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Frames specify a coordinate transformation which is applied to all child elements. They disappear during compilation
-and the transformation they encode is accumulated in their direct children. See :ref:`frame<frame>` for examples.
+Frames specify a coordinate transformation which is applied to all child elements. During compilation the
+transformation they encode is accumulated in their direct children; frames are preserved when the model is saved.
 
 .. _frame-name:
 
@@ -4261,6 +4403,95 @@ and the transformation they encode is accumulated in their direct children. See 
 
 :at:`quat`, :at:`axisangle`, :at:`xyaxes`, :at:`zaxis`, :at:`euler`
    See :ref:`COrientation`.
+
+.. _frame-scale:
+
+:at:`scale`: :at-val:`real(1 or 3), "1"`
+   Resizes everything inside the frame. Bodies, geoms, sites, joints and all other contents are scaled about the frame's
+   origin, while the frame's own :at:`pos` and orientation, which are in its parent's coordinates, are not. Scaling
+   happens at compile time: the spec keeps the authored values, so changing the scale and recompiling starts again from
+   them, and a model saved as written keeps the attribute.
+
+   Three attributes work together. :at:`scale` sets the factor :math:`s` of lengths, :ref:`massscale<frame-massscale>`
+   the factor :math:`m` of masses, by default :math:`s^3` (the same material), and :ref:`scaling<frame-scaling>` decides
+   whether forces, stiffnesses and actuator gains follow (``similar``, the default) or keep their authored values
+   (``geometry``). Typical uses:
+
+   .. list-table::
+      :header-rows: 1
+      :widths: 60 40
+
+      * - intent
+        - attributes
+      * - a copy which moves like the original, in proportionally scaled gravity
+        - ``scale="s"``
+      * - a larger or smaller body of the same material, with the same motors and springs
+        - ``scale="s" scaling="geometry"``
+      * - a larger or smaller body of the same mass
+        - ``scale="s" scaling="geometry" massscale="1"``
+      * - a heavier or lighter body of the same size, e.g. a payload
+        - ``massscale="k" scaling="geometry"``
+      * - a change of the units of length and mass
+        - ``scale="s" massscale="k"``
+      * - a body stretched along the frame's axes, see below
+        - ``scale="sx sy sz" scaling="geometry"``
+
+   Scales of nested frames compose by multiplication. A single value applies to all three axes. Values must be finite
+   and positive.
+
+   Three different values stretch the contents along the frame's axes, which requires :at:`scaling` "geometry".
+   Positions are mapped exactly and orientations are kept, so each shape inside is stretched in its own coordinates,
+   which only some shapes can represent:
+
+   - meshes always, with an instance of the mesh for each distinct stretch;
+   - boxes, ellipsoids, planes and height fields aligned with the frame's axes;
+   - capsules and cylinders aligned with the frame's axes and stretched equally across their own axis. The caps of a
+     capsule stay hemispherical: with :math:`a` the factor across its axis and :math:`c` the factor along it, its
+     radius :math:`r` becomes :math:`a r` and its half-length :math:`h` becomes :math:`c h`, so that its total length
+     is :math:`2 (c h + a r)` rather than :math:`2 c (h + r)`;
+   - spheres only when scaled uniformly; use an ellipsoid otherwise.
+
+   Hinge and slide joints must also be aligned with the frame's axes. Anything else is a compile error; alignment is
+   checked to within about 2 degrees. Sites are never an error: a site box, ellipsoid, capsule or cylinder is stretched
+   by the factor along each of its own axes, with the radius of a capsule or cylinder taking the geometric mean of the
+   two factors across it, which is approximate when the site is not aligned. Explicit inertias transform exactly.
+   Sphere sites, and lengths without a direction like margins, contact widths and tendon widths, take the geometric mean
+   of the three factors.
+
+   A mesh or height field used at several scales compiles to an instance per scale; the first keeps its name and the
+   others are named ``name@1``, ``name@2``, ... A model saved compiled writes a mesh instance which is not stretched
+   along its own axes as vertices and faces; its texture coordinates are kept only if they are given per vertex, and its
+   normals are recomputed. The bones of a skin must have the same scale, and elements with plugins and tactile sensors
+   cannot be scaled.
+
+.. _frame-scaling:
+
+:at:`scaling`: :at-val:`[similar, geometry], "similar"`
+   What changes along with size and mass. With :math:`s` the :at:`scale` and :math:`m` the :at:`massscale`:
+
+   similar
+     A change of the units of length and mass: every quantity of dimension :math:`L^a M^b T^c` is multiplied by
+     :math:`s^a m^b`. Positions and sizes are multiplied by :math:`s`, masses by :math:`m`, rotational inertias and
+     torques by :math:`m s^2`, forces by :math:`m s`, the stiffness of a slide joint by :math:`m`; times and angles are
+     unchanged. The scaled model moves exactly like the original would in gravity :math:`g/s`. Gravity itself is not
+     scaled, so relative to the model's own forces it is weaker by :math:`1/s`.
+   geometry
+     Only geometry and inertia change: lengths are multiplied by :math:`s`, masses by :math:`m` and rotational inertias
+     by :math:`m s^2`, while stiffness, damping, armature, friction loss, force limits and actuator gains keep their
+     authored values. Quantities specified in the time domain, like :ref:`springdamper<body-joint-springdamper>` or a
+     servo's :at:`dampratio`, keep that specification, so the stiffness and damping computed from them follow the
+     inertia.
+
+   The policy applies to this frame's :at:`scale` and :at:`massscale` only, and is not inherited by nested frames.
+
+.. _frame-massscale:
+
+:at:`massscale`: :at-val:`real, "0"`
+   Factor :math:`m` of the masses of the frame's contents: masses are multiplied by :math:`m`, rotational inertias by
+   :math:`m s^2` and densities by :math:`m / s^3`. The default 0 means :math:`m = s_x s_y s_z`, the ratio of volumes,
+   which keeps densities constant. Under ``similar`` scaling :math:`m` is also the factor of the unit of mass, which
+   forces follow. Values must be finite and non-negative. Factors of nested frames compose by multiplication, so
+   :at:`massscale` "1" in an inner frame is relative to the enclosing frames.
 
 
 
@@ -4526,12 +4757,15 @@ these mechanisms to be combined as desired.
 .. _flex-edge-stiffness:
 
 :at:`stiffness`: :at-val:`real(1), "0"`
-   Stiffness of all edges. Only for 1D flex. For 2D and 3D, plugins must be used.
+   Stiffness of all edges. Only for 1D flex. Integrated explicitly; not supported by the
+   :ref:`discrete<option-integrator>` integrator (use :ref:`elasticity<flex-elasticity>` or
+   :ref:`edge equality<flexcomp-edge-equality>` instead).
 
 .. _flex-edge-damping:
 
 :at:`damping`: :at-val:`real(1), "0"`
-   Damping of all edges.
+   Damping of all edges. Integrated explicitly; not supported by the :ref:`discrete<option-integrator>` integrator
+   (use :ref:`elasticity/damping<flex-elasticity-damping>` instead).
 
 
 .. _flex-elasticity:
@@ -4545,6 +4779,23 @@ piecewise linear finite elements, intended to simulate the compression or elonga
 to large displacements (finite rotations) and small strains, since it uses a nonlinear strain-displacement but a linear
 stress-strain relationship. See also :ref:`deformable <CDeformable>` objects and `this model
 <https://github.com/google-deepmind/mujoco/blob/main/model/flex/floppy.xml>`__.
+
+For 1D flexes, elasticity is a twist-free, isotropic `discrete elastic rod
+<https://www.cs.columbia.edu/cg/pdfs/143-rods.pdf>`__ bending model with the cross-section given by
+:ref:`section<flex-elasticity-section>`. Every vertex shared by exactly two edges stores the energy
+:math:`k |\kappa b|^2`, where :math:`\kappa b` is the discrete curvature binormal and
+:math:`k = E I / (\ell_0 + \ell_1)`, with :math:`I` the second moment of area of the cross-section and
+:math:`\ell_{0,1}` the reference lengths of the two edges. The reference configuration ``qpos0`` must be straight: a
+compiler error is raised if any such vertex is bent by more than :math:`10^{-4}` rad, since without material frames an
+isotropic rod with a curved reference would only resist the magnitude of its curvature, not its direction. A curved
+initial pose, e.g. coiled or draped, can be set with ``qpos`` or a :ref:`keyframe<keyframe>`; the rod then starts with
+stored bending energy and is pushed toward straightening. Rods with a curved rest shape, such as coil springs, can use
+the :ref:`cable<CComposite>` composite instead. Twist is assumed to relax instantly, which is exact unless the
+orientation of both ends of the rod is constrained. Stretching is not included; use :ref:`edge<flex-edge>` constraints
+(or edge stiffness under integrators other than ``discrete``) instead. Rod bending is integrated implicitly by the
+:ref:`discrete<option-integrator>` integrator, using a positive semi-definite approximation of its Hessian, and
+explicitly by ``Euler`` and ``RK4`` (not supported under ``implicit`` and ``implicitfast``). It is not supported by
+:ref:`dof<body-flexcomp-dof>` **trilinear** and **quadratic**.
 
 .. _flex-elasticity-young:
 
@@ -4579,6 +4830,28 @@ stress-strain relationship. See also :ref:`deformable <CDeformable>` objects and
    "both": bending and stretching. Bending is not yet supported by :ref:`dof<body-flexcomp-dof>` **trilinear** and
    **quadratic**.
 
+   Non-interpolated flex elasticity supports vertices attached to articulated bodies, including jointless welded children.
+   A vertex pinned to a moving body follows that body's motion and applies its reaction force and torque to the body.
+   With the :ref:`discrete<option-integrator>` integrator, use :ref:`solver<option-solver>` **CG** for general attachments.
+   Newton supports fixed attachments and independent slide bodies with local positive X, Y and Z joints in that order
+   and fixed ancestors. Mocap attachments are not supported for non-rigid flexes with elasticity because mocap poses do
+   not provide velocities for elastic damping, except for 1D flexes with zero :ref:`damping<flex-elasticity-damping>`.
+
+.. _flex-elasticity-section:
+
+:at:`section`: :at-val:`[circle, box], "circle"`
+   Cross-section of 1D flexes, used to compute the second moment of area :math:`I` of the bending stiffness. "circle":
+   :math:`I = \pi r^4 / 4`, where :math:`r` is the flex :ref:`radius <deformable-flex-radius>`. "box": rectangle with
+   half-sizes given by :ref:`sectionsize<flex-elasticity-sectionsize>`. Since the bending model is isotropic, a box uses
+   the second moment of area of its weak axis, :math:`I = \min(w h^3, h w^3) / 12`, where :math:`w, h` are the full
+   sizes. Collisions and rendering always use the flex radius.
+
+.. _flex-elasticity-sectionsize:
+
+:at:`sectionsize`: :at-val:`real(2), "0 0"`
+   Half-sizes of the "box" cross-section of 1D flexes, units of length. Both values must be positive when
+   :ref:`section<flex-elasticity-section>` is "box"; ignored otherwise.
+
 .. _flex-contact:
 
 :el-prefix:`flex/` |-| **contact** |?|
@@ -4586,19 +4859,6 @@ stress-strain relationship. See also :ref:`deformable <CDeformable>` objects and
 
 This element adjusts the contact properties of the flex. It is mostly identical to geom contact properties, with some
 extensions specific to flexes.
-
-.. _flex-contact-internal:
-
-:at:`internal`: :at-val:`[true, false], "false"`
-   Enables or disables internal collisions which prevent flex self-penetration and element inversion. Note that flex
-   elements that have shared vertices cannot collide (or else there will be permanent contacts). In 1D and 2D, internal
-   collision checks rely on predefined vertex-element pairs, where the vertex is treated as a sphere with the same
-   radius as the flex. These spheres correspond to non-shared vertices of neighboring elements on the periphery of the
-   flex. The pre-defined vertex-element pairs are generated by the model compiler automatically. In 3D, internal
-   collision checks are performed within each tetraheron: each vertex is collided with the plane corresponding to the
-   opposing triangle face (again using the flex radius). The resulting contacts are always created with condim 1, gap 0,
-   margin 0. Note that internal contacts modify the behavior implied by the :ref:`elasticity parameters<flex-elasticity>`
-   and is recommended only for flexes where element inversion cannot be prevented.
 
 .. _flex-contact-selfcollide:
 
@@ -4609,6 +4869,10 @@ extensions specific to flexes.
    hierarchies and sweep-and-prune (which are two different strategies for midphase collision pruning). **auto** selects
    **sap** in 1D and 2D, and **bvh** in 3D. Which strategy performs better depends on the specifics of the model. The
    automatic setting is just a simple rule which we have found to perform well in general.
+
+   For interpolated flexes (**trilinear** or **quadratic** :ref:`dofs<body-flexcomp-dof>`), elements in the same or
+   neighboring :ref:`cells<body-flexcomp-cellcount>` do not self-collide, so self-collision requires at least 3 cells
+   along an axis; **auto** prunes non-neighboring cell pairs by their bounding boxes before testing element pairs.
 
 .. _flex-contact-activelayers:
 
@@ -4652,11 +4916,13 @@ extensions specific to flexes.
    non-penetration, leave this option off.
 
    The force is a penalty on penetration depth whose stiffness is chosen as a natural frequency scaled by the
-   participating vertex mass, so a single value is appropriate across model scales; it is not user-specified. That
-   stiffness is integrated implicitly, its curvature being carried by the effective metric, and is therefore far
-   stiffer than an explicit force at the same timestep could be. It follows that the feature requires an integrator
-   whose constraint solve runs in that metric: :at:`implicit` or :at:`implicitfast` with the CG solver, pyramidal
-   friction cones and sleep disabled. A model requesting passive flex collisions otherwise is rejected with an error.
+   participating vertex mass (or for interpolated flexes, the effective cage node mass at the contact point scaled by
+   the node-to-vertex ratio), so a single value is appropriate across model scales and mesh resolutions; it is not
+   user-specified. That stiffness is integrated implicitly, its curvature being carried by the effective metric, and is
+   therefore far stiffer than an explicit force at the same timestep could be. It follows that the feature requires the
+   ``discrete`` :ref:`integrator<option-integrator>`, with the ``CG`` or ``Newton`` :ref:`solver<option-solver>`, no
+   :ref:`noslip<option-noslip_iterations>` iterations and the :ref:`sleep<option-flag-sleep>` flag disabled. A model
+   requesting passive flex collisions otherwise is rejected with an error.
 
    Being a penalty force, it does not guarantee non-penetration: a thin flex moving fast enough to cross another
    within one step will pass through it. This is an experimental feature.
@@ -4956,8 +5222,9 @@ of the other body, without any joint elements in the child body. Weld constraint
    relative to body1. The position part (first 3 components) gives the anchor coordinates in the local frame of body1,
    and the quaternion part (last 4 components) gives the relative orientation of body2 relative to body1. If the
    quaternion part (i.e., last 4 components of the vector) are all zeros, as in the default setting, this attribute is
-   ignored and the relative pose is the one corresponding to the model reference pose in qpos0. The unusual
-   default is because all equality constraint types share the same default for their numeric parameters.
+   ignored and the relative pose is the one corresponding to the model reference pose in qpos0, which
+   :ref:`mj_setConst` recomputes; ``mjModel.eq_data[11]`` marks such welds. The unusual default is because all
+   equality constraint types share the same default for their numeric parameters.
 
 .. _equality-weld-anchor:
 
@@ -5142,6 +5409,13 @@ at each of the 8 Gauss points, giving 26 constraints per element. For quadratic 
 constraint type is only supported for dimension 3 flexes with trilinear or quadratic interpolation. See `this model
 <https://github.com/google-deepmind/mujoco/blob/main/model/flex/strain.xml>`__ for an example.
 
+The strain constraint replaces the stretch elasticity of the flex: the compiled element stiffness holds the constraint
+eigenmodes instead of the :ref:`young<flex-elasticity-young>` and :ref:`poisson<flex-elasticity-poisson>` stiffness,
+and the passive stretch force is not computed. A positive :at:`young` is therefore rejected by the compiler unless
+:ref:`elastic2d<flex-elasticity-elastic2d>` is :at-val:`bend`, in which case it only determines the bending stiffness
+of the shell. Note that deactivating the constraint at runtime leaves the flex without stretch elasticity; to simulate
+a volumetric elastic solid, remove the constraint and set :at:`young` and :at:`poisson` before compiling.
+
 .. _equality-flexstrain-name:
 .. _equality-flexstrain-class:
 .. _equality-flexstrain-active:
@@ -5304,10 +5578,11 @@ length X, as in the clip on the right of `this example model
 
 :at:`springlength`: :at-val:`real(2), "-1 -1"`
    Spring resting position, can take either one or two values. If one value is given, it corresponds to the length of
-   the tendon at rest. If it is ``-1``, the tendon resting length is determined from the model reference configuration
-   in ``mjModel.qpos0``.  |br| Note that the default value of ``-1``, which invokes the automatic length computation,
-   was designed with :ref:`spatial<tendon-spatial>` tendons in mind, which can only have nonegative length. In order to
-   set the :at:`springlength` of a :ref:`fixed<tendon-fixed>` tendon to ``-1``, use a nearby value like ``-0.99999``.
+   the tendon at rest. If it is ``-1``, the tendon resting length is determined by the compiler from the spring
+   reference configuration in ``mjModel.qpos_spring``.  |br| Note that the default value of ``-1``, which invokes the
+   automatic length computation, was designed with :ref:`spatial<tendon-spatial>` tendons in mind, which can only have
+   nonegative length. In order to set the :at:`springlength` of a :ref:`fixed<tendon-fixed>` tendon to ``-1``, use a
+   nearby value like ``-0.99999``.
    |br| If two non-decreasing values are given, they define a `dead-band <https://en.wikipedia.org/wiki/Deadband>`_
    range. If the tendon length is between the two values, the force is 0. If it is outside this range, the force behaves
    like a regular spring, with the rest-point corresponding to the nearest :at:`springlength` value. A deadband can be
@@ -5675,7 +5950,7 @@ specify them independently.
    Armature inertia (or mass for slider joints) contributed by the actuator to its transmission target (joint or tendon
    only). This is the actual inertia of the spinning element inside the actuator (e.g., a rotor). The contributed value
    is scaled by :ref:`gear<actuator-general-gear>` squared, because the gear ratio scales both forces and velocities,
-   leading to `reflected inertia <https://en.wikipedia.org/wiki/Reflective_inertia>`__. See
+   leading to reflected inertia. See
    :ref:`joint<body-joint-armature>` and :ref:`tendon<tendon-fixed-armature>` armature for more details.
 
    See also the note in :ref:`damping<actuator-general-damping>` regarding multiple actuators acting on the same
@@ -5880,6 +6155,16 @@ specify them independently.
 :at:`ffrange`: :at-val:`real(2), "0 0"`
    Range of the feedforward input of a :ref:`pid<actuator-pid>` actuator.
 
+.. _actuator-general-inheritrange:
+
+:at:`inheritrange`: :at-val:`real, "0"`
+   Sets the range of a position servo from the range of its joint or tendon, as described in
+   :ref:`position/inheritrange<actuator-position-inheritrange>`: the :at:`ctrlrange`, or the :at:`actrange` if
+   :at:`dyntype` is "integrator". It has an effect on an actuator with affine bias and either fixed gain, where
+   ``gainprm[0]`` equals ``-biasprm[1]``, or gaintype "pid": the actuators which the
+   :ref:`position<actuator-position>`, :ref:`intvelocity<actuator-intvelocity>` and :ref:`pid<actuator-pid>` shortcuts
+   create.
+
 .. _actuator-general-input:
 
 :at:`input`: :at-val:`string, optional`
@@ -5887,7 +6172,13 @@ specify them independently.
    ``mjModel.actuator_ctrlspec``. For gaintype "so3" it selects the orientation chart: "expmap" (3 controls, the
    default) or "quat" (4 controls); see :ref:`orientation/input<actuator-orientation-input>`. For gaintypes "pid" and
    "dcmotor" it is a token list selecting the input subset; see :ref:`pid/input<actuator-pid-input>` and
-   :ref:`dcmotor/input<actuator-dcmotor-input>`.
+   :ref:`dcmotor/input<actuator-dcmotor-input>`. For gaintypes "fixed" and "affine" it declares what the single control
+   is, and does not affect the simulation: "pos", a position setpoint; "vel", a velocity setpoint; "pressure", a
+   pressure, the gain being an area. Without a declaration the control is a command, scaled by the gain. The
+   :ref:`position<actuator-position>`, :ref:`velocity<actuator-velocity>`, :ref:`intvelocity<actuator-intvelocity>` and
+   :ref:`cylinder<actuator-cylinder>` shortcuts declare "pos", "vel", "vel" and "pressure" respectively, and
+   :ref:`mj_actuatorInputName` returns the declaration. An input signature inherited from a default class is discarded
+   when the gaintype changes; ``input=""`` restores the gaintype's default.
 
 .. _actuator-general-actearly:
 
@@ -5989,6 +6280,7 @@ Attribute Setting             Attribute Setting
 dyntype   none or filterexact dynprm    timeconst 0 0
 gaintype  fixed               gainprm   kp 0 0
 biastype  affine              biasprm   0 -kp -kv
+input     pos
 ========= =================== ========= =============
 
 On purely rotational transmissions, setpoints are interpreted on the circle; see :ref:`gear<actuator-general-gear>`.
@@ -6069,11 +6361,13 @@ This element has one custom attribute in addition to the common attributes:
    `damping ratio <https://en.wikipedia.org/wiki/Damping#Damping_ratio_definition>`__.
    A value of 1 corresponds to a *critically damped* oscillator, which often produces desirable behavior.
    Values smaller or larger than 1 correspond to underdamped and overdamped oscillations, respectively.
-   The mass :math:`m` is computed at the reference configuration ``mjModel.qpos0``, taking into account joint
-   :ref:`armature <body-joint-armature>`.
+   The reflected mass :math:`m = (J M^{-1} J^T)^{-1}` is computed at the reference configuration ``mjModel.qpos0`` from
+   the actuator transmission Jacobian :math:`J` and inertia matrix :math:`M` (averaged across force outputs for
+   multi-output actuators), taking into account joint :ref:`armature <body-joint-armature>`, tendon
+   :ref:`armature <tendon-spatial-armature>`, and actuator :ref:`armature <actuator-general-armature>`.
    However, passive :ref:`damping <body-joint-damping>` or :ref:`frictionloss <body-joint-frictionloss>` in the affected
-   joints are not taken into account; if they are non-negligible, :at:`dampratio` values smaller than 1 might be
-   required to achieve desirable motion.
+   joints or tendons are not taken into account; if they are non-negligible, :at:`dampratio` values smaller than 1 might
+   be required to achieve desirable motion.
    When using this attribute, it is recommended to use the implicitfast or implicit :ref:`integrators<geIntegration>`.
 
 .. _actuator-position-timeconst:
@@ -6093,9 +6387,8 @@ This element has one custom attribute in addition to the common attributes:
    :at:`ctrlrange` to :at-val:`[0.1, 0.9]` and :at-val:`[-0.1, 1.1]`, respectively. Values smaller than 1 are useful for
    not hitting the limits; values larger than 1 are useful for maintaining control authority at the limits (being able
    to push on them). This attribute is exclusive with :at:`ctrlrange` and available only for joint and tendon
-   transmissions which have :at:`range` defined. Note that while :at:`inheritrange` is available both as a
-   :ref:`position<actuator-position>` attribute and in the :ref:`default class<default-position-inheritrange>`,
-   saved XMLs always convert it to explicit :at:`ctrlrange` at the actuator.
+   transmissions which have :at:`range` defined. A model which is saved :ref:`as it was compiled
+   <compiler-savecompiled>` has the explicit :at:`ctrlrange` at the actuator in place of this attribute.
 
 .. _actuator-pid:
 
@@ -6350,6 +6643,7 @@ Attribute Setting Attribute Setting
 dyntype   none    dynprm    1 0 0
 gaintype  fixed   gainprm   kv 0 0
 biastype  affine  biasprm   0 0 -kv
+input     vel
 ========= ======= ========= =======
 
 This element has one custom attribute in addition to the common attributes:
@@ -6429,6 +6723,7 @@ Attribute Setting     Attribute Setting
 dyntype   integrator  dynprm    1 0 0
 gaintype  fixed       gainprm   kp 0 0
 biastype  affine      biasprm   0 -kp -kv
+input     vel
 ========= =========== ========= =========
 
 Activation clamping is controlled by :at:`actlimited` and :at:`actrange`, like any stateful actuator. On purely
@@ -6606,16 +6901,18 @@ This element has one custom attribute in addition to the common attributes:
 :el-prefix:`actuator/` |-| **cylinder** |*|
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-This element is suitable for modeling pneumatic or hydraulic cylinders. The underlying :el:`general` attributes are
-set as follows:
+This element is suitable for modeling pneumatic or hydraulic cylinders. The control is the commanded pressure; the
+activation is the pressure in the cylinder, which follows the control with time constant :at:`timeconst`, and the force
+is the pressure times :at:`area`, plus the bias. The underlying :el:`general` attributes are set as follows:
 
-========= ======= ========= =============
-Attribute Setting Attribute Setting
-========= ======= ========= =============
-dyntype   filter  dynprm    timeconst 0 0
-gaintype  fixed   gainprm   area 0 0
-biastype  affine  biasprm   bias(3)
-========= ======= ========= =============
+========= ======== ========= =============
+Attribute Setting  Attribute Setting
+========= ======== ========= =============
+dyntype   filter   dynprm    timeconst 0 0
+gaintype  fixed    gainprm   area 0 0
+biastype  affine   biasprm   bias(3)
+input     pressure
+========= ======== ========= =============
 
 
 This element has four custom attributes in addition to the common attributes:
@@ -8694,19 +8991,31 @@ See `example model <https://github.com/google-deepmind/mujoco/blob/main/test/eng
 .. _sensor-insidesite-objtype:
 
 :at:`objtype`: :at-val:`[body, xbody, geom, site, camera], required`
-   The type of the object whose position will be queried.
-   See :ref:`framepos<sensor-framepos>`.
+   The type of the object to be queried. When :at:`enclosed` is ``"false"``, this specifies the coordinate frame whose
+   origin is checked (see :ref:`framepos<sensor-framepos>`). When :at:`enclosed` is ``"true"``, ``body`` checks all geoms
+   directly attached to the body, ``xbody`` checks all geoms in the kinematic subtree rooted at the body, and ``camera``
+   is not supported.
 
 .. _sensor-insidesite-objname:
 
 :at:`objname`: :at-val:`string, required`
-   The name of the object whose position will be queried.
+   The name of the object to be queried.
    See :ref:`framepos<sensor-framepos>`.
 
 .. _sensor-insidesite-site:
 
 :at:`site`: :at-val:`string`
    The site defining the volume used for the inside check.
+
+.. _sensor-insidesite-enclosed:
+
+:at:`enclosed`: :at-val:`bool, "false"`
+   If true, checks full geometric enclosure instead of only checking whether the frame origin is inside the site. The
+   sensor measures how much the object juts out of the site (the directed Hausdorff distance): positive values indicate
+   how far the furthest point protrudes outside the site boundary, while zero or negative values indicate the object is
+   fully enclosed (with the magnitude representing clearance to the boundary). Both the site and all queried geoms/sites
+   must be compact convex shapes. For ``objtype="body"`` or ``objtype="xbody"``, the sensor returns the maximum value
+   across all geoms on the body or in its kinematic subtree, respectively (at least one geom must be present).
 
 
 
@@ -8917,8 +9226,9 @@ input to learning-based agents and in environment logic.
 
 Unlike the purely geometric :ref:`collision-sensors` that act independently of the dynamics pipeline, the contact
 sensor reports information that was discovered during the collision and constraint steps, extracting data
-from ``mjData.{contact, efc_force}``, ignoring contacts that were filtered out by the :ref:`standard<coSelection>`
-mechanism and produce no force.
+from ``mjData.{contact, efc_force}``. Contacts in ``mjData.contact`` that are excluded from constraint force
+computation (for example, within the :ref:`gap<body-geom-gap>` zone) are still matched and reported, with zero
+force and torque.
 
 Contact sensor output involves three stages: **matching**, **reduction**, and **extraction**.
 
@@ -8975,7 +9285,7 @@ Extraction
 
 .. _sensor-contact-data:
 
-:at:`data`: :at-val:`[found, force, torque, dist, pos, normal, tangent], "found"`
+:at:`data`: :at-val:`[found, force, torque, dist, pos, normal, tangent, linvel, angvel], "found"`
    Specification of which data field(s) to report from the selected contacts.
 
    - :at-val:`found` **real(1)**: This field serves two purposes. First, it indicates whether a contact was found in
@@ -8989,6 +9299,11 @@ Extraction
    - :at-val:`normal`: **real(3)**: The contact normal direction, in the global frame.
    - :at-val:`tangent`: **real(3)**: The first tangent direction, in the global frame.
      In order to complete the full 3x3 contact frame, use tangent2 = cross(normal, tangent).
+   - :at-val:`linvel`: **real(3)**: The relative linear velocity of the second contacting body with respect to the first
+     at the contact position, expressed in the contact frame. Positive normal velocity (first component) corresponds to
+     separation. Cannot be combined with ``reduce="netforce"``.
+   - :at-val:`angvel`: **real(3)**: The relative angular velocity of the second contacting body with respect to the
+     first, expressed in the contact frame. Cannot be combined with ``reduce="netforce"``.
 
    Importantly, the :at:`data` attribute can contain **multiple sequential data types**, as long as the relative
    order---as listed above---is maintained. For example, :at:`data` = :at-val:`"found force dist"` will return 5 numbers
@@ -9018,6 +9333,13 @@ Extraction
       In the case that a direction cannot be determined, as when only a :at:`site` is used as the matching criterion, or
       when both subtrees are the same, the normal direction is the same as it is in ``mjData.contact``, where the normal
       points from the first to the second geom, and the two geoms are sorted according to their order in :ref:`mjtGeom`.
+
+   Computation stage
+      The computation stage (``sensor_needstage``) of a contact sensor depends on the requested :at:`data` fields and
+      :ref:`reduce<sensor-contact-reduce>` criterion. If :at:`data` includes ``force`` or ``torque``, or if
+      :at:`reduce` is ``maxforce`` or ``netforce``, the sensor is evaluated at ``mjSTAGE_ACC``; otherwise, if
+      :at:`data` includes ``linvel`` or ``angvel``, it is evaluated at ``mjSTAGE_VEL``; otherwise it is evaluated at
+      ``mjSTAGE_POS``.
 
 .. _sensor-contact-reduce:
 
@@ -9066,14 +9388,108 @@ Extraction
    :width: 30%
    :target: https://github.com/google-deepmind/mujoco/blob/main/model/tactile/tactile.xml
 
-The tactile sensor returns the maximum penetration depth and the sliding velocities in the tangent frame at given points
-between the geom associated with the sensor and the SDF geoms in contact with it. The sensor is associated with a geom
-and a mesh. It is activated by the contact between its associated geom and other geoms. The vertices of the mesh, when
-positioned in the geom frame, are the points at which sensor values are computed, so the dimension of the output is 3
-times the number of vertices in the mesh. The mesh must have 3 normal vectors per vertex, which are used to compute the
-tangent frame. If the penetration depth is positive (no contact), then all values are 0 for the corresponding vertex.
-Only contacts with geoms of type SDF contribute to the sensor output. The sensor can be visualized by enabling the
-visualization of contact points.
+The tactile sensor evaluates penetration depth and tangential sliding speeds across the vertices (taxels) of a
+:at:`mesh` positioned in a :at:`geom` frame. For a sensor mesh with :math:`N` vertices, the sensor outputs :math:`3N`
+values in three contiguous blocks of length :math:`N`: non-negative penetration depth :math:`d \ge 0` (``0`` when not in
+contact) and two tangential sliding speeds :math:`|v_{t_1}|, |v_{t_2}| \ge 0` (populated when the mesh defines 3 normal
+vectors per vertex, as in :ref:`builtin<asset-mesh-builtin>` ``wedge`` and ``plate`` meshes).
+
+Because the sensor is activated by contacts on any geom in the same weld body, the sensor's :at:`geom` can be a
+non-colliding surface mesh (``contype="0" conaffinity="0"``) while primitive geoms on the body handle collisions:
+
+.. code-block:: xml
+
+   <asset>
+     <mesh name="plate" builtin="plate" params="25 25" scale="0.04 0.04 0.005"/>
+   </asset>
+   <worldbody>
+     <body name="pad">
+       <geom type="box" size="0.04 0.04 0.005"/>
+       <geom name="sensor_surface" type="mesh" mesh="plate" contype="0" conaffinity="0"/>
+     </body>
+   </worldbody>
+   <sensor>
+     <tactile geom="sensor_surface" mesh="plate"/>
+   </sensor>
+
+Signed distance at each taxel is evaluated analytically for colliding primitives and via plugins for ``sdf`` geoms. Any
+``mesh`` geom that may collide with the sensor requires precomputing an SDF octree (otherwise it is ignored by the
+sensor). Enable :ref:`mjsMesh.needsdf<mjsMesh>` on colliding meshes via :ref:`mjSpec` before compiling:
+
+.. code-block:: C
+
+   mjSpec* spec = mj_parseXML("model.xml", NULL, NULL, 0);
+   mjsMesh* mesh = mjs_asMesh(mjs_findElement(spec, mjOBJ_MESH, "object"));
+   mesh->needsdf = 1;
+   mjModel* m = mj_compile(spec, NULL);
+
+**Visualization**
+
+- **3D scene**: Enabling :ref:`mjVIS_CONTACTPOINT<mjtVisFlag>` shades active mesh triangles with RGB channels
+  proportional to penetration depth (red) and tangential speeds (green, blue).
+- **2D image sensor**: In ``simulate``, any :ref:`user<sensor-user>` sensor with ``sensor_intprm = [width, height, 0]``,
+  ``dim = width * height * 3``, and a non-zero sequence byte in ``sensordata[adr + dim - 1]`` is rendered as an RGB
+  image in the *Sensor* panel.
+
+**Laplacian post-processing**
+
+Optical tactile sensors on hardware observe lateral displacement of embedded markers or a printed pattern as an
+elastomer pad deforms. MuJoCo computes only the raw independent normal depth :math:`d(x, y)` and tangential speeds at
+each taxel; it does not perform elastomer post-processing internally. Spatial coupling across a clamped elastomer
+surface can be modeled in user code by solving the 2D Poisson equation with zero Dirichlet boundary conditions:
+
+.. math::
+
+   -\nabla^2 \phi(x, y) = d(x, y) \quad \text{in } \Omega, \qquad \phi = 0 \quad \text{on } \partial\Omega.
+
+.. image:: images/XMLreference/tactile_laplacian_light.svg
+   :width: 100%
+   :align: center
+   :class: only-light
+
+.. image:: images/XMLreference/tactile_laplacian_dark.svg
+   :width: 100%
+   :align: center
+   :class: only-dark
+
+Discretizing :math:`-\nabla^2` with a 5-point stencil on an :math:`n_x \times n_y` grid gives a constant banded
+symmetric positive-definite system :math:`L \phi = d` with bandwidth ``nband = nx + 1``. Factoring :math:`L` once at
+initialization with :ref:`mju_cholFactorBand` allows solving for :math:`\phi` at runtime via :ref:`mju_cholSolveBand`
+and taking central differences :math:`(\Delta x, \Delta y) = \alpha \nabla \phi` to warp a pattern
+:math:`I(x + \Delta x, y + \Delta y)`:
+
+.. code-block:: C
+
+   // assemble and factor banded negative 2D Laplacian (-nabla^2) on an (nx x ny) grid
+   void makeLaplacian(mjtNum* L, int nx, int ny) {
+     int n = nx * ny, nband = nx + 1;
+     mju_zero(L, n * nband);
+     for (int i = 0; i < ny; i++) {
+       for (int j = 0; j < nx; j++) {
+         int k = i*nx + j;
+         L[k*nband + nx] = 4;
+         if (j > 0) L[k*nband + nx - 1] = -1;
+         if (i > 0) L[k*nband]          = -1;
+       }
+     }
+     mju_cholFactorBand(L, n, nband, 0, 0, 0);
+   }
+
+   // solve Poisson equation (-nabla^2 phi = d) and compute lateral displacement
+   void tactileDisplacement(mjtNum* dx, mjtNum* dy, mjtNum* phi,
+                            const mjtNum* L, const mjtNum* d,
+                            int nx, int ny, mjtNum alpha) {
+     mju_cholSolveBand(phi, L, d, nx * ny, nx + 1, 0);
+     for (int i = 0; i < ny; i++) {
+       for (int j = 0; j < nx; j++) {
+         int k = i*nx + j;
+         mjtNum px = (j < nx-1 ? phi[k+1]  : 0) - (j > 0 ? phi[k-1]  : 0);
+         mjtNum py = (i < ny-1 ? phi[k+nx] : 0) - (i > 0 ? phi[k-nx] : 0);
+         dx[k] = 0.5 * alpha * px;
+         dy[k] = 0.5 * alpha * py;
+       }
+     }
+   }
 
 .. _sensor-tactile-geom:
 
@@ -9478,10 +9894,12 @@ visualization should somehow be simplified.
 .. _visual-quality-offsamples:
 
 :at:`offsamples`: :at-val:`int, "4"`
-   This attribute specifies the number of multi-samples for offscreen rendering. Larger values produce better
-   anti-aliasing but can slow down the GPU. Set this to 0 to disable multi-sampling. Note that this attribute only
-   affects offscreen rendering. For regular window rendering, multi-sampling is specified in an OS-dependent way when
-   the OpenGL context for the window is first created, and cannot be changed from within MuJoCo.
+   This attribute specifies the number of multi-samples for anti-aliasing. Larger values produce better
+   anti-aliasing but can slow down the GPU. Values less than or equal to 1 disable multi-sampling. In the
+   :ref:`Filament renderer<FilamentRendering>`, this attribute controls multi-sampling for window rendering and can be
+   changed at runtime. In the classic OpenGL renderer, it only affects offscreen rendering; for window rendering,
+   multi-sampling is specified in an OS-dependent way when the OpenGL context is first created, and cannot be changed
+   from within MuJoCo.
    |br| When rendering segmentation images, multi-sampling is automatically disabled so as not to average segmentation
    indices. However, some rendering backends ignore the automatic disabling. If your segmentation images contain bad
    indices, try manually setting this attribute to 0.
@@ -9911,6 +10329,48 @@ if omitted.
 | The available attributes are: :ref:`scale <asset-mesh-scale>` and :ref:`maxhullvert <asset-mesh-maxhullvert>`.
 
 
+.. _default-texture:
+
+.. _default-texture-type:
+
+.. _default-texture-colorspace:
+
+.. _default-texture-gridsize:
+
+.. _default-texture-gridlayout:
+
+.. _default-texture-builtin:
+
+.. _default-texture-rgb1:
+
+.. _default-texture-rgb2:
+
+.. _default-texture-mark:
+
+.. _default-texture-markrgb:
+
+.. _default-texture-random:
+
+.. _default-texture-width:
+
+.. _default-texture-height:
+
+.. _default-texture-hflip:
+
+.. _default-texture-vflip:
+
+.. _default-texture-nchannel:
+
+.. _default-texture-embed:
+
+:el-prefix:`default/` |-| **texture** |?|
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+| This element sets the attributes of the dummy :ref:`texture <asset-texture>` element of the defaults class.
+| All texture attributes are available here except: name, class, content_type, file, fileright, fileleft, fileup,
+  filedown, filefront, fileback.
+
+
 .. _default-material:
 
 .. _default-material-texture:
@@ -10331,6 +10791,8 @@ if omitted.
 
 .. _default-general-ffrange:
 
+.. _default-general-inheritrange:
+
 .. _default-general-input:
 
 .. _default-general-actearly:
@@ -10374,9 +10836,11 @@ if omitted.
 :el-prefix:`default/` |-| **motor** |?|
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-This and the next three elements set the attributes of the :ref:`general <actuator-general>` element using
-:ref:`Actuator shortcuts <CActShortcuts>`. It does not make sense to use more than one such shortcut in the same
-defaults class, because they set the same underlying attributes, replacing any previous settings. All
+This and the following shortcut elements set the single actuator default of the class, see
+:ref:`Actuator shortcuts <CActShortcuts>`. Any actuator in the class inherits its mechanical attributes; the shortcut's
+own parameters are inherited only by actuators written with the same shortcut or with :ref:`general <actuator-general>`.
+Using more than one shortcut in the same defaults class is not useful, because each resets the gain, bias and dynamics
+parameters set by the previous one. All
 :ref:`motor <actuator-motor>` attributes are available here except: name, class, joint, jointinparent, site, refsite,
 tendon, slidersite, cranksite.
 

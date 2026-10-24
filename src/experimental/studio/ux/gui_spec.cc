@@ -538,7 +538,6 @@ void ElementSpecGui(mjsElement* element, SpecEditor* editor) {
       FIELD(dim, "element dimensionality");
       FIELD(radius, "radius around primitive element");
       FIELD(size, "vertex bounding box half sizes in qpos0");
-      FIELD(internal, "enable internal collisions");
       FIELD(flatskin, "render flex skin with flat shading");
       FIELD(selfcollide, "mode for flex self collision");
       FIELD(passive, "mode for passive collisions");
@@ -554,6 +553,8 @@ void ElementSpecGui(mjsElement* element, SpecEditor* editor) {
       FIELD(thickness, "thickness (2D only)");
       FIELD(elastic2d,
             "2D passive forces; 0: none, 1: bending, 2: stretching, 3: both");
+      FIELD(section, "1D cross-section (mjtFlexSection)");
+      FIELD(sectionsize, "1D box cross-section half-sizes");
       FIELD(info, "message appended to compiler errors");
       break;
     }

@@ -16,6 +16,11 @@
 
 #include "src/engine/engine_sleep.h"
 
+#include <atomic>
+#include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -23,6 +28,7 @@
 #include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 #include <mujoco/mjmodel.h>
+#include <mujoco/mjplugin.h>
 #include <mujoco/mujoco.h>
 #include "test/fixture.h"
 
@@ -554,15 +560,117 @@ TEST_F(SleepTest, FreeBodySleepZeroVelocity) {
 static const char* const kInitIslandFailModel =
     "engine/testdata/sleep/init_island_fail.xml";
 
+// trees marked sleep='init' that cannot be slept compile with a warning and
+// start awake
 TEST_F(SleepTest, InitIslandFail) {
   const std::string xml_path = GetTestDataFilePath(kInitIslandFailModel);
+  mock_warning_handler.ExpectWarnings(
+      "3 trees were marked as sleep='init' but only 0 could be slept. Body "
+      "'asleep_init0' (id=1) is the root of the first tree that could not be "
+      "slept.");
   char error[1024];
   mjModel* m = mj_loadXML(xml_path.c_str(), 0, error, sizeof(error));
-  EXPECT_THAT(m, IsNull());
-  EXPECT_THAT(error,
-              HasSubstr("3 trees were marked as sleep='init' but only 0 could "
-                        "be slept.\nBody 'asleep_init0' (id=1) is the root of "
-                        "the first tree that could not be slept."));
+  ASSERT_THAT(m, NotNull()) << error;
+  mjData* d = mj_makeData(m);
+  ASSERT_THAT(d, NotNull());
+  for (int i = 0; i < m->ntree; i++) {
+    EXPECT_LT(d->tree_asleep[i], 0) << i;
+  }
+  mj_deleteData(d);
+  mj_deleteModel(m);
+}
+
+// applied force keeps a tree awake
+void PushControl(const mjModel* m, mjData* d) { d->qfrc_applied[0] = 1; }
+
+// MuJoCo allocations not yet freed, counted by CountingMalloc and CountingFree
+std::atomic<int> live_allocations = 0;
+
+void* CountingMalloc(std::size_t size) {
+  live_allocations++;
+  return std::malloc(size);
+}
+
+void CountingFree(void* block) {
+  live_allocations--;
+  std::free(block);
+}
+
+// passive plugin whose instance data is allocated by init and read by compute
+int RegisterDataPlugin() {
+  mjpPlugin plugin;
+  mjp_defaultPlugin(&plugin);
+  plugin.name = "mujoco.test.sleepdata";
+  plugin.capabilityflags |= mjPLUGIN_PASSIVE;
+  plugin.nstate = +[](const mjModel* m, int instance) { return 1; };
+  plugin.init = +[](const mjModel* m, mjData* d, int instance) {
+    d->plugin_data[instance] =
+        reinterpret_cast<uintptr_t>(mju_malloc(sizeof(mjtNum)));
+    return 0;
+  };
+  plugin.destroy = +[](mjData* d, int instance) {
+    mju_free(reinterpret_cast<void*>(d->plugin_data[instance]));
+    d->plugin_data[instance] = 0;
+  };
+  plugin.reset = +[](const mjModel* m, mjtNum* plugin_state, void* plugin_data,
+                     int instance) { *static_cast<mjtNum*>(plugin_data) = 0; };
+  plugin.compute = +[](const mjModel* m, mjData* d, int instance, int type) {
+    *reinterpret_cast<mjtNum*>(d->plugin_data[instance]) += 1;
+  };
+  return mjp_registerPlugin(&plugin);
+}
+
+// a reset that cannot put sleep='init' trees to sleep warns and leaves them
+// awake, allocating and freeing nothing
+TEST_F(SleepTest, InitFailureWarnsAndLeavesTreesAwake) {
+  static const int plugin_slot = RegisterDataPlugin();
+  ASSERT_GE(plugin_slot, 0);
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <extension>
+      <plugin plugin="mujoco.test.sleepdata">
+        <instance name="data"/>
+      </plugin>
+    </extension>
+    <option>
+      <flag sleep="enable"/>
+    </option>
+    <worldbody>
+      <body sleep="init">
+        <freejoint/>
+        <geom size=".1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  MjModelPtr model = LoadModelFromString(xml);
+  ASSERT_THAT(model, NotNull());
+  mju_user_malloc = CountingMalloc;
+  mju_user_free = CountingFree;
+  mjData* d = mj_makeData(model.get());
+  int allocated = live_allocations;
+  EXPECT_GE(d->tree_asleep[0], 0);
+  mock_warning_handler.ExpectWarnings("could be slept");
+  mjcb_control = PushControl;
+  mj_resetData(model.get(), d);
+  EXPECT_LT(d->tree_asleep[0], 0);
+  EXPECT_EQ(live_allocations, allocated);
+  mj_resetDataKeyframe(model.get(), d, -1);
+  EXPECT_LT(d->tree_asleep[0], 0);
+  EXPECT_EQ(live_allocations, allocated);
+  mjData* d2 = mj_makeData(model.get());
+  EXPECT_THAT(d2, NotNull());
+  if (d2) {
+    EXPECT_LT(d2->tree_asleep[0], 0);
+    mj_step(model.get(), d2);
+    mj_deleteData(d2);
+  }
+  EXPECT_EQ(live_allocations, allocated);
+  mjcb_control = nullptr;
+  mj_deleteData(d);
+  EXPECT_EQ(live_allocations, 0);
+  mju_user_malloc = nullptr;
+  mju_user_free = nullptr;
 }
 
 // Test that a constrained flex eventually goes to sleep.
@@ -755,6 +863,233 @@ TEST_F(SleepTest, HollowVsSolidSleep) {
   mj_deleteModel(m);
 }
 
+// Test sleep/wake lifecycle with elastic flexes under the discrete integrator
+// (both CG and Newton solvers).
+TEST_F(SleepTest, FlexSleepDiscrete) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.002" integrator="discrete" viscosity="2" sleep_tolerance="0.1">
+      <flag sleep="enable"/>
+    </option>
+    <worldbody>
+      <geom type="plane" size="5 5 .1"/>
+      <flexcomp name="cloth" type="grid" count="3 3 1" spacing=".05 .05 .05"
+                radius=".01" dim="2" mass=".3" pos="0 0 .01" dof="full">
+        <contact selfcollide="none"/>
+        <edge equality="true" solref="0.02 1"/>
+        <elasticity young="1e3" poisson="0.2" damping="0.2" elastic2d="bend" thickness="0.01"/>
+      </flexcomp>
+      <flexcomp name="hollow" type="grid" count="2 2 2" spacing=".05 .05 .05"
+                radius=".01" dim="3" mass=".4" pos="0.5 0 .035" dof="trilinear">
+        <contact selfcollide="none"/>
+        <edge equality="strain" solref="0.02 1"/>
+      </flexcomp>
+      <body name="ball" pos="0 0.01 0.5">
+        <freejoint/>
+        <geom type="sphere" size=".03" mass=".1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(m.get(), NotNull()) << error;
+  int cloth_id = mj_name2id(m.get(), mjOBJ_FLEX, "cloth");
+  int hollow_id = mj_name2id(m.get(), mjOBJ_FLEX, "hollow");
+  ASSERT_GE(cloth_id, 0);
+  ASSERT_GE(hollow_id, 0);
+
+  for (mjtSolver solver : {mjSOL_CG, mjSOL_NEWTON}) {
+    m->opt.solver = solver;
+    MjDataPtr d = MakeData(m);
+
+    // phase 1: cloth and hollow flexes settle onto the plane and fall asleep
+    // before the ball reaches them
+    for (int step = 0; step < 500; step++) {
+      mj_step(m.get(), d.get());
+      if (mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, cloth_id) == mjS_ASLEEP &&
+          mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, hollow_id) ==
+              mjS_ASLEEP) {
+        break;
+      }
+    }
+    ASSERT_EQ(mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, cloth_id), mjS_ASLEEP)
+        << "solver " << solver;
+    ASSERT_EQ(mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, hollow_id),
+              mjS_ASLEEP)
+        << "solver " << solver;
+
+    // phase 2: falling ball impacts cloth and wakes it while hollow stays
+    // asleep
+    for (int step = 0; step < 2000; step++) {
+      mj_step(m.get(), d.get());
+      if (mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, cloth_id) == mjS_AWAKE) {
+        break;
+      }
+    }
+    EXPECT_EQ(mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, cloth_id), mjS_AWAKE)
+        << "solver " << solver;
+    EXPECT_EQ(mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, hollow_id),
+              mjS_ASLEEP)
+        << "solver " << solver;
+
+    // phase 3: everything settles back to sleep
+    for (int step = 0; step < 5000; step++) {
+      mj_step(m.get(), d.get());
+      if (d->ntree_awake == 0) {
+        break;
+      }
+    }
+    EXPECT_EQ(d->ntree_awake, 0) << "solver " << solver;
+  }
+}
+
+// Test sleep/wake lifecycle with purely passive elastic flexes (no equality
+// constraints, both non-interpolated and trilinear interpolated, including a
+// pinned node 0 and a zero-contact floating flex) under the discrete
+// integrator.
+TEST_F(SleepTest, PassiveFlexSleepDiscrete) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.002" integrator="discrete" viscosity="2" sleep_tolerance="0.1">
+      <flag sleep="enable"/>
+    </option>
+    <worldbody>
+      <geom type="plane" size="5 5 .1"/>
+      <flexcomp name="passive_cloth" type="grid" count="3 3 1" spacing=".05 .05 .05"
+                radius=".01" dim="2" mass=".3" pos="0 0 .01" dof="full">
+        <pin id="0"/>
+        <contact selfcollide="none"/>
+        <elasticity young="1e3" poisson="0.2" damping="0.2" elastic2d="both" thickness="0.01"/>
+      </flexcomp>
+      <flexcomp name="passive_solid" type="grid" count="2 2 2" spacing=".05 .05 .05"
+                radius=".01" dim="3" mass=".4" pos="0.5 0 .06" dof="trilinear">
+        <pin id="0"/>
+        <contact selfcollide="none"/>
+        <elasticity young="2e3" poisson="0.2" damping="0.2"/>
+      </flexcomp>
+      <body name="ball_cloth" pos="0 0.01 0.5">
+        <freejoint/>
+        <geom type="sphere" size=".03" mass=".1"/>
+      </body>
+      <body name="ball_solid" pos="0.52 0.02 1.2">
+        <freejoint/>
+        <geom type="sphere" size=".03" mass=".1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(m.get(), NotNull()) << error;
+  int cloth_id = mj_name2id(m.get(), mjOBJ_FLEX, "passive_cloth");
+  int solid_id = mj_name2id(m.get(), mjOBJ_FLEX, "passive_solid");
+  ASSERT_GE(cloth_id, 0);
+  ASSERT_GE(solid_id, 0);
+  EXPECT_EQ(m->flex_edgeequality[cloth_id], 0);
+  EXPECT_EQ(m->flex_edgeequality[solid_id], 0);
+
+  for (mjtSolver solver : {mjSOL_CG, mjSOL_NEWTON}) {
+    m->opt.solver = solver;
+    MjDataPtr d = MakeData(m);
+
+    // phase 1: both passive flexes settle and fall asleep before the balls
+    // reach them
+    for (int step = 0; step < 500; step++) {
+      mj_step(m.get(), d.get());
+      if (mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, cloth_id) == mjS_ASLEEP &&
+          mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, solid_id) == mjS_ASLEEP) {
+        break;
+      }
+    }
+    ASSERT_EQ(mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, cloth_id), mjS_ASLEEP)
+        << "solver " << solver;
+    ASSERT_EQ(mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, solid_id), mjS_ASLEEP)
+        << "solver " << solver;
+
+    // phase 2: ball_cloth impacts passive_cloth and wakes all of its trees
+    // while passive_solid stays asleep
+    for (int step = 0; step < 2000; step++) {
+      mj_step(m.get(), d.get());
+      if (mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, cloth_id) == mjS_AWAKE) {
+        break;
+      }
+    }
+    EXPECT_EQ(mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, cloth_id), mjS_AWAKE)
+        << "solver " << solver;
+    EXPECT_EQ(mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, solid_id), mjS_ASLEEP)
+        << "solver " << solver;
+
+    // phase 3: ball_solid impacts passive_solid (whose node 0 is pinned) and
+    // wakes all of its dynamic node trees
+    for (int step = 0; step < 2000; step++) {
+      mj_step(m.get(), d.get());
+      if (mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, solid_id) == mjS_AWAKE) {
+        break;
+      }
+    }
+    EXPECT_EQ(mj_sleepState(m.get(), d.get(), mjOBJ_FLEX, solid_id), mjS_AWAKE)
+        << "solver " << solver;
+
+    // phase 4: everything settles back to sleep
+    for (int step = 0; step < 5000; step++) {
+      mj_step(m.get(), d.get());
+      if (d->ntree_awake == 0) {
+        break;
+      }
+    }
+    EXPECT_EQ(d->ntree_awake, 0) << "solver " << solver;
+  }
+
+  // also verify a zero-contact floating passive flex sleeps and wakes as one
+  // cycle when a single vertex is perturbed
+  static constexpr char free_xml[] = R"(
+  <mujoco>
+    <option timestep="0.002" integrator="discrete" viscosity="5" sleep_tolerance="0.05">
+      <flag sleep="enable" gravity="disable" contact="disable"/>
+    </option>
+    <worldbody>
+      <flexcomp name="free_cloth" type="grid" count="2 2 1" spacing=".05 .05 .05"
+                radius=".01" dim="2" mass=".2" dof="full">
+        <elasticity young="1e3" poisson="0.2" damping="0.2" elastic2d="both" thickness="0.01"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+  MjModelPtr mf = LoadModelFromString(free_xml, error, sizeof(error));
+  ASSERT_THAT(mf.get(), NotNull()) << error;
+  MjDataPtr df = MakeData(mf);
+  df->qvel[0] = 0.01;
+  for (int step = 0; step < 500; step++) {
+    mj_step(mf.get(), df.get());
+    if (df->ntree_awake == 0) {
+      break;
+    }
+  }
+  ASSERT_EQ(df->ntree_awake, 0);
+  // Switching to a non-metric integrator at runtime wakes the passive flex and
+  // prevents individual vertices from sleeping without the metric union
+  mf->opt.integrator = mjINT_EULER;
+  for (int step = 0; step < 200; step++) {
+    mj_step(mf.get(), df.get());
+  }
+  EXPECT_EQ(df->ntree_awake, mf->ntree);
+
+  // Switching back to discrete allows the passive flex to sleep again as one
+  // cycle, and perturbing one vertex wakes all 4 vertex trees
+  mf->opt.integrator = mjINT_DISCRETE;
+  for (int step = 0; step < 500; step++) {
+    mj_step(mf.get(), df.get());
+    if (df->ntree_awake == 0) {
+      break;
+    }
+  }
+  ASSERT_EQ(df->ntree_awake, 0);
+  df->qvel[0] = 1.0;
+  mj_step(mf.get(), df.get());
+  EXPECT_EQ(df->ntree_awake, mf->ntree);
+}
+
 // Test that a sleeping flex touching a non-world static body doesn't crash.
 TEST_F(SleepTest, FlexStaticContact) {
   const std::string xml_path =
@@ -929,6 +1264,72 @@ TEST_F(SleepTest, MocapWeldEqualityWakes) {
   d->eq_active[mj_name2id(m.get(), mjOBJ_EQUALITY, "grab")] = 1;
   mj_step(m.get(), d.get());
   EXPECT_EQ(d->ntree_awake, 1);
+}
+
+// plugin whose init runs kinematics before mj_resetData, like the cable plugin
+// state: xpos of the last body, computed at init
+void RegisterKinematicsPlugin() {
+  mjpPlugin plugin;
+  mjp_defaultPlugin(&plugin);
+  plugin.name = "mujoco.test.kinematics";
+  plugin.nstate = +[](const mjModel* m, int instance) { return 3; };
+  plugin.init = +[](const mjModel* m, mjData* d, int instance) {
+    mju_copy(d->qpos, m->qpos0, m->nq);
+    mj_kinematics(m, d);
+    mju_copy3(d->plugin_state + m->plugin_stateadr[instance],
+              d->xpos + 3 * (m->nbody - 1));
+    return 0;
+  };
+  mjp_registerPlugin(&plugin);
+}
+
+// plugin init sees all trees awake and static bodies posed
+TEST_F(SleepTest, PluginInitKinematics) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option>
+      <flag sleep="enable"/>
+    </option>
+    <extension>
+      <plugin plugin="mujoco.test.kinematics">
+        <instance name="kinematics"/>
+      </plugin>
+    </extension>
+    <worldbody>
+      <body>
+        <joint/>
+        <geom size=".1"/>
+      </body>
+      <body pos="0 0 1">
+        <body pos="1 0 0">
+          <joint/>
+          <geom size=".1"/>
+        </body>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  RegisterKinematicsPlugin();
+  char error[1024];
+  MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(m.get(), NotNull()) << error;
+
+  // zero-filled buffers: uninitialized sleep state would put both trees in one
+  // sleep cycle through tree 0; mjData buffers must be 64-byte aligned
+  mju_user_malloc = +[](size_t size) {
+    void* ptr = ::operator new(size, std::align_val_t(64));
+    std::memset(ptr, 0, size);
+    return ptr;
+  };
+  mju_user_free =
+      +[](void* ptr) { ::operator delete(ptr, std::align_val_t(64)); };
+  mjData* d = mj_makeData(m.get());
+  mj_forward(m.get(), d);
+  EXPECT_EQ(AsVector(d->plugin_state, 3),
+            AsVector(d->xpos + 3 * (m->nbody - 1), 3));
+  mj_deleteData(d);
+  mju_user_malloc = nullptr;
+  mju_user_free = nullptr;
 }
 
 }  // namespace

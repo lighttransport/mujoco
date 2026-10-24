@@ -34,24 +34,6 @@
 
 //-------------------------- local utilities -------------------------------------------------------
 
-// clear island-related arena pointers in mjData
-static void clearIsland(mjData* d, size_t parena) {
-#define X(type, name, nr, nc) d->name = NULL;
-  MJDATA_ARENA_POINTERS_ISLAND
-#undef X
-  d->nefc = 0;
-  d->nisland = 0;
-  d->nidof = 0;
-  d->parena = parena;
-
-  // poison remaining memory
-#ifdef mjUSEASAN
-  ASAN_POISON_MEMORY_REGION(
-    (char*)d->arena + d->parena, d->narena - d->pstack - d->parena);
-#endif
-}
-
-
 // allocate island arrays on arena, return 1 on success, 0 on failure
 static int arenaAllocIsland(const mjModel* m, mjData* d) {
 #undef MJ_M
@@ -59,13 +41,11 @@ static int arenaAllocIsland(const mjModel* m, mjData* d) {
 #undef MJ_D
 #define MJ_D(n) d->n
 
-  size_t parena_old = d->parena;
-
 #define X(type, name, nr, nc)                                                 \
   d->name = mj_arenaAllocByte(d, sizeof(type) * (nr) * (nc), _Alignof(type)); \
   if (!d->name) {                                                             \
     mj_warning(d, mjWARN_CNSTRFULL, d->narena);                               \
-    clearIsland(d, parena_old);                                               \
+    mj_clearEfc(d);                                                           \
     return 0;                                                                 \
   }
 
@@ -296,28 +276,6 @@ static void treeIterInit(const mjModel* m, const mjData* d, int i, mjTreeIter* i
     iter->trees[0] = m->dof_treeid[m->jnt_dofadr[efc_id]];
   }
 
-  // contact
-  else if (efc_type == mjCNSTR_CONTACT_FRICTIONLESS ||
-           efc_type == mjCNSTR_CONTACT_PYRAMIDAL ||
-           efc_type == mjCNSTR_CONTACT_ELLIPTIC) {
-    int g1 = d->contact[efc_id].geom[0];
-    int g2 = d->contact[efc_id].geom[1];
-
-    // geom-geom contact
-    if (g1 >= 0 && g2 >= 0) {
-      iter->trees[0] = m->body_treeid[m->geom_bodyid[g1]];
-      iter->trees[1] = m->body_treeid[m->geom_bodyid[g2]];
-      if (iter->trees[0] < 0 && iter->trees[1] < 0) {
-        mjERROR("contact %d is between two static bodies", efc_id);  // SHOULD NOT OCCUR
-      }
-    }
-
-    // no shortcut for flex contacts: enable generic scan
-    else {
-      iter->jac_idx = 0;
-    }
-  }
-
   // connect or weld constraints
   else if (efc_type == mjCNSTR_EQUALITY &&
            (m->eq_type[efc_id] == mjEQ_CONNECT ||
@@ -352,6 +310,49 @@ static int isFlexEquality(const mjModel* m, int efc_type, int efc_id) {
          (m->eq_type[efc_id] == mjEQ_FLEX ||
           m->eq_type[efc_id] == mjEQ_FLEXVERT ||
           m->eq_type[efc_id] == mjEQ_FLEXSTRAIN);
+}
+
+
+// activate and union the trees of the bodies of a contact, return the first tree, -1 if none:
+// with flexes a contact can span many trees, and the values of its Jacobian rows can vanish
+// (e.g. contact point on a hinge axis), so the trees cannot be found by scanning the rows
+static int unionContactTrees(const mjModel* m, const mjData* d, int* parent,
+                             const mjContact* con) {
+  // geom-geom: trees of the two geom bodies
+  if (con->geom[0] >= 0 && con->geom[1] >= 0) {
+    int tree1 = m->body_treeid[m->geom_bodyid[con->geom[0]]];
+    int tree2 = m->body_treeid[m->geom_bodyid[con->geom[1]]];
+    if (tree1 < 0) {
+      tree1 = tree2;
+      tree2 = -1;
+    }
+    if (tree1 >= 0) {
+      mj_dsuMerge(parent, tree1, tree2);
+    }
+    return tree1;
+  }
+
+  // flex: get bodies of both sides
+  int body[729];  // 729 = 27*27, as in mj_contactJacobian
+  int nb = mj_contactBodyWeight(m, d, con, 0, body, NULL);
+  nb += mj_contactBodyWeight(m, d, con, 1, body+nb, NULL);
+
+  // activate the first tree, union the others with it, skip static bodies
+  int tree1 = -1;
+  for (int j=0; j < nb; j++) {
+    int tree2 = m->body_treeid[body[j]];
+    if (tree2 < 0 || tree2 == tree1) {
+      continue;
+    }
+    if (tree1 < 0) {
+      tree1 = tree2;
+      mj_dsuMerge(parent, tree1, -1);
+    } else {
+      mj_dsuMerge(parent, tree1, tree2);
+    }
+  }
+
+  return tree1;
 }
 
 
@@ -394,6 +395,18 @@ static const char* unionConstraintTrees(const mjModel* m, const mjData* d, int* 
     efc_type = d->efc_type[i];
     efc_id = d->efc_id[i];
 
+    // contact: union the trees of its bodies
+    if (efc_type == mjCNSTR_CONTACT_FRICTIONLESS ||
+        efc_type == mjCNSTR_CONTACT_PYRAMIDAL ||
+        efc_type == mjCNSTR_CONTACT_ELLIPTIC) {
+      efc_tree[i] = unionContactTrees(m, d, parent, d->contact + efc_id);
+      if (efc_tree[i] < 0) {
+        *err_i = efc_id;
+        return "contact %d is between two static bodies";
+      }
+      continue;
+    }
+
     // initialize tree iterator
     mjTreeIter iter;
     treeIterInit(m, d, i, &iter);
@@ -431,11 +444,8 @@ static const char* unionConstraintTrees(const mjModel* m, const mjData* d, int* 
   // effective metric (integrator=discrete) carries the coupling inside the constraint solve. Awake
   // trees only: sleeping trees must stay out of islands (mj_sleep invariant, matching the
   // constraint filter); waking a flex as a unit remains the wake machinery's job.
-  // NOTE: passive flex contact between two DIFFERENT flexes has no efc row either, and nothing
-  // merges their trees. Unreachable while effFlexAny forces a monolithic solve; island-local
-  // flex operators will need a contact-driven merge here (walk exclude==4 contacts, union sides).
   for (int f=0; f < m->nflex; f++) {
-    if (!mj_effFlexStiffPossible(m, f) && !mj_effFlexContactPossible(m, f)) {
+    if (!mj_effFlexPossible(m, f)) {
       continue;
     }
 
@@ -461,6 +471,34 @@ static const char* unionConstraintTrees(const mjModel* m, const mjData* d, int* 
         tree1 = tree2;
       } else {
         mj_dsuMerge(parent, tree1, tree2);
+      }
+    }
+  }
+
+  // passive flex contacts (exclude == 4) also carry metric terms without efc rows: union the
+  // awake trees of their bodies so two flexes (or a flex and a rigid body) coupled by passive
+  // contact share one island
+  if (mj_isMetric(m)) {
+    for (int i=0; i < d->ncon; i++) {
+      const mjContact* con = d->contact + i;
+      if (con->exclude != 4) {
+        continue;
+      }
+      int body[729];  // 729 = 27*27, as in mj_contactJacobian
+      int nb = mj_contactBodyWeight(m, d, con, 0, body, NULL);
+      nb += mj_contactBodyWeight(m, d, con, 1, body+nb, NULL);
+
+      int tree1 = -1;
+      for (int j=0; j < nb; j++) {
+        int tree2 = m->body_treeid[body[j]];
+        if (tree2 < 0 || tree2 == tree1 || !d->tree_awake[tree2]) {
+          continue;
+        }
+        if (tree1 < 0) {
+          tree1 = tree2;
+        } else {
+          mj_dsuMerge(parent, tree1, tree2);
+        }
       }
     }
   }
@@ -526,8 +564,9 @@ static const char* unionConstraintTrees(const mjModel* m, const mjData* d, int* 
 void mj_island(const mjModel* m, mjData* d) {
   int nv = m->nv, nefc = d->nefc, ntree = m->ntree;
 
-  // no constraints or islands disabled: quick return
-  if (mjDISABLED(mjDSBL_ISLAND) || !nefc) {
+  // no constraints (and no sleeping metric-coupled flexes) or islands disabled: quick return
+  if (mjDISABLED(mjDSBL_ISLAND) ||
+      (!nefc && !(mjENABLED(mjENBL_SLEEP) && mj_isMetric(m) && mj_effFlexAny(m)))) {
     d->nisland = d->nidof = 0;
     return;
   }

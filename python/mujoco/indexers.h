@@ -23,7 +23,7 @@
 #include <variant>
 #include <vector>
 
-#include <absl/container/flat_hash_map.h>
+#include "absl/container/flat_hash_map.h"
 #include <mujoco/mjxmacro.h>
 #include "indexer_xmacro.h"
 #include "raw.h"
@@ -168,6 +168,7 @@ class MjDataGroupedViewsBase {
   int index() const { return index_; }
   const std::string& name() const { return name_; }
   raw::MjData* ptr() { return d_; }
+  const raw::MjModel* model() const { return m_; }
 
  protected:
   int index_;

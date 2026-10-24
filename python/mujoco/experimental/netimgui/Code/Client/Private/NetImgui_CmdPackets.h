@@ -1,4 +1,14 @@
+// Google modifications:
+//  - Zero-initialize CmdInput with memset in its constructor, and check
+//    sizeof(CmdInput) with static_assert.
+//  - PendingCom: added SizeMax/kMaxCmdSize, GetSizeToReceive() and
+//    IsBiggerBufferNeeded() so the command size received from the network can
+//    never overflow the receive buffer.
+//  - ToPointers() of commands received from the network return false when
+//    their offsets or sizes are invalid (added CmdTexture::ToPointers()).
 #pragma once
+
+#include <cstring>
 
 #include "NetImgui_CmdPackets_DrawFrame.h"
 #include "NetImgui_Shared.h"
@@ -317,25 +327,33 @@ struct alignas(8) CmdInput : public CmdHeader {
   static constexpr uint32_t kAnalog_Last = ImGuiKey_GamepadRStickDown;
   static constexpr uint32_t kAnalog_Count = kAnalog_Last - kAnalog_First + 1;
 
-  CmdInput() : CmdHeader(CmdHeader::eCommands::Input, sizeof(CmdInput)) {}
-  uint16_t mScreenSize[2] = {};
-  int16_t mMousePos[2] = {};
-  float mMouseWheelVert = 0.f;
-  float mMouseWheelHoriz = 0.f;
-  uint16_t mKeyChars[256] = {};  // Input characters
-  uint16_t mKeyCharCount = 0;    // Number of valid input characters
-  bool mCompressionUse =
-      false;  // Server would like client to compress the communication data
-  bool mCompressionSkip =
-      false;  // Server forcing next client's frame data to be uncompressed
-  float mFontDPIScaling =
-      1.f;  // Font scaling request by Server accounting for monitor DPI
-  float mDesiredFps = 30.f;  // Requested redraw speed
-  uint64_t mMouseDownMask = 0;
-  uint64_t mInputDownMask[(ImGuiKey_COUNT + 63) / 64] = {};
-  float mInputAnalog[kAnalog_Count] = {};
+  CmdInput() : CmdHeader(CmdHeader::eCommands::Input, sizeof(CmdInput)) {
+    memset(static_cast<void*>(this), 0, sizeof(*this));
+    mSize = sizeof(CmdInput);
+    mType = CmdHeader::eCommands::Input;
+    mFontDPIScaling = 1.f;
+    mDesiredFps = 30.f;
+  }
+  uint16_t mScreenSize[2];
+  int16_t mMousePos[2];
+  float mMouseWheelVert;
+  float mMouseWheelHoriz;
+  uint16_t mKeyChars[256];  // Input characters
+  uint16_t mKeyCharCount;   // Number of valid input characters
+  bool mCompressionUse;     // Server would like client to compress the
+                            // communication data
+  bool mCompressionSkip;  // Server forcing next client's frame data to be
+                          // uncompressed
+  float mFontDPIScaling;  // Font scaling request by Server accounting for
+                          // monitor DPI
+  float mDesiredFps;      // Requested redraw speed
+  uint64_t mMouseDownMask;
+  uint64_t mInputDownMask[(ImGuiKey_COUNT + 63) / 64];
+  float mInputAnalog[kAnalog_Count];
   inline bool IsKeyDown(NetImguiKeys netimguiKey) const;
 };
+static_assert(sizeof(CmdInput) == 616,
+              "CmdInput is sent over the network as is");
 
 struct alignas(8) CmdTexture : public CmdHeader {
   enum class eType : uint8_t { Create, Update, Destroy };
@@ -357,6 +375,7 @@ struct alignas(8) CmdTexture : public CmdHeader {
       nullptr;  // Used for single linked list of pending textures (alignas
                 // needed to keep class size the same between win32/x64)
   OffsetPointer<uint8_t> mpTextureData;
+  inline bool ToPointers();
 };
 
 struct alignas(8) CmdDrawFrame : public CmdHeader {
@@ -374,7 +393,7 @@ struct alignas(8) CmdDrawFrame : public CmdHeader {
   uint8_t mCompressed = false;
   uint8_t PADDING[3] = {};
   OffsetPointer<ImguiDrawGroup> mpDrawGroups;
-  inline void ToPointers();
+  inline bool ToPointers();
   inline void ToOffsets();
 };
 
@@ -396,7 +415,7 @@ struct alignas(8) CmdClipboard : public CmdHeader {
       : CmdHeader(CmdHeader::eCommands::Clipboard, sizeof(CmdClipboard)) {}
   size_t mByteSize = 0;
   OffsetPointer<char> mContentUTF8;
-  inline void ToPointers();
+  inline bool ToPointers();
   inline void ToOffsets();
   inline static CmdClipboard* Create(const char* clipboard);
 };
@@ -405,18 +424,45 @@ struct alignas(8) CmdClipboard : public CmdHeader {
 // Keeping track of partial incoming/outgoing transmissions
 //=============================================================================
 struct PendingCom {
+  // Commands claiming a bigger size are rejected (protects against bad data)
+  static constexpr uint32_t kMaxCmdSize = 256u * 1024u * 1024u;
   size_t SizeCurrent = 0;  // Amount of data sent or received so far
+  size_t SizeMax = 0;      // Capacity of 'pCommand' buffer (when receiving)
   bool bAutoFree = false;  // Need to free data buffer at the end of processing
   bool bError = false;     // If an error occurs during coms
   CmdHeader* pCommand =
       nullptr;  // Where to store incoming data or read to send data
   inline bool IsError() const { return bError; }
   inline bool IsDone() const {
-    return IsError() || (pCommand && pCommand->mSize == SizeCurrent);
+    return IsError() || (pCommand && SizeCurrent >= sizeof(CmdHeader) &&
+                         pCommand->mSize == SizeCurrent);
   }
   inline bool IsReady() const { return !IsError() && pCommand == nullptr; }
   inline bool IsPending() const {
     return !IsError() && !IsDone() && !IsReady();
+  }
+  // Receiving a command: the header is received first (into a CmdHeader sized
+  // buffer), then the caller allocates a buffer for the command size it holds.
+  // Both methods validate that size, since it comes from the network.
+  //
+  // Amount of data left to receive. Flags an error when the command size is
+  // smaller than the data already received or exceeds the buffer 'SizeMax'.
+  size_t GetSizeToReceive() {
+    const size_t sizeExpected = SizeCurrent < sizeof(CmdHeader)
+                                    ? sizeof(CmdHeader)
+                                    : pCommand->mSize;
+    bError |= sizeExpected < SizeCurrent || sizeExpected > SizeMax;
+    return bError ? 0 : sizeExpected - SizeCurrent;
+  }
+  // True once the header of a command bigger than the header buffer has been
+  // received: the caller must allocate 'pCommand->mSize' bytes for it (and
+  // update 'SizeMax'). Flags an error when that size is invalid.
+  bool IsBiggerBufferNeeded() {
+    const bool bHeaderDone =
+        SizeCurrent == sizeof(CmdHeader) && SizeMax == sizeof(CmdHeader);
+    bError |= bHeaderDone && (pCommand->mSize < sizeof(CmdHeader) ||
+                              pCommand->mSize > kMaxCmdSize);
+    return !bError && bHeaderDone && pCommand->mSize > sizeof(CmdHeader);
   }
 };
 

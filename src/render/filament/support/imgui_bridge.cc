@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -27,7 +28,7 @@
 #include <math/vec3.h>
 #include <mujoco/mjrfilament.h>
 #include <mujoco/mujoco.h>
-#include "render/filament/mjrfilament_cpp.h"
+#include "render/filament/support/mjrf_ptr.h"
 
 namespace mujoco {
 
@@ -53,9 +54,10 @@ ImguiBridge::~ImguiBridge() {
   }
 }
 
-uintptr_t ImguiBridge::UploadImage(uintptr_t tex_id, const uint8_t* pixels,
-                                   int width, int height, int bpp) {
-  if (pixels == nullptr) {
+uintptr_t ImguiBridge::UploadImage(uintptr_t tex_id,
+                                   std::span<const std::byte> pixels, int width,
+                                   int height) {
+  if (pixels.empty()) {
     // If the pixels are nullptr, we destroy the texture. This is checked before
     // the bpp validation below: a destruction request carries no pixel format.
     if (tex_id != 0) {
@@ -64,9 +66,14 @@ uintptr_t ImguiBridge::UploadImage(uintptr_t tex_id, const uint8_t* pixels,
     return 0;
   }
 
-  if (bpp != 4 && bpp != 3) {
-    mju_error("Unsupported image bpp. Got %d, wanted 3 or 4", bpp);
+  if (width <= 0 || height <= 0 ||
+      (pixels.size() != static_cast<size_t>(width * height * 3) &&
+       pixels.size() != static_cast<size_t>(width * height * 4))) {
+    mju_error(
+        "Image size (%zu bytes) does not match %dx%d RGB or RGBA",
+        pixels.size(), width, height);
   }
+  const int bpp = pixels.size() / (width * height);
 
   // Assign a new texture ID.
   if (tex_id == 0) {
@@ -93,8 +100,9 @@ uintptr_t ImguiBridge::UploadImage(uintptr_t tex_id, const uint8_t* pixels,
 
   // Create a copy of the image to pass it to filament as we don't know the
   // lifetime of the data.
-  const size_t num_bytes = width * height * bpp;
+  const size_t num_bytes = pixels.size();
   std::byte* bytes = new std::byte[num_bytes];
+  std::memcpy(bytes, pixels.data(), num_bytes);
   const auto callback =
       +[](void* user) { delete[] reinterpret_cast<std::byte*>(user); };
 
@@ -104,9 +112,7 @@ uintptr_t ImguiBridge::UploadImage(uintptr_t tex_id, const uint8_t* pixels,
   texture_data.num_bytes = num_bytes;
   texture_data.user_data = bytes;
   texture_data.release = callback;
-
-  std::memcpy(bytes, pixels, num_bytes);
-  mjrf_setTextureData(texture, &texture_data);
+  mjrf_uploadTexture(texture, &texture_data);
   return tex_id;
 }
 
@@ -141,7 +147,7 @@ void ImguiBridge::UpdateTexture(ImTextureData* data) {
   texture_data.num_bytes = data->Width * data->Height * 4;
   texture_data.user_data = nullptr;
   texture_data.release = nullptr;
-  mjrf_setTextureData(iter->second.get(), &texture_data);
+  mjrf_uploadTexture(iter->second.get(), &texture_data);
   data->SetStatus(ImTextureStatus_OK);
 }
 
@@ -245,22 +251,21 @@ void ImguiBridge::Update() {
     data.vertices[2] = cmds->VtxBuffer.Data + sizeof(float) * 4;
     data.num_indices = cmds->IdxBuffer.Size;
     data.indices = cmds->IdxBuffer.Data;
-    mjrf_setMeshData(mesh, &data);
+    mjrf_uploadMesh(mesh, &data);
 
-    int index_offset = 0;
     for (const ImDrawCmd& command : cmds->CmdBuffer) {
       const int width = size.x * scale.x;
       const int height = size.y * scale.y;
 
       UniquePtr<mjrfRenderable>& renderable = renderables_[renderable_index];
-      mjrf_setRenderableMesh(renderable.get(), mesh, index_offset,
+      mjrf_setRenderableMesh(renderable.get(), mesh, command.IdxOffset,
                              command.ElemCount);
 
       mjrfMaterial material;
       mjrf_defaultMaterial(&material);
       material.color_texture = GetTexture(command.GetTexID());
 
-      material.decor_ux = true;
+      material.decor = true;
       // Scale clip rects to physical pixels here instead of using
       // ScaleClipRects, which previously caused flickering and clipping bugs:
       // it mutates draw data in place, so draw lists that are re-rendered
@@ -287,7 +292,6 @@ void ImguiBridge::Update() {
       const float size[] = {scale.x, scale.y, 1.0f};
       mjrf_setRenderableSize(renderable.get(), size);
 
-      index_offset += command.ElemCount;
       ++renderable_index;
     }
   }
@@ -297,38 +301,16 @@ void ImguiBridge::PrepareRenderables(int count) {
   while (renderables_.size() < count) {
     mjrfRenderableParams params;
     mjrf_defaultRenderableParams(&params);
-    params.cast_shadows = false;
-    params.receive_shadows = false;
+    params.cast_shadow = false;
+    params.receive_shadow = false;
     params.blend_order = static_cast<std::uint16_t>(renderables_.size() + 1);
     auto& renderable =
         renderables_.emplace_back(CreateRenderable(ctx_, params));
-    mjrf_addRenderableToScene(scene_, renderable.get());
+    mjrf_addSceneRenderable(scene_, renderable.get());
   }
   while (renderables_.size() > count) {
-    mjrf_removeRenderableFromScene(scene_, renderables_.back().get());
+    mjrf_removeSceneRenderable(scene_, renderables_.back().get());
     renderables_.pop_back();
   }
 }
-
-mjrCamera ImguiBridge::GetCamera(int width, int height) const {
-  mjrCamera camera;
-  camera.orthographic = true;
-  camera.pos[0] = 0.0f;
-  camera.pos[1] = 0.0f;
-  camera.pos[2] = 1.0f;
-  camera.forward[0] = 0.0f;
-  camera.forward[1] = 0.0f;
-  camera.forward[2] = -1.0f;
-  camera.up[0] = 0.0f;
-  camera.up[1] = 1.0f;
-  camera.up[2] = 0.0f;
-  camera.frustum_top = 0.0f;
-  camera.frustum_near = 0.0f;
-  camera.frustum_far = 1.0f;
-  camera.frustum_center = width / 2.0f;
-  camera.frustum_width = width / 2.0f;
-  camera.frustum_bottom = height;
-  return camera;
-}
-
 }  // namespace mujoco

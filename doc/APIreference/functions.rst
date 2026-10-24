@@ -85,6 +85,13 @@ Compile :ref:`mjSpec` to :ref:`mjModel`. A spec can be edited and compiled multi
 :ref:`mjModel` instance that takes the edits into account.
 If compilation fails, :ref:`mj_compile` returns ``NULL``; the error can be read with :ref:`mjs_getError`.
 
+Compilation leaves the spec as it is written, with two exceptions. It completes :ref:`keyframes<keyframe>`: their
+vectors are sized for the model, and keyframes are added up to :ref:`nkey<size-nkey>`. And the compiler attributes
+:ref:`discardvisual<compiler-discardvisual>` and :ref:`fusestatic<compiler-fusestatic>` apply
+:ref:`mjs_discardVisual` and :ref:`mjs_fuseStatic` to the spec before it is compiled, which changes it: pointers to
+the elements which they remove are no longer valid. An operation which fails changes nothing, but one which succeeded
+stays applied if a later one, or the compilation, fails; the error then says so.
+
 .. _mj_copyBack:
 
 `mj_copyBack <#mj_copyBack>`__
@@ -92,7 +99,49 @@ If compilation fails, :ref:`mj_compile` returns ``NULL``; the error can be read 
 
 .. mujoco-include:: mj_copyBack
 
-Copy real-valued arrays from model to spec; return 1 on success.
+Copy to an :ref:`mjSpec` the values which were changed in the :ref:`mjModel` that was compiled from it. The changes
+can then be read in the spec, are saved with it, and are in the models which are compiled from it afterwards. An
+attribute is copied if the model no longer has what compilation gave it, all of its numbers; everything else in the
+spec is left as it is, including what was written there since it was compiled. The position and the orientation of a
+pose, and the bounds of a range, are separate attributes. Returns 1 on success. Returns 0 if the model was not compiled
+from the spec as it is structured now, or if a value was changed which the spec cannot express; nothing is copied
+then, and the error can be read with :ref:`mjs_getError`. A model can also be copied back to a copy of the spec made
+by :ref:`mj_copySpec`.
+
+The values which are copied are ``mjModel.opt``, ``mjModel.vis`` and ``mjModel.stat``, the real-valued parameters of
+bodies, joints, geoms, sites, cameras, lights, materials, contact pairs, equalities, tendons, actuators and sensors,
+custom numeric and tuple data, keyframes and the elevation data of height fields. Each is written as what compiles to
+it:
+
+- A pose is written in the :ref:`frame<frame>` which the element is in. An orientation which was not changed stays as
+  it was written, for example as Euler angles, and one which was changed is written as a quaternion. Where
+  compilation offsets the position by the orientation, for a mesh geom whose mesh is not centered at its origin and a
+  body which is :ref:`aligned<body-freejoint-align>` with its free joint, a new orientation also writes the position.
+  The reference pose of a body with a free joint is taken from ``mjModel.qpos0`` if that was changed.
+- Angles are written in the :ref:`unit<compiler-angle>` of the spec.
+- The size and pose of a geom or site which were written as ``fromto``, or computed by fitting a geom to a mesh, are
+  written in its place. A new radius of a capsule or cylinder leaves ``fromto`` as it is.
+- A mass or inertia which was changed gives the body an explicit :ref:`inertial<body-inertial>`, which is then no
+  longer inferred from its geoms; a body which has one keeps it as it was written if only the mass was changed. The
+  inertia of the other bodies still follows their geoms, including a size or pose which was copied.
+- A range whose ``limited`` attribute is "auto" keeps the limited state which it has in the model: the attribute is
+  set if the new range would be inferred otherwise.
+- A stiffness or damping of a joint with :ref:`springdamper<body-joint-springdamper>`, and a control or activation
+  range which was inherited with :ref:`inheritrange<actuator-position-inheritrange>`, are written in its place.
+- Elevation data of a height field which was read from a file is written in place of the file.
+- The relative pose of a :ref:`weld<equality-weld>` between bodies which is marked by a nonzero
+  ``mjModel.eq_data[11]`` is written as computed, with a zero quaternion.
+
+The following changes cannot be expressed in the spec and are errors: the mass or inertia of a body when
+:ref:`inertiafromgeom<compiler-inertiafromgeom>` is "true" or :ref:`settotalmass<compiler-settotalmass>` is set; the
+inertial frame of a body which is :ref:`aligned<body-freejoint-align>` with its free joint; the pose of the world
+body; the anchor or axis of a free joint and the axis of a ball joint; the size of a mesh or height field geom or of a
+mesh site, and the frame of a mesh; the field of view of a camera which has a sensor size, and the intrinsics of one
+which has none; and different control ranges for the inputs of an actuator which has one. So are changes which the
+next compilation would not keep: damping, armature, friction loss or their solver parameters which differ between the
+degrees of freedom of a ball or free joint; elevation data of a height field whose lowest and highest values are not
+0 and 1; and the anchor of a :ref:`connect<equality-connect>` between bodies in its second body, or the relative pose
+of a marked weld, other than the one which :ref:`mj_setConst` computes.
 
 .. _mj_recompile:
 
@@ -110,6 +159,35 @@ struct pointers while editing the model programmatically.
 
 :ref:`mj_recompile` returns 0 if compilation succeed. In the case of failure, the given :ref:`mjModel` and :ref:`mjData`
 instances will be deleted; as in :ref:`mj_compile`, the compilation error can be read with :ref:`mjs_getError`.
+
+.. _mj_loadTexture:
+
+`mj_loadTexture <#mj_loadTexture>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mj_loadTexture
+
+Decode texture id to raw bytes, exactly what compilation would store in tex_data, with
+tex_nchannel channels; embedded textures are copied from the model. The buffer is allocated with
+mju_malloc and freed by the caller; colorspace receives the resolved colorspace (mjtColorSpace).
+
+Return 0 on success.
+
+*Nullable:* ``width``, ``height``, ``colorspace``, ``error``
+
+.. _mj_embedAssets:
+
+`mj_embedAssets <#mj_embedAssets>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mj_embedAssets
+
+Copy of m with every by-reference asset loaded into it, as compilation would have stored it.
+
+Return NULL with error on a file that does not resolve. A hermetic MJB file of a model with
+by-reference assets is mj_embedAssets, then mj_saveModel, then mj_deleteModel.
+
+*Nullable:* ``error``
 
 .. _mj_saveLastXML:
 
@@ -142,7 +220,7 @@ Free last XML model if loaded. Called internally at each load.
 .. mujoco-include:: mj_saveXMLString
 
 Save spec to XML string, return 0 on success, -1 on failure. If the length of the output buffer is too small, returns
-the required size. XML saving automatically compiles the spec before saving.
+the required size. See :ref:`mj_saveXML` for what is saved.
 
 .. _mj_saveXML:
 
@@ -151,7 +229,11 @@ the required size. XML saving automatically compiles the spec before saving.
 
 .. mujoco-include:: mj_saveXML
 
-Save spec to XML file, return 0 on success, -1 otherwise. XML saving requires that the spec first be compiled.
+Save spec to XML file, return 0 on success, -1 otherwise. The compiler attributes
+:ref:`savecompiled<compiler-savecompiled>` and :ref:`savecanonical<compiler-savecanonical>` of the spec say whether
+the model is saved as it was compiled or as it is written in the spec, and in which notation; see
+:ref:`Model Encoding & Saving <meSaving>`. Saving the compiled values requires that the spec first be compiled, and
+compiled again after it is structurally edited (elements added, deleted or attached).
 
 .. _mju_getXMLDependencies:
 
@@ -323,8 +405,21 @@ Copy state from src to dst.
 .. mujoco-include:: mj_readCtrl
 
 Read the control value for an actuator at a given time, taking delays into account. If no history buffer exists, return
-``mjData.ctrl[id]``. If a history buffer exists (:ref:`nsample<actuator-general-nsample>` > 0), read from the delay
-buffer at ``time - actuator_delay[id]`` using the requested interpolation order:
+a pointer to the actuator's slice of ``mjData.ctrl``. If a history buffer exists (:ref:`nsample<actuator-general-nsample>` > 0),
+read from the delay buffer at ``time - actuator_delay[id]``. Note that the subtraction of the delay changes the semantic
+of the ``time`` argument from "time at which values were pushed into the delay buffer" to "time at which values come out
+of the delay buffer". See :ref:`Delays<CDelay>` for details.
+
+**Return value semantics:**
+
+- If no history buffer exists (:ref:`nsample<actuator-general-nsample>` = 0), returns a pointer to the actuator's slice
+  of ``mjData.ctrl``.
+- If a history buffer exists (:ref:`nsample<actuator-general-nsample>` > 0) and the requested time matches a stored
+  sample (always true for ``interp = 0``), returns a pointer to the data in the history buffer.
+- If interpolation is required (``interp = 1 or 2``), returns ``NULL`` and writes the interpolated result to
+  ``result`` (must be of size ``actuator_ctrlnum[id]``).
+
+**Interpolation:**
 
 - ``interp = 0``: Zero-order hold (piecewise constant)
 - ``interp = 1``: Piecewise Linear
@@ -332,10 +427,6 @@ buffer at ``time - actuator_delay[id]`` using the requested interpolation order:
 - ``interp = -1``: Use the actuator's :ref:`interp<actuator-general-interp>` value.
 
 Constant extrapolation is used outside of buffer bounds.
-
-Note that the subtraction of the delay changes the semantic of the ``time`` argument from "time at which values were
-pushed into the delay buffer" to "time at which values come out of the delay buffer". See :ref:`Delays<CDelay>` for
-details.
 
 .. _mj_readSensor:
 
@@ -386,8 +477,9 @@ Constant extrapolation is used outside of buffer bounds.
 .. mujoco-include:: mj_initCtrlHistory
 
 Initialize the history buffer for an actuator with custom values. The ``times`` array specifies the timestamps for each
-sample (must be length :ref:`nsample<actuator-general-nsample>`), and ``values`` specifies the control values. If
-``times`` is ``NULL``, the existing timestamps in the buffer are used, and only the values are updated.
+sample (must be length :ref:`nsample<actuator-general-nsample>`), and ``values`` specifies the control values (must be of
+size ``nsample * actuator_ctrlnum[id]``). If ``times`` is ``NULL``, the existing timestamps in the buffer are used, and
+only the values are updated.
 See :ref:`Delays<CDelay>` for details.
 
 .. _mj_initSensorHistory:
@@ -1190,8 +1282,12 @@ This function is triggered automatically if the following sensors are present in
 :ref:`framelinacc<sensor-framelinacc>`, :ref:`frameangacc<sensor-frameangacc>`.
 It is also triggered for :ref:`user sensors<sensor-user>` of :ref:`stage<sensor-user-needstage>` "acc".
 
-The computed force arrays ``cfrc_int`` and ``cfrc_ext`` currently suffer from a know bug, they do not take into account
-the effect of spatial tendons, see :issue:`832`.
+``cfrc_ext`` collects the forces that are not transmitted through the joints: applied Cartesian forces
+(``xfrc_applied``), contacts, connect and weld constraints, and spatial tendons (spring, damper, actuator, constraint
+and armature forces along the tendon path). ``cfrc_int`` is then the wrench transmitted through the joint, and its
+projection on the joint axes is the total joint-space force. Forces of actuators with site, slider-crank and body
+transmissions, gravity compensation, fluid forces, flex forces and custom passive forces are not yet collected and are
+attributed to the joints.
 
 .. _mj_maxContact:
 
@@ -1491,8 +1587,8 @@ Initialize an empty VFS, :ref:`mj_deleteVFS` must be called to deallocate the VF
 
 .. mujoco-include:: mj_mountVFS
 
-Mount a ResourceProvider to handle file operations under the given path; return 0: success,
-2: repeated name, -1: invalid resource provider.
+Mount a provider to handle file operations under the given path; return 0: success,
+2: repeated name, -1: invalid provider.
 
 .. _mj_unmountVFS:
 
@@ -1501,7 +1597,7 @@ Mount a ResourceProvider to handle file operations under the given path; return 
 
 .. mujoco-include:: mj_unmountVFS
 
-Unmount a previously mounted ResourceProvider; return 0: success, -1: not found in VFS.
+Unmount a previously mounted provider; return 0: success, -1: not found in VFS.
 
 .. _mj_addFileVFS:
 
@@ -1620,6 +1716,7 @@ Resources
 
 Resources are the interface between :ref:`resource providers <exProvider>` and MuJoCo model compilation code.
 These functions provide the means to query the resource provider and obtain resources.
+
 .. _mju_openResource:
 
 `mju_openResource <#mju_openResource>`__
@@ -1627,7 +1724,7 @@ These functions provide the means to query the resource provider and obtain reso
 
 .. mujoco-include:: mju_openResource
 
-Open a resource; if the name doesn't have a prefix matching a registered resource provider,
+Open a resource; if the name doesn't have a prefix matching a registered provider,
 then the OS filesystem is used.
 
 *Nullable:* ``dir``, ``vfs``, ``error``
@@ -1658,7 +1755,7 @@ return negative value if error.
 
 .. mujoco-include:: mju_writeResource
 
-Write resource data via its resource provider, return bytes written or -1 on error.
+Write resource data via its provider, return bytes written or -1 on error.
 
 *Nullable:* ``vfs``, ``error``
 
@@ -1693,7 +1790,9 @@ Find the decoder for a resource and return the decoded spec.
 
 The caller takes ownership of the spec and is responsible for cleaning it up.
 
-*Nullable:* ``vfs``
+On failure, return NULL and write the reason to error.
+
+*Nullable:* ``vfs``, ``error``
 
 .. _Initialization:
 
@@ -1759,7 +1858,10 @@ Copy mjModel, allocate new if dest is NULL.
 
 .. mujoco-include:: mj_saveModel
 
-Save model to binary MJB file or memory buffer; buffer has precedence when given.
+Save model to binary MJB file or memory buffer; buffer has precedence when given. The model is written as it is: a
+model with :ref:`by-reference<CAssetReference>` textures keeps them as references, and the file loads wherever the
+paths resolve. A hermetic file is :ref:`mj_embedAssets`, then :ref:`mj_saveModel` on the result, then
+:ref:`mj_deleteModel`.
 
 *Nullable:* ``filename``, ``buffer``
 
@@ -1831,7 +1933,9 @@ m is only required to contain the size fields from MJMODEL_INTS.
 
 .. mujoco-include:: mjv_copyData
 
-Copy mjData, skip large arrays not required for visualization.
+Copy :ref:`mjData`, skipping large arrays not required for visualization, like the constraint Jacobian. The copy is
+meant for visualization, e.g. with :ref:`mjv_updateScene`; the skipped arrays are ``NULL``, so it is not a valid input
+to simulation functions.
 
 .. _mj_resetCtrl:
 
@@ -2897,7 +3001,8 @@ Resize offscreen buffers.
 
 .. mujoco-include:: mjr_uploadTexture
 
-Upload texture to GPU, overwriting previous upload if any.
+Upload texture to GPU, overwriting previous upload if any. A by-reference texture (tex_adr == -1)
+is decoded with mj_loadTexture.
 
 .. _mjr_uploadMesh:
 
@@ -3131,14 +3236,14 @@ Gets active renderer information for the given filament context.
 
 Initializes the mjrfRenderRequest to default values.
 
-.. _mjrf_defaultReadPixelsRequest:
+.. _mjrf_defaultReadRequest:
 
-`mjrf_defaultReadPixelsRequest <#mjrf_defaultReadPixelsRequest>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_defaultReadRequest <#mjrf_defaultReadRequest>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_defaultReadPixelsRequest
+.. mujoco-include:: mjrf_defaultReadRequest
 
-Initializes the mjrfReadPixelsRequest to default values.
+Initializes the mjrfReadRequest to default values.
 
 .. _mjrf_render:
 
@@ -3210,7 +3315,7 @@ Initializes the mjrfTextureConfig to default values.
 .. mujoco-include:: mjrf_createTexture
 
 Creates a filament texture. Note that the texture will not be created on the GPU until
-`mjrf_setTextureData()` is called.
+`mjrf_uploadTexture()` is called.
 
 .. _mjrf_destroyTexture:
 
@@ -3230,12 +3335,12 @@ Destroys the texture.
 
 Initializes the mjrfTextureData to default values.
 
-.. _mjrf_setTextureData:
+.. _mjrf_uploadTexture:
 
-`mjrf_setTextureData <#mjrf_setTextureData>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_uploadTexture <#mjrf_uploadTexture>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setTextureData
+.. mujoco-include:: mjrf_uploadTexture
 
 Uploads the given texture data to the texture.
 
@@ -3303,12 +3408,12 @@ Destroys the mesh.
 
 Initializes the mjrfMeshData to default values.
 
-.. _mjrf_setMeshData:
+.. _mjrf_uploadMesh:
 
-`mjrf_setMeshData <#mjrf_setMeshData>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_uploadMesh <#mjrf_uploadMesh>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setMeshData
+.. mujoco-include:: mjrf_uploadMesh
 
 Uploads the given mesh data to the mesh.
 
@@ -3339,39 +3444,39 @@ Creates a scene with the given parameters.
 
 Destroys the scene.
 
-.. _mjrf_addLightToScene:
+.. _mjrf_addSceneLight:
 
-`mjrf_addLightToScene <#mjrf_addLightToScene>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_addSceneLight <#mjrf_addSceneLight>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_addLightToScene
+.. mujoco-include:: mjrf_addSceneLight
 
 Adds a light to the scene.
 
-.. _mjrf_removeLightFromScene:
+.. _mjrf_removeSceneLight:
 
-`mjrf_removeLightFromScene <#mjrf_removeLightFromScene>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_removeSceneLight <#mjrf_removeSceneLight>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_removeLightFromScene
+.. mujoco-include:: mjrf_removeSceneLight
 
 Removes the light from the scene.
 
-.. _mjrf_addRenderableToScene:
+.. _mjrf_addSceneRenderable:
 
-`mjrf_addRenderableToScene <#mjrf_addRenderableToScene>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_addSceneRenderable <#mjrf_addSceneRenderable>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_addRenderableToScene
+.. mujoco-include:: mjrf_addSceneRenderable
 
 Adds a renderable to the scene.
 
-.. _mjrf_removeRenderableFromScene:
+.. _mjrf_removeSceneRenderable:
 
-`mjrf_removeRenderableFromScene <#mjrf_removeRenderableFromScene>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_removeSceneRenderable <#mjrf_removeSceneRenderable>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_removeRenderableFromScene
+.. mujoco-include:: mjrf_removeSceneRenderable
 
 Removes the renderable from the scene.
 
@@ -3392,6 +3497,15 @@ Sets the skybox (cube texture) for the scene.
 .. mujoco-include:: mjrf_configureSceneFromModel
 
 Configures the scene based on the parameters in an mjModel.
+
+.. _mjrf_setSceneMsaa:
+
+`mjrf_setSceneMsaa <#mjrf_setSceneMsaa>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjrf_setSceneMsaa
+
+Sets the number of multi-sample anti-aliasing samples; values <= 1 disable MSAA.
 
 .. _mjrf_defaultLightParams:
 
@@ -3420,21 +3534,21 @@ Creates a light for the filament renderer.
 
 Destroys the light.
 
-.. _mjrf_setLightEnabled:
+.. _mjrf_setLightActive:
 
-`mjrf_setLightEnabled <#mjrf_setLightEnabled>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setLightActive <#mjrf_setLightActive>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setLightEnabled
+.. mujoco-include:: mjrf_setLightActive
 
-Enables or disables the light.
+Activates or deactivates the light.
 
-.. _mjrf_setLightShadowsEnabled:
+.. _mjrf_setLightCastShadow:
 
-`mjrf_setLightShadowsEnabled <#mjrf_setLightShadowsEnabled>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setLightCastShadow <#mjrf_setLightCastShadow>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setLightShadowsEnabled
+.. mujoco-include:: mjrf_setLightCastShadow
 
 Enables or disables whether or not the light casts shadows.
 
@@ -3465,12 +3579,12 @@ Sets the intensity of the light, in candela.
 
 Sets the effective range of the light, in meters.
 
-.. _mjrf_setLightCutoffAngle:
+.. _mjrf_setLightCutoff:
 
-`mjrf_setLightCutoffAngle <#mjrf_setLightCutoffAngle>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setLightCutoff <#mjrf_setLightCutoff>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setLightCutoffAngle
+.. mujoco-include:: mjrf_setLightCutoff
 
 Sets the cutoff angle of the light, in degrees. Only used for spot lights.
 
@@ -3492,15 +3606,6 @@ Sets the softness of the light, in the range [0, 1]. Only used for spot lights.
 
 Sets the radius of the light bulb.
 
-.. _mjrf_setLightBlurWidth:
-
-`mjrf_setLightBlurWidth <#mjrf_setLightBlurWidth>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. mujoco-include:: mjrf_setLightBlurWidth
-
-Sets the width of the blur applied to the light's shadow map, in texels.
-
 .. _mjrf_setLightShadowMapSize:
 
 `mjrf_setLightShadowMapSize <#mjrf_setLightShadowMapSize>`__
@@ -3510,12 +3615,12 @@ Sets the width of the blur applied to the light's shadow map, in texels.
 
 Sets the resolution of the light's shadow map, in texels.
 
-.. _mjrf_setLightTransform:
+.. _mjrf_setLightPose:
 
-`mjrf_setLightTransform <#mjrf_setLightTransform>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setLightPose <#mjrf_setLightPose>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setLightTransform
+.. mujoco-include:: mjrf_setLightPose
 
 Sets the position and direction of the light.
 
@@ -3603,14 +3708,14 @@ Sets the material properties and textures of the renderable.
 
 Copies the material properties of the renderable into the given mjrfMaterial.
 
-.. _mjrf_setRenderableTransform:
+.. _mjrf_setRenderablePose:
 
-`mjrf_setRenderableTransform <#mjrf_setRenderableTransform>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjrf_setRenderablePose <#mjrf_setRenderablePose>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjrf_setRenderableTransform
+.. mujoco-include:: mjrf_setRenderablePose
 
-Sets the transform position and rotation of the renderable.
+Sets the position and rotation of the renderable.
 
 .. _mjrf_setRenderableSize:
 
@@ -3630,7 +3735,7 @@ the scale. However, for some geom-based renderables, the size scale is not appli
 
 .. mujoco-include:: mjrf_defaultRenderTargetConfig
 
-Initializes the RenderTargetConfig to default values.
+Initializes the mjrfRenderTargetConfig to default values.
 
 .. _mjrf_createRenderTarget:
 
@@ -3791,6 +3896,8 @@ These matrices and their dimensions are:
 - ``eps`` is the finite-differencing epsilon.
 - ``flg_centered`` denotes whether to use forward (0) or centered (1) differences.
 - The Runge-Kutta integrator (:ref:`mjINT_RK4<mjtIntegrator>`) is not supported.
+- :ref:`Sleeping<Sleeping>` is not supported. Disable the :ref:`sleep<option-flag-sleep>` flag before calling.
+- :ref:`Delays<CDelay>` are not supported.
 
 .. admonition:: Improving speed and accuracy
    :class: tip
@@ -3855,6 +3962,7 @@ using finite-differencing. These matrices and their dimensions are:
 .. attention::
    - The Runge-Kutta 4th-order integrator (``mjINT_RK4``) is not supported.
    - The noslip solver is not supported.
+   - :ref:`Sleeping<Sleeping>` is not supported. Disable the :ref:`sleep<option-flag-sleep>` flag before calling.
 
 *Nullable:* ``DfDq``, ``DfDv``, ``DfDa``, ``DsDq``, ``DsDv``, ``DsDa``, ``DmDq``
 
@@ -3986,55 +4094,55 @@ Look up a plugin by name. If slot is not NULL, also write its registered slot nu
 
 Look up a plugin by the registered slot number that was returned by mjp_registerPlugin.
 
-.. _mjp_defaultResourceProvider:
+.. _mjp_defaultProvider:
 
-`mjp_defaultResourceProvider <#mjp_defaultResourceProvider>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_defaultProvider <#mjp_defaultProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_defaultResourceProvider
+.. mujoco-include:: mjp_defaultProvider
 
-Set default resource provider definition.
+Set default provider definition.
 
-.. _mjp_registerResourceProvider:
+.. _mjp_registerProvider:
 
-`mjp_registerResourceProvider <#mjp_registerResourceProvider>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_registerProvider <#mjp_registerProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_registerResourceProvider
+.. mujoco-include:: mjp_registerProvider
 
-Globally register a resource provider in a thread-safe manner. The provider must have a prefix
+Globally register a provider in a thread-safe manner. The provider must have a prefix
 that is not a sub-prefix or super-prefix of any current registered providers.
 
 Return a slot number >= 0 on success, -1 on failure.
 
-.. _mjp_resourceProviderCount:
+.. _mjp_providerCount:
 
-`mjp_resourceProviderCount <#mjp_resourceProviderCount>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_providerCount <#mjp_providerCount>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_resourceProviderCount
+.. mujoco-include:: mjp_providerCount
 
-Return the number of globally registered resource providers.
+Return the number of globally registered providers.
 
-.. _mjp_getResourceProvider:
+.. _mjp_findProvider:
 
-`mjp_getResourceProvider <#mjp_getResourceProvider>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_findProvider <#mjp_findProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_getResourceProvider
+.. mujoco-include:: mjp_findProvider
 
-Return the resource provider with the prefix that matches against the resource name.
+Return the provider with the prefix that matches against the resource name.
 
 If no match, return NULL.
 
-.. _mjp_getResourceProviderAtSlot:
+.. _mjp_getProviderAtSlot:
 
-`mjp_getResourceProviderAtSlot <#mjp_getResourceProviderAtSlot>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+`mjp_getProviderAtSlot <#mjp_getProviderAtSlot>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. mujoco-include:: mjp_getResourceProviderAtSlot
+.. mujoco-include:: mjp_getProviderAtSlot
 
-Look up a resource provider by slot number returned by mjp_registerResourceProvider.
+Look up a provider by slot number returned by mjp_registerProvider.
 
 If invalid slot number, return NULL.
 
@@ -4067,7 +4175,7 @@ Set default resource decoder definition.
 
 .. mujoco-include:: mjp_findDecoder
 
-Return the resource provider with the prefix that matches against the resource name.
+Return the decoder that matches against the resource or content type.
 
 If no match, return NULL.
 
@@ -4104,6 +4212,36 @@ Return the encoder that matches against the content type or filename extension.
 
 If no match, return NULL.
 
+.. _mjp_registerArchiveProvider:
+
+`mjp_registerArchiveProvider <#mjp_registerArchiveProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjp_registerArchiveProvider
+
+Globally register an archive provider. This function is thread-safe.
+provider->prefix specifies the filename extension(s) (e.g. .mjz|.zip).
+
+.. _mjp_findArchiveProvider:
+
+`mjp_findArchiveProvider <#mjp_findArchiveProvider>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjp_findArchiveProvider
+
+Return the archive provider that matches against the resource name.
+
+If no match, return NULL.
+
+.. _mjp_archiveProviderCount:
+
+`mjp_archiveProviderCount <#mjp_archiveProviderCount>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjp_archiveProviderCount
+
+Return the number of globally registered archive providers.
+
 .. _Thread:
 
 Threads
@@ -4116,6 +4254,435 @@ Threads
 .. mujoco-include:: mju_threadpool
 
 Create a thread pool with nthread worker threads.
+
+.. _Batchedsimulation:
+
+Batched simulation
+^^^^^^^^^^^^^^^^^^
+
+Functions for running many simulations of one model on a thread pool, declared in ``mujoco/mjbatch.h``. See
+:ref:`Batched simulation<siBatch>` for an overview and an example.
+
+The functions that run simulations take a selection: ``ids`` holds ``nid`` sorted, unique simulation indices, or is
+``NULL`` to select every simulation, in which case ``nid`` is ignored. They return the number of simulations in which
+MuJoCo raised an error. Those simulations keep the state they had before the call, and the others run to completion.
+:ref:`mjb_status` and :ref:`mjb_error` report the outcome of each simulation's last call.
+
+Invalid arguments, such as unsorted ``ids`` or an unknown ``stage``, are a different kind of error: the function raises
+it with :ref:`mju_error` on the caller's thread, before any simulation runs, and it is not counted in the return value.
+
+Errors in simulations are trapped by a thread-local log handler. Therefore, :ref:`physics callbacks<glPhysics>`, engine
+plugins and functions run by :ref:`mjb_apply` must not raise errors with :ref:`mju_error` or throw exceptions. Other
+messages, such as warnings, go to the log handler the thread would use anyway. On the batch's threads this is the
+:ref:`global handler<mju_setLogHandler>`. On the caller's thread it can also be a thread-local handler, such as the one
+the Python bindings install. Either way, the counters of :ref:`mjb_warning` count every simulation's warnings.
+
+The arrays that the batch returns, such as the state rows, outputs and expanded fields, are owned by the batch. They
+stay at the same address until :ref:`mjb_deleteBatch` frees them.
+
+Timers (``mjData.timer``, see :ref:`mjTimerStat`) are not part of the state. In a persistent batch, each simulation's
+mjData times that simulation, and :ref:`mjb_getData` copies its timers. Otherwise, each thread's mjData accumulates the
+timing of every simulation the thread runs, until a reset of one of them clears it. These timers profile the batch as a
+whole rather than any one simulation.
+
+.. _mjb_defaultConfig:
+
+`mjb_defaultConfig <#mjb_defaultConfig>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_defaultConfig
+
+Set the default :ref:`mjBatchConfig` parameters: one thread per logical CPU, and one mjData per thread. Call it first,
+then change the parameters you need.
+
+.. _mjb_makeBatch:
+
+`mjb_makeBatch <#mjb_makeBatch>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_makeBatch
+
+Allocate a batch of ``nsim`` simulations of a copy of ``m``, and return it. ``config`` holds the :ref:`mjBatchConfig`
+parameters; if it is ``NULL``, the defaults of :ref:`mjb_defaultConfig` apply. If the model cannot be batched, or making
+an mjData raises an error, return ``NULL`` and write the reason into ``error``, a buffer of ``error_sz`` bytes.
+
+The batch runs on ``config->nthread`` threads, including the caller's. If ``nthread <= 0``, it uses one thread per
+logical CPU. Either way, it uses at most ``nsim`` threads. The number of logical CPUs is the machine's, which can exceed
+what the process may use, for example in a container; set ``nthread`` explicitly there.
+
+If ``config->persistent`` is nonzero, the batch keeps one mjData per simulation instead of one per thread. Models with
+:ref:`sleep<option-flag-sleep>` or :ref:`IPC<option-flag-ipc>` enabled require this. In a batch that is not persistent,
+:ref:`engine plugins<exPlugin>` that keep state outside ``plugin_state`` share that state among the simulations a thread
+runs.
+
+.. _mjb_deleteBatch:
+
+`mjb_deleteBatch <#mjb_deleteBatch>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_deleteBatch
+
+Free the batch, its threads, and every array it returned. ``b`` may be ``NULL``. A function run by :ref:`mjb_apply`
+must not delete its own batch.
+
+.. _mjb_nstate:
+
+`mjb_nstate <#mjb_nstate>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_nstate
+
+Return size of a state row: mj_stateSize(m, mjSTATE_INTEGRATION).
+
+.. _mjb_state:
+
+`mjb_state <#mjb_state>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_state
+
+Return the state rows, ``nsim x nstate``. Row ``i`` is simulation ``i``'s :ref:`integration state<siIntegrationState>`,
+in :ref:`mj_getState` order. Writing to a row sets the simulation's state for its next call, which then overwrites the
+row with the new state.
+
+.. _mjb_stateComponent:
+
+`mjb_stateComponent <#mjb_stateComponent>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_stateComponent
+
+Return the address of state component ``component`` (one bit of :ref:`mjtState`) in the first state row, and write its
+number of elements into ``size``. Simulation ``i``'s component is ``mjb_nstate(b) * i`` elements further on. Raise an
+error if ``component`` is not one bit of ``mjSTATE_INTEGRATION``.
+
+.. _mjb_warning:
+
+`mjb_warning <#mjb_warning>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_warning
+
+Return the warning counters, ``nsim x mjNWARNING`` :ref:`mjWarningStat` |-| s. They are saved and restored with the
+state.
+
+.. _mjb_step:
+
+`mjb_step <#mjb_step>`__
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_step
+
+Advance each selected simulation by ``nstep`` calls to :ref:`mj_step`, then compute the stages of :ref:`mj_forward` up
+to ``stage`` (an :ref:`mjtStage`) at the new state. Return the number of simulations in which MuJoCo raised an error.
+
+As with :ref:`mj_step`, derived fields after the steps describe the state before the last substep. ``stage`` brings
+them up to date:
+
+- ``mjSTAGE_NONE`` leaves them as :ref:`mj_step` does.
+- ``mjSTAGE_VEL`` makes position- and velocity-dependent fields and sensors current, as :ref:`mj_step1` does.
+  Acceleration-dependent fields remain those of the last substep, under the controls it applied.
+- ``mjSTAGE_ACC`` runs :ref:`mj_forward`, at nearly the cost of another step. Its acceleration-dependent values use
+  controls that the next step will replace.
+
+In a persistent batch, a simulation's next step continues from these stages with :ref:`mj_step2`, so ``mjSTAGE_VEL``
+costs nothing extra. The step does not continue if anything the stages depend on changed in between, other than
+``ctrl``, ``qfrc_applied`` and ``xfrc_applied``; the results are the same either way. As with :ref:`mj_step1` and
+:ref:`mj_step2`, this assumes that plugins do not make the position and velocity stages depend on those inputs. A loop
+of :ref:`mj_forward` and :ref:`mj_step` computes these stages twice at the same state, while a continued step computes
+them once; this matters only to plugins whose computations have side effects. Installed :ref:`physics
+callbacks<glPhysics>` turn the continuation off, but removing one between a call and the next step is not detected. A
+continued step counts as one step in ``mjData.timer``, but its ``mjTIMER_STEP`` duration excludes the position and
+velocity stages, which are timed in the call that computed them.
+
+.. _mjb_forward:
+
+`mjb_forward <#mjb_forward>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_forward
+
+Compute the stages of :ref:`mj_forward` up to ``stage`` (an :ref:`mjtStage`) on each selected simulation.
+``mjSTAGE_ACC`` runs :ref:`mj_forward`. Return the number of simulations in which MuJoCo raised an error.
+
+.. _mjb_reset:
+
+`mjb_reset <#mjb_reset>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_reset
+
+Reset each selected simulation, then compute the stages of :ref:`mj_forward` up to ``stage`` (an :ref:`mjtStage`).
+Return the number of simulations in which MuJoCo raised an error.
+
+``key`` holds one keyframe per selected simulation, in call order; a keyframe of -1, or a ``NULL`` ``key``, resets to
+the model's defaults. ``mjSTAGE_ACC`` runs :ref:`mj_forward`. ``mjSTAGE_NONE`` suits a reset that is followed by writes
+to the state and :ref:`mjb_forward`. Writes to the state rows made before the call are discarded.
+
+.. _mjb_status:
+
+`mjb_status <#mjb_status>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_status
+
+Return the status of each simulation's last call: ``nsim`` values, nonzero where MuJoCo raised an error. Each call
+updates the values of the simulations it runs.
+
+.. _mjb_error:
+
+`mjb_error <#mjb_error>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_error
+
+Return the error message of simulation ``sim``'s last call, or ``""`` if there was none. The string remains valid until
+the next call on the simulation.
+
+.. _mjb_output:
+
+`mjb_output <#mjb_output>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_output
+
+Register :ref:`mjData` field ``name`` as an output, and return its storage: ``nsim x size`` elements of the field's
+type. Write the number of elements per simulation into ``size`` and the element size in bytes into ``elemsize``. After
+every call on a simulation except :ref:`mjb_apply`, the batch copies the field from the simulation's mjData into its
+row of the storage. Registering a field again returns the same storage.
+
+``name`` can be an array field, or one of the counts ``ncon``, ``ne``, ``nf``, ``nl``, ``nefc``, ``nJ``, ``nA``,
+``nisland`` and ``nidof``. Return ``NULL`` for unknown fields, and for fields of the state row, which :ref:`mjb_state`
+already holds.
+
+In a persistent batch, the storage starts with each simulation's current values. Otherwise, it is zero until the next
+call on a simulation, and a field that the call does not compute holds another simulation's value. Examples are
+``qfrc_inverse`` after :ref:`mj_step`, quantities computed only for the sensors that need them, and fields of stages
+above the call's ``stage``.
+
+.. _mjb_expand:
+
+`mjb_expand <#mjb_expand>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_expand
+
+Give :ref:`mjModel` field ``name`` per-simulation values, and return their storage: ``nsim x size`` elements of the
+field's type, initialized from the model. Before each call on a simulation, the batch copies the simulation's row into
+its model. ``size`` and ``elemsize`` are written as by :ref:`mjb_output`. Expanding a field again returns the same
+storage.
+
+Array fields are named as in :ref:`mjModel`, and :ref:`mjOption` fields as ``"opt.<name>"``. The storage of
+``bvh_aabb`` holds only the bodies' bounding volumes, which come before the meshes'. Return ``NULL`` for unknown fields
+and for asset fields (meshes, heightfields, textures, skins), which all simulations share.
+
+Writing a field that :ref:`mj_setConst` reads, an input in ``MJSETCONST_ARRAYS`` of ``mjxmacro.h`` or an
+:ref:`mjOption` field, does not update the constants derived from it until :ref:`mjb_setConst` runs.
+
+Expanding a field that :ref:`mjb_setConst` expanded makes it an input of later calls to :ref:`mjb_setConst`, if
+:ref:`mj_setConst` reads it before writing it. To read such a field without that effect, use :ref:`mjb_expanded`.
+
+.. _mjb_expanded:
+
+`mjb_expanded <#mjb_expanded>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_expanded
+
+Return the per-simulation storage of :ref:`mjModel` field ``name`` if it is expanded, by :ref:`mjb_expand` or by
+:ref:`mjb_setConst`. Otherwise, return ``NULL``: every simulation has the model's value. Unlike :ref:`mjb_expand`, this
+expands nothing, and fields that :ref:`mjb_setConst` derives stay derived. Treat the storage as read-only, since
+:ref:`mjb_setConst` overwrites derived fields. ``size`` and ``elemsize`` are written as by :ref:`mjb_expand`, also when
+the field is not expanded.
+
+.. _mjb_setConst:
+
+`mjb_setConst <#mjb_setConst>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_setConst
+
+Run :ref:`mj_setConst` on each selected simulation's model. Return the number of simulations in which MuJoCo raised an
+error; those simulations keep their constants.
+
+Every model field that :ref:`mj_setConst` changes becomes per-simulation, as with :ref:`mjb_expand`, so each simulation
+gets its own derived constants; only the arrays marked ``mjSC_OUT`` in ``MJSETCONST_ARRAYS`` and the scalars in
+``MJSETCONST_SCALARS`` can change. If a call makes a new field per-simulation, :ref:`mj_setConst` runs again on the
+call's simulations. Simulations outside the call need no update, since the new field starts from the model's value,
+which is theirs.
+
+Only the groups of :ref:`mj_setConst` computations (the columns of ``MJSETCONST_ARRAYS``) that read a per-simulation
+field, or what an earlier such group writes, run; the others would give every simulation the model's values. With no
+per-simulation field that :ref:`mj_setConst` reads, for example only friction or actuator gains, the call does nothing.
+Per-simulation :ref:`mjOption` fields count as read by every group. Skipping groups assumes that the constants of the
+model given to :ref:`mjb_makeBatch` are current, as after compilation or :ref:`mj_setConst`.
+
+On each call, the fields that :ref:`mj_setConst` derives are recomputed from the model's values. Expanding such a field
+with :ref:`mjb_expand` makes its values inputs instead if :ref:`mj_setConst` reads it before writing it, as the anchors
+of connect constraints are in ``eq_data``; otherwise they are recomputed all the same. :ref:`mjb_expanded` reads them
+without that effect.
+
+.. _mjb_setModels:
+
+`mjb_setModels <#mjb_setModels>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_setModels
+
+Run each simulation ``i`` on ``models[i]``, a model of the caller's, instead of the batch's model. If ``models`` is
+``NULL``, return to the batch's model.
+
+Each model must give mjData the same layout as the batch's model, that is, the same sizes for everything mjData holds.
+Models compiled from one spec with different parameters qualify, and so do models whose meshes have other shapes but the
+same numbers of vertices and faces. The batch only reads the models, so one model can serve several simulations. After
+editing a model, call :ref:`mjb_setModels` again; otherwise a persistent batch may continue a step from stages computed
+before the edit.
+
+Caller models replace per-simulation fields, and the two cannot be combined: raise an error if the batch has fields from
+:ref:`mjb_expand`. While caller models are set:
+
+- :ref:`mjb_expand` and :ref:`mjb_setConst` raise an error.
+- Keyframes are those of each simulation's model.
+- :ref:`mjb_getModel` copies the simulation's model.
+
+.. _mjb_rollout:
+
+`mjb_rollout <#mjb_rollout>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_rollout
+
+Advance each selected simulation by ``nstep`` calls to :ref:`mj_step`, as :ref:`rollout<PyRollout>` does, recording
+after each substep. Return the number of simulations in which MuJoCo raised an error.
+
+Before each substep, set the state components in ``control_spec`` (a subset of the :ref:`mjtState` bits in
+``mjSTATE_USER``) from ``control``. ``control`` is ``n x nstep x mj_stateSize(m, control_spec)``, for the ``n`` selected
+simulations in call order; if it is ``NULL``, the inputs are left as they are. After each substep, copy each of the
+``nrecord`` :ref:`mjBatchRecord` |-| s in ``record`` into its buffer. A simulation whose warning counters rise stops
+stepping, and its remaining records repeat its last ones.
+
+.. _mjb_apply:
+
+`mjb_apply <#mjb_apply>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_apply
+
+Run ``func`` (an :ref:`mjfBatchFunc`) on each selected simulation's model and data, on the batch's threads, passing it
+the simulation's index and ``arg``. If ``save`` is nonzero, save the state back afterwards. Return the number of
+simulations in which MuJoCo raised an error.
+
+Fields registered with :ref:`mjb_output` are not refreshed; ``func`` returns its results through ``arg``. ``func`` may
+call other batches, as long as they do not call back into this one; a call on its own batch raises an error in the
+simulation. An error raised by a MuJoCo function that ``func`` calls unwinds to the batch with ``longjmp``, so ``func``
+must not hold C++ objects with destructors across MuJoCo calls.
+
+In a persistent batch:
+
+- With ``save`` zero, ``func`` should not change the simulation's state. The mjData keeps what lies outside the state,
+  such as the sleep bookkeeping, which would then no longer match the row.
+- The mjData that ``func`` receives may hold the stages that :ref:`mjb_step` computed at the new state. Its contacts
+  are then those of the new state, but its constraint forces are not yet computed, so do not read contact forces before
+  the acceleration stage runs.
+
+For example, this computes the finite-differenced transition matrices of every simulation at its current state, into
+arrays indexed by simulation. :ref:`mjd_transitionFD` restores the state it perturbs, so ``save`` is zero:
+
+.. code-block:: C
+
+   // arrays of TransitionFD, nx = 2*nv + na
+   struct TransitionArgs {
+     mjtNum* A;  // nsim x nx x nx
+     mjtNum* B;  // nsim x nx x nu
+   };
+
+   // mjb_apply function: transition matrices of simulation sim
+   void TransitionFD(const mjModel* m, mjData* d, int sim, void* arg) {
+     struct TransitionArgs* a = arg;
+     int nx = 2*m->nv + m->na;
+     mjd_transitionFD(m, d, 1e-6, /*flg_centered=*/0, a->A + sim*nx*nx, a->B + sim*nx*m->nu, NULL, NULL);
+   }
+
+   struct TransitionArgs args = {A, B};
+   mjb_apply(b, /*ids=*/NULL, 0, TransitionFD, &args, /*save=*/0);
+
+A function can also read one field of one simulation. The mjData it receives holds the simulation's state, but in a
+batch that is not persistent its derived fields belong to another simulation, so the function computes what it reads.
+In a persistent batch, it can instead read the fields that the simulation's last call left in its mjData:
+
+.. code-block:: C
+
+   // mjb_apply function: subtree centers of mass, into arg (3*nbody)
+   void SubtreeCom(const mjModel* m, mjData* d, int sim, void* arg) {
+     mj_kinematics(m, d);
+     mj_comPos(m, d);
+     mju_copy(arg, d->subtree_com, 3*m->nbody);
+   }
+
+   int sim = 7;
+   mjb_apply(b, &sim, 1, SubtreeCom, com, /*save=*/0);
+
+.. _mjb_getModel:
+
+`mjb_getModel <#mjb_getModel>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_getModel
+
+Write simulation ``sim``'s model into ``m``, ready to render or to pass to any function. Normally, this is the batch's
+model with the simulation's per-simulation fields and the constants :ref:`mjb_setConst` computed for it; ``m`` must then
+have the batch's sizes, such as a copy of :ref:`mjb_model`. With caller models from :ref:`mjb_setModels`, it is a copy
+of the simulation's model, and ``m`` must have that model's sizes. Raise an error if ``sim`` is out of range or the
+sizes differ.
+
+.. _mjb_getData:
+
+`mjb_getData <#mjb_getData>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_getData
+
+Write simulation ``sim``'s state and warning counters into ``d``, including writes to its row since its last call;
+``d`` must have the batch's sizes. In a persistent batch, first copy the simulation's mjData, so that ``d`` also holds
+its derived fields and sleep state. Otherwise, run :ref:`mj_forward` with the model from :ref:`mjb_getModel` to compute
+them. Raise an error if ``sim`` is out of range or the sizes differ.
+
+.. _mjb_nsim:
+
+`mjb_nsim <#mjb_nsim>`__
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_nsim
+
+Return number of simulations.
+
+.. _mjb_nthread:
+
+`mjb_nthread <#mjb_nthread>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_nthread
+
+Return number of threads, including the caller's.
+
+.. _mjb_persistent:
+
+`mjb_persistent <#mjb_persistent>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_persistent
+
+Return 1 if the batch keeps one mjData per simulation, 0 otherwise.
+
+.. _mjb_model:
+
+`mjb_model <#mjb_model>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjb_model
+
+Return the batch's copy of the model, made by :ref:`mjb_makeBatch`. Per-simulation fields and caller models never
+change it; :ref:`mjb_getModel` gives a simulation's own model.
 
 .. _Standardmath:
 
@@ -5149,7 +5716,9 @@ Add frame to body.
 
 .. mujoco-include:: mjs_delete
 
-Remove object corresponding to the given element; return 0 on success.
+Remove object corresponding to the given element; return 0 on success. Deleting a body or a frame also deletes
+everything inside it, along with all the elements that reference a deleted element. A
+:ref:`plugin instance<plugin-instance>` is deleted along with the last element that references it.
 
 .. _AddNonTreeElements:
 
@@ -5191,9 +5760,10 @@ Add flex.
 
 .. mujoco-include:: mjs_makeFlex
 
-Add flexcomp: create flex with auto-generated bodies/joints, return flex spec.
-
-*Nullable:* ``type``, ``dof``, ``count``, ``cellcount``, ``spacing``, ``scale``, ``pos``, ``quat``, ``origin``, ``file``, ``vfs``
+Create a :ref:`flexcomp<body-flexcomp>` in ``body`` and return the resulting flex; the arguments correspond to the
+flexcomp attributes. If ``file`` is the name of an existing :ref:`mesh asset<asset-mesh>`, the flexcomp uses that mesh as
+with the :ref:`mesh<body-flexcomp-mesh>` attribute, otherwise ``file`` is the name of a mesh file. The flexcomp is
+expanded immediately, so later changes to the mesh asset do not affect the created flex.
 
 .. _mjs_addPair:
 
@@ -5476,6 +6046,8 @@ Add skin.
 
 Add texture.
 
+*Nullable:* ``def``
+
 .. _mjs_addMaterial:
 
 `mjs_addMaterial <#mjs_addMaterial>`__
@@ -5494,7 +6066,24 @@ Add material.
 
 .. mujoco-include:: mjs_makeMesh
 
-Sets the vertices and normals of a mesh.
+Generate a built-in procedural mesh of type :ref:`mjtMeshBuiltin` with the given parameters. Returns 0 on success; on
+failure, returns a nonzero value and sets the error of the spec. The parameters of the sphere, hemisphere, cone,
+supersphere, supertorus, wedge and plate types are those of the corresponding :ref:`mesh/builtin<asset-mesh-builtin>`
+attribute. The procedural types below generate the same shapes as the corresponding :ref:`flexcomp<body-flexcomp>`
+types; their nodes are stored in double precision in ``usernode``.
+
+- ``mjMESH_BUILTIN_GRID`` (count[3], spacing[3], [dim]): A regular grid with ``count[i] > 0`` points along each axis,
+  separated by ``spacing[i]``. ``dim`` (default 3) creates tetrahedra (3) or triangles (2);
+  ``count`` must be 1 along the axes beyond ``dim``.
+- ``mjMESH_BUILTIN_BOX``, ``mjMESH_BUILTIN_CYLINDER``, ``mjMESH_BUILTIN_ELLIPSOID`` (count[3], spacing[3], [dim]): The
+  surface of a box grid with ``count[i] >= 2`` points along each axis, projected onto the shape. ``dim`` (default 3)
+  creates tetrahedra connecting the surface to the center (3) or surface triangles (2).
+- ``mjMESH_BUILTIN_SQUARE``, ``mjMESH_BUILTIN_DISC`` (count[3], spacing[3]): A triangulated square, or a disc obtained by
+  radial projection of the square; ``count[2]`` must be 1.
+
+Types without volume (square, disc, and
+grid, box, cylinder and ellipsoid with ``dim`` < 3) change a ``legacy`` :ref:`inertia<asset-mesh-inertia>` to
+``shell``.
 
 .. _FindAndGetUtilities:
 
@@ -5903,6 +6492,68 @@ Set element's enclosing frame; return 0 on success.
 .. mujoco-include:: mjs_resolveOrientation
 
 Resolve alternative orientations to quat; return error if any.
+
+.. _mjs_fuseStatic:
+
+`mjs_fuseStatic <#mjs_fuseStatic>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjs_fuseStatic
+
+Fuse the static bodies of the spec with their parents. A body without joints is replaced by a :ref:`frame<frame>` in
+its parent, which has the pose of the body and holds its geoms, sites, cameras, lights, frames and child bodies, in the
+same coordinates as before. The inertia of the body is added to that of the parent. The compiled model has the same
+kinematics and dynamics, with fewer bodies. Bodies which cannot be fused without changing the model are kept, see
+:ref:`fusestatic<compiler-fusestatic>`, which applies this function before compiling. Pointers to the bodies which were
+fused are no longer valid. Assets are read as in :ref:`mj_compile`. Returns the number of bodies fused, 0 if the spec
+is unchanged, or -1 on error, in which case nothing is fused.
+
+.. _mjs_discardVisual:
+
+`mjs_discardVisual <#mjs_discardVisual>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjs_discardVisual
+
+Discard the elements of the spec which are only visual: materials and textures, the geoms which do not collide, and
+the meshes which are then not used; an element which another refers to by name is kept. If a discarded geom was used for
+inferring the inertia of its body, that inertia becomes the explicit inertial of the body, as in
+:ref:`mjs_adoptInertial`, so the compiled model has the same dynamics. See
+:ref:`discardvisual<compiler-discardvisual>`, which applies this function before compiling. Pointers to the elements
+which were discarded are no longer valid. Assets are read as in :ref:`mj_compile`, and only if inertia is inferred from
+a discarded geom. Returns the number of elements discarded, 0 if the spec is unchanged, or -1 on error, in which case
+nothing is discarded.
+
+.. _mjs_dedupAssets:
+
+`mjs_dedupAssets <#mjs_dedupAssets>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjs_dedupAssets
+
+Merge the textures and meshes of the spec which would compile to the same asset: textures with the same resolved file
+or buffer and the same parameters, meshes with the same resolved file or arrays and the same parameters, names
+excluded. The first asset of each group keeps its name, every reference to the others (materials, lights, geoms, sites,
+default classes, sensors, tuples) is rewritten to it, and the others are deleted as by :ref:`mjs_delete`, so pointers
+to them are no longer valid. An unnamed asset is left alone, as is a mesh with a plugin. Nothing is read from disk: a
+model which attaches the same sub-model several times is merged without its asset files. Returns the number of assets
+merged, 0 if the spec is unchanged, or -1 on error, in which case nothing is merged.
+
+.. _mjs_adoptInertial:
+
+`mjs_adoptInertial <#mjs_adoptInertial>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mujoco-include:: mjs_adoptInertial
+
+Make the inertial which compilation infers for a body part of the spec. The mass, inertia and inertial frame which the
+compiler calculates from the geoms of the body, as the spec is now, are written as the explicit inertial of the body,
+so that later changes to its geoms no longer affect them. Compiling before and after gives the same model: the values
+are those before the scaling of :ref:`settotalmass<compiler-settotalmass>`. Nothing is done if the inertial of the body
+is not inferred. It is an error when :ref:`inertiafromgeom<compiler-inertiafromgeom>` is "true", which infers the
+inertia of every body whatever its inertial. Assets are read as in :ref:`mj_compile`. Returns 0 on success.
+
+To read an inferred inertial without adopting it, compile and look it up in :ref:`mjModel` with :ref:`mjs_getId`.
 
 .. _mjs_bodyToFrame:
 

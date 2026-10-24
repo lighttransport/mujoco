@@ -37,6 +37,12 @@ enum class ToneMapperType {
   kLinear,
 };
 
+// Supported output color spaces for color grading.
+enum class OutputColorSpace {
+  kRec709_Linear_D65,
+  kRec709_sRGB_D65,
+};
+
 std::unique_ptr<filament::ToneMapper> CreateToneMapper(ToneMapperType type);
 
 // Structure used to initialize a filament::ColorGrading::Builder object.
@@ -49,6 +55,7 @@ std::unique_ptr<filament::ToneMapper> CreateToneMapper(ToneMapperType type);
 // for the Filament ColorGrading::Builder class.
 struct ColorGradingOptions {
   ToneMapperType tone_mapper = ToneMapperType::kPBRNeutral;
+  OutputColorSpace output_color_space = OutputColorSpace::kRec709_sRGB_D65;
   filament::ColorGrading::LutFormat format =
       filament::ColorGrading::LutFormat::INTEGER;
   uint8_t dimension = 32;
@@ -64,6 +71,9 @@ struct ColorGradingOptions {
   filament::math::float3 out_red = {1.0f, 0.0f, 0.0f};
   filament::math::float3 out_green = {0.0f, 1.0f, 0.0f};
   filament::math::float3 out_blue = {0.0f, 0.0f, 1.0f};
+  // Note: shadows, midtones, and highlights do not actually match the filament
+  // defaults (which are [1,1,1,0]), but we do not want to change this now as it
+  // will affect the default rendering results for all our users.
   filament::math::float4 shadows = {1.0f, 1.0f, 1.0f, 1.0f};
   filament::math::float4 midtones = {1.0f, 1.0f, 1.0f, 1.0f};
   filament::math::float4 highlights = {1.0f, 1.0f, 1.0f, 1.0f};

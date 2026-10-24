@@ -19,9 +19,10 @@ import math
 
 from absl import app
 import mujoco
-import mujoco._render_filament as mjrf
+from mujoco import mjrf
 from mujoco.experimental.studio import window
 from mujoco.rendering.filament import renderer
+import numpy as np
 
 
 @dataclasses.dataclass
@@ -29,9 +30,19 @@ class ModelData:
   name: str
   model: mujoco.MjModel
   data: mujoco.MjData
-  objects: mjrf.ModelObjects | None = None
+  objects: mjrf.ModelResources | None = None
   lights: mjrf.ModelLights | None = None
   renderables: mjrf.ModelRenderables | None = None
+
+
+def _update_target(
+    r: renderer.Renderer, win: window.Window, buf: np.ndarray
+) -> np.ndarray:
+  w, h = win.GetWidth(), win.GetHeight()
+  if buf.shape != (h, w, 3):
+    buf = np.empty((h, w, 3), dtype=np.uint8)
+    r.target("out", buf)
+  return buf
 
 
 def main(argv: Sequence[str]) -> None:
@@ -70,8 +81,9 @@ def main(argv: Sequence[str]) -> None:
   y = 0.0
   dx = 1.0 / float(nx)
   dy = 1.0 / float(ny)
+  views = []
   for md in models:
-    md.objects = mjrf.ModelObjects(ctx, md.model)
+    md.objects = mjrf.ModelResources(ctx, md.model)
     md.lights = mjrf.ModelLights(r.scene(md.name), md.objects)
     md.renderables = mjrf.ModelRenderables(r.scene(md.name), md.objects)
 
@@ -79,18 +91,19 @@ def main(argv: Sequence[str]) -> None:
     mujoco.mjv_defaultFreeCamera(md.model, vcam)
 
     vp = (x, y, dx, dy)
-    r.view(
-        md.name,
+    view = renderer.View(
         scene=md.name,
         camera=mujoco.mjv_camera2GLCamera(md.model, md.data, vcam),
         target="out",
         viewport=vp,
     )
+    views.append(view)
     x += dx
     if x >= 1.0:
       x = 0.0
       y += dy
 
+  buf = np.empty((0, 0, 3), dtype=np.uint8)
   while win.NewFrame():
     for md in models:
       mujoco.mj_step(md.model, md.data)
@@ -99,9 +112,9 @@ def main(argv: Sequence[str]) -> None:
       md.lights.update(md.data)
       md.renderables.update(md.data)
 
-    r.target("out", (win.GetWidth(), win.GetHeight()))
-    r.render()
-    win.Present(r.get_image("out").pixels)
+    buf = _update_target(r, win, buf)
+    r.render(views)
+    win.Present(buf)
 
 
 if __name__ == "__main__":

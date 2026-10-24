@@ -28,10 +28,10 @@
 #include <mujoco/mujoco.h>
 #include "experimental/filament/compat/scene_geom_util.h"
 #include "experimental/filament/compat/scene_objects.h"
-#include "render/filament/mjrfilament_cpp.h"
+#include "render/filament/support/mjrf_ptr.h"
 #include "render/filament/support/filament_util.h"
 #include "render/filament/support/model_lights.h"
-#include "render/filament/support/model_objects.h"
+#include "render/filament/support/model_resources.h"
 
 namespace mujoco {
 
@@ -42,22 +42,22 @@ using filament::math::mat4;
 
 SceneBridge::SceneBridge(mjrfContext* ctx, mjrfScene* scene, const mjModel* model)
     : ctx_(ctx), scene_(scene) {
-  model_objects_ = std::make_unique<ModelObjects>(model, ctx_);
+  model_resources_ = std::make_unique<ModelResources>(model, ctx_);
   scene_objects_ = std::make_unique<SceneObjects>(ctx_);
 
   mjrf_configureSceneFromModel(scene_, model);
 
-  auto clear_color = ReadElement(model, "filament.clearColor",
+  auto clear_color = ReadElement(model, "filament.clear_color",
                                  filament::math::float4(0, 0, 0, 1));
   mjrf_setClearColor(ctx_, &clear_color[0]);
 
-  model_lights_ = std::make_unique<ModelLights>(scene_, model_objects_.get());
+  model_lights_ = std::make_unique<ModelLights>(scene_, model_resources_.get());
 }
 
 SceneBridge::~SceneBridge() {
   model_lights_.reset();
   for (auto& iter : renderables_) {
-    mjrf_removeRenderableFromScene(scene_, iter.get());
+    mjrf_removeSceneRenderable(scene_, iter.get());
   }
   renderables_.clear();
 }
@@ -98,22 +98,16 @@ mat4 CalculateClipFromWorld(const mjrRect& viewport, const mjrCamera& cam) {
 }
 
 void SceneBridge::Update(const mjrRect& viewport, const mjvScene* scene) {
-  const mjModel* model = model_objects_->GetModel();
+  const mjModel* model = model_resources_->GetModel();
 
   model_lights_->Update();
-
-  mjtNum hpos[3], hfwd[3];
-  float headpos[3], gazedir[3];
-  mjv_cameraInModel(hpos, hfwd, nullptr, scene);
-  mju_n2f(headpos, hpos, 3);
-  mju_n2f(gazedir, hfwd, 3);
 
   camera_ = mjv_averageCamera(scene->camera, scene->camera + 1);
   clip_from_world_ = CalculateClipFromWorld(viewport, camera_);
 
   // Remove all drawables from previous render and prepare new ones.
   for (auto& iter : renderables_) {
-    mjrf_removeRenderableFromScene(scene_, iter.get());
+    mjrf_removeSceneRenderable(scene_, iter.get());
   }
   renderables_.clear();
   for (int i = 0; i < scene->ngeom; ++i) {
@@ -151,8 +145,8 @@ void SceneBridge::Update(const mjrRect& viewport, const mjvScene* scene) {
           mjrf_setRenderableGeomMesh(vertex.get(), mjGEOM_SPHERE, 3, 3, 3);
           mjrf_setRenderableMaterial(vertex.get(), &material);
           mjrf_setRenderableSize(vertex.get(), size);
-          mjrf_setRenderableTransform(vertex.get(), scene->flexvert + 3*v, rot);
-          mjrf_addRenderableToScene(scene_, vertex.get());
+          mjrf_setRenderablePose(vertex.get(), scene->flexvert + 3*v, rot);
+          mjrf_addSceneRenderable(scene_, vertex.get());
           renderables_.push_back(std::move(vertex));
         }
       }
@@ -196,71 +190,56 @@ void SceneBridge::Update(const mjrRect& viewport, const mjvScene* scene) {
           mjrf_setRenderableGeomMesh(vertex.get(), mjGEOM_CYLINDER, 3, 3, 3);
           mjrf_setRenderableMaterial(vertex.get(), &material);
           mjrf_setRenderableSize(vertex.get(), size);
-          mjrf_setRenderableTransform(vertex.get(), pos, rot);
-          mjrf_addRenderableToScene(scene_, vertex.get());
+          mjrf_setRenderablePose(vertex.get(), pos, rot);
+          mjrf_addSceneRenderable(scene_, vertex.get());
           renderables_.push_back(std::move(vertex));
         }
       }
     }
 
     if (geom->type == mjGEOM_FLEX || geom->type == mjGEOM_SKIN) {
-      if (!scene_objects_->CreateSkinFlexMesh(scene, model_objects_->GetModel(),
+      if (!scene_objects_->CreateSkinFlexMesh(scene, model_resources_->GetModel(),
                                               *geom)) {
         continue;
       }
     }
 
     UniquePtr<mjrfRenderable> renderable = CreateGeomRenderable(
-        *geom, ctx_, model_objects_.get(), scene_objects_.get());
+        *geom, ctx_, model_resources_.get(), scene_objects_.get());
 
-    mjrf_addRenderableToScene(scene_, renderable.get());
+    mjrf_addSceneRenderable(scene_, renderable.get());
     renderables_.push_back(std::move(renderable));
   }
 
-  mjrfLight* headlight = nullptr;
-  bool headlight_enabled = false;
+  // The headlight is a render request option rather than a scene light; record
+  // its state here for GetHeadlight().
+  headlight_enabled_ = false;
   for (int i = 0; i < scene->nlight; ++i) {
     const mjvLight& scene_light = scene->lights[i];
     if (scene_light.id < 0 && scene_light.headlight) {
-      // The headlight, if it exists, is assigned the id `scene->nlight`.
-      headlight = model_lights_->GetLight(scene->nlight);
-      if (!headlight) {
-        continue;
-      }
-      // We position the headlight slightly behind the camera to avoid some
-      // odd clipping issues.
-      headlight_enabled = true;
-      headpos[0] -= gazedir[0] * 0.05f;
-      headpos[1] -= gazedir[1] * 0.05f;
-      headpos[2] -= gazedir[2] * 0.05f;
-
-      mjrf_setLightColor(headlight, scene_light.diffuse);
-      mjrf_setLightTransform(headlight, headpos, gazedir);
-      continue;
+      headlight_enabled_ = true;
+      headlight_color_[0] = scene_light.diffuse[0];
+      headlight_color_[1] = scene_light.diffuse[1];
+      headlight_color_[2] = scene_light.diffuse[2];
     } else if (mjrfLight* light = model_lights_->GetLight(scene_light.id)) {
       mjrf_setLightColor(light, scene_light.diffuse);
-      mjrf_setLightTransform(light, scene_light.pos, scene_light.dir);
+      mjrf_setLightPose(light, scene_light.pos, scene_light.dir);
     } else {
       mju_error("Unexpected light id: %d", scene_light.id);
     }
   }
-
-  // Enable/disable the headlight based on whether or not it's in the scene.
-  if (headlight) {
-    mjrf_setLightEnabled(headlight, headlight_enabled);
-  }
 }
 
 void SceneBridge::UploadMesh(const mjModel* model, int id) {
-  model_objects_->UploadMesh(model, id);
+  model_resources_->UploadMesh(model, id);
 }
 
 void SceneBridge::UploadTexture(const mjModel* model, int id) {
-  model_objects_->UploadTexture(model, id);
+  model_resources_->UploadTexture(model, id);
 }
 
 void SceneBridge::UploadHeightField(const mjModel* model, int id) {
-  model_objects_->UploadHeightField(model, id);
+  model_resources_->UploadHeightField(model, id);
 }
 
 void SceneBridge::SetDrawTextFunction(DrawTextAtFn fn) {

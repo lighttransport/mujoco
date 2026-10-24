@@ -25,10 +25,10 @@
 #include <mujoco/mjtype.h>
 #include "engine/engine_core_constraint.h"
 #include "engine/engine_core_smooth.h"
-#include "engine/engine_derivative.h"
 #include "engine/engine_core_util.h"
 #include "engine/engine_memory.h"
 #include "engine/engine_macro.h"
+#include "engine/engine_metric.h"
 #include "engine/engine_util_blas.h"
 #include "engine/engine_util_errmem.h"
 #include "engine/engine_util_misc.h"
@@ -76,8 +76,8 @@ static void dualFinish(const mjModel* m, mjData* d) {
 
   // compute constrained acceleration in joint space, in the solve metric: under the
   // effective metric, qacc_smooth and the constraint response both live in Mtilde
-  // (mjd_effSolve is the plain M solve when the metric is inactive)
-  mjd_effSolve(m, d, d->qacc, d->qfrc_constraint);
+  // (mj_effSolve is the plain M solve when the metric is inactive)
+  mj_effSolve(m, d, d->qacc, d->qfrc_constraint);
   mju_addTo(d->qacc, d->qacc_smooth, m->nv);
 }
 
@@ -451,7 +451,21 @@ static void projectCone(mjtNum* force, const mjtNum* mu, int dim, int type) {
 mjTHREADLOCAL int mj_nesterov_momentum = 1;
 
 
+// inverse trace of the inertia matrix, over all dofs (island < 0) or over those of an island
+static mjtNum inertiaScale(const mjModel* m, const mjData* d, int island) {
+  int nv = island < 0 ? m->nv : d->island_nv[island];
+  const int* dofs = island < 0 ? NULL : d->map_idof2dof + d->island_idofadr[island];
+  mjtNum trace = 0;
+  for (int i=0; i < nv; i++) {
+    int dof = dofs ? dofs[i] : i;
+    trace += d->M[m->M_rowadr[dof] + m->M_rownnz[dof] - 1];
+  }
+  return 1 / mju_max(mjMINVAL, trace);
+}
+
+
 //---------------------------- PGS solver ----------------------------------------------------------
+
 
 // core PGS solver: iterates over constraints specified by efclist
 //   island: island index for stats (use -1 for monolithic, mapped to 0)
@@ -478,7 +492,7 @@ static void solPGS(const mjModel* m, mjData* d, int island,
   }
 
   int island_stat = mjMAX(0, island);  // island index for diagnostic stats
-  mjtNum scale = 1 / (m->stat.meaninertia * mjMAX(1, m->nv));
+  mjtNum scale = inertiaScale(m, d, island);
 
   // precompute inverse diagonal of AR
   ARdiaginv(m, d, ARinv, nefc, efclist, 0);
@@ -781,7 +795,7 @@ static void solNoSlip(const mjModel* m, mjData* d, int island,
   int* oldstate = mjSTACKALLOC(d, nefc, int);
 
   int island_stat = mjMAX(0, island);
-  mjtNum scale = 1 / (m->stat.meaninertia * mjMAX(1, m->nv));
+  mjtNum scale = inertiaScale(m, d, island);
 
   // precompute inverse diagonal of A
   ARdiaginv(m, d, ARinv, nefc, efclist, 1);
@@ -1079,7 +1093,8 @@ typedef struct {
   int flg_metric;         // effective metric active for this solve
   const mjModel* fm;      // model, for the metric calls
   mjData* fd;             // data, for the metric calls
-  mjtNum* epL;            // metric blocks with the contact class folded in, or NULL
+  mjEffFold epfold;       // metric preconditioner with the contact class folded in
+  mjEffFold* ep;          // &epfold when folded, or NULL
 
   // Newton: lower-triangle view of the metric matrix S = diag(h*D+h^2*K) + K_csr, built by
   // MakeMetricLower on the solver stack, merged into the Hessian alongside M
@@ -1120,7 +1135,7 @@ typedef struct {
 
 
 // IPC folds the efc rows in their quadratic zone (its contact pairs among them) and the metric's
-// rank-1 classes into a solver-owned copy of the metric blocks (mjd_effPrecFold): monolithic CG
+// rank-1 classes into a solver-owned copy of the metric blocks (mj_effPrecFold): monolithic CG
 // with a live metric
 static int effFoldWanted(const mjModel* m, const mjData* d, int island, int is_elliptic) {
   return d->efm_active && island < 0 && !is_elliptic && mjENABLED(mjENBL_IPC);
@@ -1252,7 +1267,7 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
     int tcap = 0, tlow = 0;
     mjEffRank1Iter it = {0};
     mjEffRank1 e;
-    while (mjd_effRank1Next(m, d, &it, &e, /*flg_contact=*/1)) {
+    while (mj_effRank1Next(m, d, &it, &e, /*flg_contact=*/1)) {
       if (ctx->island >= 0 && d->tree_island[m->dof_treeid[e.colind[0]]] != ctx->island) {
         continue;
       }
@@ -1263,7 +1278,16 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
 
     // the view is lower-triangle: at most half the symmetric CSR, the lower wedge of
     // each rank-1 outer product, the strictly-lower fluid pattern, one diagonal per row
-    nScap = (ctx->island < 0 ? d->nefmK/2 : 0) + tlow + nv + (d->efm_fluid ? m->nC - nv : 0);
+    int kcap = d->nefmK / 2;
+    if (ctx->island >= 0 && d->nefmK) {
+      int ksum = 0;
+      int idofadr = d->island_idofadr[ctx->island];
+      for (int i = 0; i < nv; i++) {
+        ksum += d->efm_K_rownnz[d->map_idof2dof[idofadr + i]];
+      }
+      kcap = ksum / 2;
+    }
+    nScap = kcap + tlow + nv + (d->efm_fluid ? m->nC - nv : 0);
   }
 
   // carve the mjtNum and int blocks: pass 0 totals the sizes, pass 1 hands out the
@@ -1291,8 +1315,52 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
       nInt += (count);         \
   } while (0)
 
+  // IPC fold, with the dense uncovered-dof blocks for CG (Newton folds only for its
+  // certificate, and its Hessian needs the stack). Sizing the blocks takes a frame that the
+  // fold's scratch bounds
+  int flg_fold = effFoldWanted(m, d, ctx->island, is_elliptic);
+  int nu = 0, ncomp = 0, nS = 0;
+  if (flg_fold && !flg_Newton && mj_stackBytesAvailable(d) >= mj_effFoldScratch(m, d, 1)) {
+    nS = mj_effFoldDenseSize(m, d, nefc, ctx->efc_D, is_sparse, ctx->J_rownnz, ctx->J_rowadr,
+                             ctx->J_colind, &nu, &ncomp);
+    if (!nS) {
+      nu = ncomp = 0;
+    }
+  }
+
+  // CG also folds the sparse factor of the covered dofs, when the metric has one
+  int nF = flg_fold && !flg_Newton ? mj_effCholFoldSize(d) : 0;
+
   for (int pass = 0; pass < 2; pass++) {
     if (pass) {
+      // keep the sparse factor's copy and the dense blocks only if the stack holds them with the
+      // other arrays and the deepest frame the solve takes on top while they are alive: the fold,
+      // the preconditioner apply or the metric product. Else drop the copy, then the blocks, with
+      // a warning: the 3x3 blocks then precondition the covered dofs, the backbone solve the
+      // uncovered ones
+      if (nu || nF) {
+        size_t fold = mj_effFoldScratch(m, d, nu), mul = mj_effMulAddScratch(m, d);
+        size_t avail = mj_stackBytesAvailable(d), scratch = mjMAX(fold, mul);
+        size_t need = mj_stackBytes(sizeof(mjtNum)*nNum, _Alignof(mjtNum)) +
+                      mj_stackBytes(sizeof(int)*nInt, _Alignof(int)) + scratch;
+        int dropped = 0;
+        if (nF && need > avail) {
+          nNum -= nF;
+          nF = 0;
+          dropped = 1;
+          need = mj_stackBytes(sizeof(mjtNum)*nNum, _Alignof(mjtNum)) +
+                 mj_stackBytes(sizeof(int)*nInt, _Alignof(int)) + scratch;
+        }
+        if (nu && need > avail) {
+          nNum -= nS;
+          nInt -= nu + 2*(ncomp + 1);
+          nu = ncomp = nS = 0;
+          dropped = 1;
+        }
+        if (dropped) {
+          mj_warning(d, mjWARN_CNSTRFULL, d->narena);
+        }
+      }
       numblock = mjSTACKALLOC(d, nNum, mjtNum);
       intblock = mjSTACKALLOC(d, nInt, int);
     }
@@ -1355,10 +1423,28 @@ static void PrimalAllocate(const mjModel* m, mjData* d, mjPrimalContext* ctx, in
 
     // constraint state and Jacobian transpose (sparse)
     // IPC: a solver-owned copy of the metric blocks with the contact class folded in
-    // (mjd_effPrecFold), or none
-    ctx->epL = NULL;
-    if (effFoldWanted(m, d, ctx->island, is_elliptic)) {
-      CARVE_NUM(ctx->epL, 9*d->nefmdof);
+    // (mj_effPrecFold), or none; CG also folds the sparse factor's copy and the dense
+    // uncovered-dof blocks when they fit
+    ctx->ep = NULL;
+    if (flg_fold) {
+      ctx->ep = &ctx->epfold;
+      CARVE_NUM(ctx->ep->L,    9*d->nefmdof);
+      CARVE_NUM(ctx->ep->S,    nS);
+      CARVE_INT(ctx->ep->U,    nu);
+      CARVE_INT(ctx->ep->Uadr, nu ? ncomp + 1 : 0);
+      CARVE_INT(ctx->ep->Sadr, nu ? ncomp + 1 : 0);
+      CARVE_NUM(ctx->ep->F,    nF);
+      ctx->ep->nu = nu;
+      ctx->ep->ncomp = ncomp;
+      ctx->ep->nS = nS;
+      ctx->ep->partial = 0;
+      ctx->ep->S_valid = 0;
+      ctx->ep->factor = NULL;
+      if (!nF) {
+        ctx->ep->F = NULL;
+      } else if (pass) {
+        ctx->ep->F[0] = 0;
+      }
     }
 
     CARVE_INT(ctx->oldstate, nefc);
@@ -1517,10 +1603,10 @@ static void PrimalUpdateGrad(mjPrimalContext* ctx) {
 
 // the metric preconditioner, against the contact-folded blocks where they were built
 static void PrimalMetricPrecond(mjPrimalContext* ctx, mjtNum* x, const mjtNum* b) {
-  if (ctx->epL) {
-    mjd_effPrecBlocks(ctx->fm, ctx->fd, x, b, ctx->epL);
+  if (ctx->ep) {
+    mj_effPrecBlocks(ctx->fm, ctx->fd, x, b, ctx->ep);
   } else {
-    mjd_effPrec(ctx->fm, ctx->fd, x, b);
+    mj_effPrec(ctx->fm, ctx->fd, x, b);
   }
 }
 
@@ -1544,8 +1630,13 @@ static void PrimalUpdateMgrad(mjPrimalContext* ctx, int flg_Newton) {
     PrimalMetricPrecond(ctx, ctx->Mgrad, ctx->grad);
   }
 
-  // CG: Mgrad = M \ grad. For metric island contexts the gathered factor already holds
-  // M + diag including the tendon diagonal; tendon off-diagonals are handled by CG itself
+  // CG island with metric: island-local metric preconditioner
+  else if (ctx->flg_metric) {
+    mj_effPrecIsland(ctx->fm, ctx->fd, ctx->Mgrad, ctx->grad, ctx->island,
+                     ctx->qLD, ctx->qLDiagInv, ctx->M_rownnz, ctx->M_rowadr, ctx->M_colind);
+  }
+
+  // CG without metric: Mgrad = M \ grad
   else {
     mju_copy(ctx->Mgrad, ctx->grad, nv);
     mj_solveLD(ctx->Mgrad, ctx->qLD, ctx->qLDiagInv, nv, 1,
@@ -1994,9 +2085,9 @@ static mjtNum PrimalSearch(mjPrimalContext* ctx, mjtNum tolerance, mjtNum ls_ite
                       ctx->M_rownnz, ctx->M_rowadr, ctx->M_colind);
   if (ctx->flg_metric) {
     if (ctx->island < 0) {
-      mjd_effMulAdd(ctx->fm, ctx->fd, ctx->Mv, ctx->search, /*flg_contact=*/1);
+      mj_effMulAdd(ctx->fm, ctx->fd, ctx->Mv, ctx->search, /*flg_contact=*/1);
     } else {
-      mjd_effMulAddIsland(ctx->fm, ctx->fd, ctx->Mv, ctx->search, ctx->island);
+      mj_effMulAddIsland(ctx->fm, ctx->fd, ctx->Mv, ctx->search, ctx->island);
     }
   }
 
@@ -2202,7 +2293,7 @@ static void MakeMetricLower(mjData* d, mjPrimalContext* ctx) {
 
   // count rank-1 entries per (local) row
   it = (mjEffRank1Iter){0};
-  while (mjd_effRank1Next(m, d, &it, &e, /*flg_contact=*/1)) {
+  while (mj_effRank1Next(m, d, &it, &e, /*flg_contact=*/1)) {
     if (island >= 0 && d->tree_island[m->dof_treeid[e.colind[0]]] != island) {
       continue;
     }
@@ -2227,7 +2318,7 @@ static void MakeMetricLower(mjData* d, mjPrimalContext* ctx) {
 
   // fill the buckets
   it = (mjEffRank1Iter){0};
-  while (mjd_effRank1Next(m, d, &it, &e, /*flg_contact=*/1)) {
+  while (mj_effRank1Next(m, d, &it, &e, /*flg_contact=*/1)) {
     if (island >= 0 && d->tree_island[m->dof_treeid[e.colind[0]]] != island) {
       continue;
     }
@@ -2262,7 +2353,7 @@ static void MakeMetricLower(mjData* d, mjPrimalContext* ctx) {
     }
   }
 
-  // merge flex CSR (monolithic only), tendon buckets and diagonals into the lower view
+  // merge flex CSR, tendon buckets and diagonals into the lower view
   adr = 0;
   for (int i=0; i < nv; i++) {
     ctx->S_rowadr[i] = adr;
@@ -2271,13 +2362,13 @@ static void MakeMetricLower(mjData* d, mjPrimalContext* ctx) {
 
     // three-way merge of the sorted flex row, the sorted tendon/actuator row and the
     // fluid M-pattern row, summing duplicates. Island dof->idof maps preserve order
-    // within a tree, so mapped fluid columns stay sorted
+    // across DOFs in the island, so mapped flex and fluid columns stay sorted
     int fa = 0, fn = 0;
     const int* fcol = NULL;
     const mjtNum* fval = NULL;
-    if (island < 0 && d->nefmK) {
-      fa = d->efm_K_rowadr[i];
-      fn = d->efm_K_rownnz[i];
+    if (d->nefmK) {
+      fa = d->efm_K_rowadr[gdof];
+      fn = d->efm_K_rownnz[gdof];
       fcol = d->efm_K_colind;
       fval = d->efm_K_val;
     }
@@ -2291,13 +2382,16 @@ static void MakeMetricLower(mjData* d, mjPrimalContext* ctx) {
     while (fa < fe || ta < te || ga < ge) {
       int col;
       mjtNum val = 0;
-      int cf = fa < fe ? fcol[fa] : nv;
+      int cf = fa < fe ? (island >= 0 ? d->map_dof2idof[fcol[fa]] - idofadr
+                                      : fcol[fa]) : nv;
       int ct = ta < te ? tcol[ta] : nv;
       int cg = ga < ge ? (island >= 0 ? d->map_dof2idof[m->M_colind[ga]] - idofadr
                                       : m->M_colind[ga]) : nv;
       col = cf < ct ? cf : ct;
       col = cg < col ? cg : col;
-      while (fa < fe && fcol[fa] == col) {
+      while (fa < fe &&
+             (island >= 0 ? d->map_dof2idof[fcol[fa]] - idofadr
+                          : fcol[fa]) == col) {
         val += fval[fa++];
       }
       while (ta < te && tcol[ta] == col) {
@@ -2333,10 +2427,36 @@ static void MakeMetricLower(mjData* d, mjPrimalContext* ctx) {
 }
 
 
-// allocate and compute Hessian given efc_state
+// scratch stack bytes needed by mju_sqrMatTDSparseSymbolic + Numeric
+static size_t primalSqrScratchBytes(int nv, int nefc) {
+  size_t sym_bytes = mj_stackFrameBytes() +
+                     2 * mj_stackBytes((size_t)nv * sizeof(int), _Alignof(int)) +
+                     mj_stackBytes((size_t)nefc * sizeof(int), _Alignof(int));
+  size_t num_bytes = mj_stackFrameBytes() +
+                     mj_stackBytes(8 * (size_t)nv * sizeof(mjtNum), _Alignof(mjtNum));
+  return mjMAX(sym_bytes, num_bytes);
+}
+
+
+// per-iteration scratch stack bytes needed by the primal solver main loop
+static size_t primalLoopScratchBytes(const mjPrimalContext* ctx, const mjData* d) {
+  size_t sqr_bytes = ctx->is_sparse ? primalSqrScratchBytes(ctx->nv, ctx->nefc) : 0;
+  size_t mul_bytes = ctx->flg_metric ? mj_effMulAddScratch(ctx->fm, d) : 0;
+  size_t prec_bytes =
+      ctx->flg_metric ? mj_effFoldScratch(ctx->fm, d, ctx->ep ? ctx->ep->nu : 0) : 0;
+  return mjMAX(sqr_bytes, mjMAX(mul_bytes, prec_bytes));
+}
+
+
+// allocate and compute Hessian given efc_state; return 1 on success, 0 if arena is exhausted
 //  mj_{mark/free}Stack in caller function!
-static void MakeHessian(mjData* d, mjPrimalContext* ctx) {
+static int MakeHessian(mjData* d, mjPrimalContext* ctx) {
   int nv = ctx->nv, nefc = ctx->nefc;
+
+  // per-iteration scratch needed by the solver main loop after MakeHessian returns
+  size_t cg_bytes =
+      ctx->LTJ ? 0 : mj_stackBytes(2 * (size_t)nv * sizeof(mjtNum), _Alignof(mjtNum));
+  size_t loop_bytes = primalLoopScratchBytes(ctx, d);
 
   // compute constraint inertia
   for (int i=0; i < nefc; i++) {
@@ -2346,11 +2466,25 @@ static void MakeHessian(mjData* d, mjPrimalContext* ctx) {
   // discrete metric: build the lower-triangle view of S for merging into H
   ctx->nS = 0;
   if (ctx->flg_metric) {
+    int tcap = ctx->S_tcap > 0 ? ctx->S_tcap : 1;
+    size_t metric_bytes =
+        mj_stackFrameBytes() +
+        mj_stackBytes((2 * (size_t)nv + (size_t)tcap) * sizeof(int), _Alignof(int)) +
+        mj_stackBytes((size_t)tcap * sizeof(mjtNum), _Alignof(mjtNum));
+    if (mj_stackBytesAvailable(d) < mjMAX(metric_bytes, cg_bytes + loop_bytes)) {
+      mj_warning(d, mjWARN_CNSTRFULL, d->narena);
+      return 0;
+    }
     MakeMetricLower(d, ctx);
   }
 
   // sparse
   if (ctx->is_sparse) {
+    if (mj_stackBytesAvailable(d) < cg_bytes + loop_bytes) {
+      mj_warning(d, mjWARN_CNSTRFULL, d->narena);
+      return 0;
+    }
+
     // count Hessian nonzeros, initialize rowadr, rownnz
     ctx->nH = mju_sqrMatTDSparseSymbolic(
         ctx->H_rownnz, ctx->H_rowadr, NULL, NULL,
@@ -2362,6 +2496,17 @@ static void MakeHessian(mjData* d, mjPrimalContext* ctx) {
 
     // add discrete-metric nonzeros
     ctx->nH += ctx->nS;
+
+    // check stack space for H, H_colind, HT_colind plus symbolic Cholesky counting scratch
+    size_t H_bytes =
+        mj_stackBytes((size_t)ctx->nH * sizeof(mjtNum), _Alignof(mjtNum)) +
+        mj_stackBytes(2 * (size_t)ctx->nH * sizeof(int), _Alignof(int));
+    size_t chol_count_bytes =
+        mj_stackFrameBytes() + 2 * mj_stackBytes((size_t)nv * sizeof(int), _Alignof(int));
+    if (mj_stackBytesAvailable(d) < H_bytes + cg_bytes + mjMAX(chol_count_bytes, loop_bytes)) {
+      mj_warning(d, mjWARN_CNSTRFULL, d->narena);
+      return 0;
+    }
 
     // nH is known: allocate H, H_colind, HT_colind
     ctx->H          = mjSTACKALLOC(d, ctx->nH, mjtNum);
@@ -2409,9 +2554,19 @@ static void MakeHessian(mjData* d, mjPrimalContext* ctx) {
                                      ctx->HT_rownnz, ctx->HT_rowadr, ctx->HT_colind,
                                      nv, d);
 
-    // nL is known: allocate blocks and carve L_colind, LT_colind, LT_map, L, Lcone
-    size_t nL_int = 3*ctx->nL + (ctx->is_elliptic ? nv : 0);  // L_colind + LT_colind + LT_map + pathcost
-    size_t nL_num = ctx->is_elliptic ? 2*ctx->nL : ctx->nL;   // L + Lcone
+    // nL is known: check stack space, then allocate L_colind, LT_colind, LT_map, L, Lcone
+    // L_colind + LT_colind + LT_map + pathcost
+    size_t nL_int = 3*(size_t)ctx->nL + (ctx->is_elliptic ? (size_t)nv : 0);
+    size_t nL_num = ctx->is_elliptic ? 2*(size_t)ctx->nL : (size_t)ctx->nL;  // L + Lcone
+    size_t L_bytes =
+        mj_stackBytes(nL_int * sizeof(int), _Alignof(int)) +
+        mj_stackBytes(nL_num * sizeof(mjtNum), _Alignof(mjtNum));
+    size_t chol_fill_bytes =
+        mj_stackFrameBytes() + 4 * mj_stackBytes((size_t)nv * sizeof(int), _Alignof(int));
+    if (mj_stackBytesAvailable(d) < L_bytes + mjMAX(chol_fill_bytes, loop_bytes)) {
+      mj_warning(d, mjWARN_CNSTRFULL, d->narena);
+      return 0;
+    }
     int* L_intblock    = mjSTACKALLOC(d, nL_int, int);
     mjtNum* L_numblock = mjSTACKALLOC(d, nL_num, mjtNum);
     ctx->L_colind      = L_intblock;
@@ -2457,11 +2612,14 @@ static void MakeHessian(mjData* d, mjPrimalContext* ctx) {
                          /*flg_upper=*/ 0);
     }
   }
+
+  return 1;
 }
 
 
-// forward declaration of HessianCone (for readability)
+// forward declarations (for readability)
 static void HessianCone(mjData* d, mjPrimalContext* ctx);
+static void HessianConeUpdate(mjData* d, mjPrimalContext* ctx);
 
 // factorize Hessian: L = chol(H), maybe (re)compute H given efc_state
 static void FactorizeHessian(mjData* d, mjPrimalContext* ctx, int flg_recompute) {
@@ -2503,16 +2661,11 @@ static void FactorizeHessian(mjData* d, mjPrimalContext* ctx, int flg_recompute)
     }
 
     // numeric sparse factorization: L = chol(H) using pre-computed sparsity pattern
-    int rank = mju_cholFactorNumeric(
+    mju_cholFactorNumeric(
         ctx->L, nv, mjMINVAL,
         ctx->L_rownnz, ctx->L_rowadr, ctx->L_colind,
         ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_colind, ctx->LT_map,
         ctx->H, ctx->H_rownnz, ctx->H_rowadr, ctx->H_colind, ctx->cholscratch);
-
-    // rank-deficient; SHOULD NOT OCCUR
-    if (rank != nv) {
-      mjERROR("rank-deficient sparse Hessian");
-    }
   }
 
   // dense
@@ -2552,6 +2705,19 @@ static void HessianConeFolded(mjData* d, mjPrimalContext* ctx) {
 
   // allocate on the first fold of this solve and reuse for the rest of it
   if (!ctx->Jmod) {
+    size_t fold_bytes =
+        2 * mj_stackBytes((size_t)ctx->nJ * sizeof(mjtNum), _Alignof(mjtNum)) +
+        mj_stackBytes((size_t)nefc * sizeof(mjtNum), _Alignof(mjtNum)) +
+        mj_stackBytes((size_t)ctx->nH * sizeof(mjtNum), _Alignof(mjtNum)) +
+        2 * mj_stackBytes((size_t)nv * sizeof(int), _Alignof(int)) +
+        mj_stackBytes((size_t)ctx->nJ * sizeof(int), _Alignof(int));
+    size_t loop_bytes = primalLoopScratchBytes(ctx, d);
+    if (mj_stackBytesAvailable(d) < fold_bytes + loop_bytes) {
+      mj_warning(d, mjWARN_CNSTRFULL, d->narena);
+      ctx->cone_fold = 0;
+      HessianConeUpdate(d, ctx);
+      return;
+    }
     ctx->Jmod         = mjSTACKALLOC(d, ctx->nJ, mjtNum);
     ctx->JTmod        = mjSTACKALLOC(d, ctx->nJ, mjtNum);
     ctx->Dmod         = mjSTACKALLOC(d, nefc, mjtNum);
@@ -2607,13 +2773,11 @@ static void HessianConeFolded(mjData* d, mjPrimalContext* ctx) {
     mju_addToMatSparse(Hcone, ctx->H_rownnz, ctx->H_rowadr, ctx->H_colind, nv,
                        ctx->S_val, ctx->S_rownnz, ctx->S_rowadr, ctx->S_colind);
   }
-  if (mju_cholFactorNumeric(ctx->Lcone, nv, mjMINVAL,
-                            ctx->L_rownnz, ctx->L_rowadr, ctx->L_colind,
-                            ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_colind, ctx->LT_map,
-                            Hcone, ctx->H_rownnz, ctx->H_rowadr, ctx->H_colind,
-                            ctx->cholscratch) != nv) {
-    mjERROR("rank-deficient cone Hessian");
-  }
+  mju_cholFactorNumeric(ctx->Lcone, nv, mjMINVAL,
+                        ctx->L_rownnz, ctx->L_rowadr, ctx->L_colind,
+                        ctx->LT_rownnz, ctx->LT_rowadr, ctx->LT_colind, ctx->LT_map,
+                        Hcone, ctx->H_rownnz, ctx->H_rowadr, ctx->H_colind,
+                        ctx->cholscratch);
 }
 
 
@@ -2802,6 +2966,19 @@ static void mj_solPrimal(const mjModel* m, mjData* d, int island, int maxiter, i
 
   // make context
   PrimalPointers(m, d, &ctx, island);
+
+  // unconstrained metric island: mj_fwdAcceleration already solved
+  // (M + S)*qacc_smooth = qfrc_smooth - qfrc_bias via mj_effSolve (which includes all metric
+  // terms S), so with nefc == 0 the primal cost 1/2*(a - qacc_smooth)^T*Mtilde*(a - qacc_smooth)
+  // is minimized directly at qacc = qacc_smooth
+  if (island >= 0 && ctx.nefc == 0) {
+    mju_copy(ctx.qacc, ctx.qacc_smooth, ctx.nv);
+    mju_zero(ctx.qfrc_constraint, ctx.nv);
+    d->solver_niter[island] = 0;
+    mj_freeStack(d);
+    return;
+  }
+
   PrimalAllocate(m, d, &ctx, flg_Newton);
 
   // local copies
@@ -2814,9 +2991,9 @@ static void mj_solPrimal(const mjModel* m, mjData* d, int island, int maxiter, i
                       ctx.M_rownnz, ctx.M_rowadr, ctx.M_colind);
   if (ctx.flg_metric) {
     if (ctx.island < 0) {
-      mjd_effMulAdd(m, d, ctx.Ma, ctx.qacc, /*flg_contact=*/1);
+      mj_effMulAdd(m, d, ctx.Ma, ctx.qacc, /*flg_contact=*/1);
     } else {
-      mjd_effMulAddIsland(m, d, ctx.Ma, ctx.qacc, ctx.island);
+      mj_effMulAddIsland(m, d, ctx.Ma, ctx.qacc, ctx.island);
     }
   }
 
@@ -2834,25 +3011,15 @@ static void mj_solPrimal(const mjModel* m, mjData* d, int island, int maxiter, i
   PrimalUpdateConstraint(&ctx, flg_Newton & (m->opt.cone == mjCONE_ELLIPTIC));
   PrimalUpdateGrad(&ctx);
 
-  // compute and save scaling factor
-  mjtNum scale;
-  if (island < 0) {
-    scale = 1 / (m->stat.meaninertia * mjMAX(1, m->nv));
-  } else {
-    mjtNum island_inertia = 0;
-    for (int i=0; i < nv; i++) {
-      int diag_i = ctx.M_rowadr[i] + ctx.M_rownnz[i] - 1;
-      island_inertia += ctx.M[diag_i];
-    }
-    scale = 1 / island_inertia;
-  }
+  // compute and save scaling factor: inverse trace of the inertia matrix
+  mjtNum scale = inertiaScale(m, d, island);
   ctx.scale = scale;
 
   // IPC: fold the contact class and the efc rows into the solver-owned copy of the metric
   // blocks, so the CG preconditioner sees the contact curvature the operator carries
-  if (ctx.epL && !mjd_effPrecFold(m, d, ctx.epL, ctx.nefc, ctx.efc_D, ctx.is_sparse, ctx.J,
-                                  ctx.J_rownnz, ctx.J_rowadr, ctx.J_colind)) {
-    ctx.epL = NULL;
+  if (ctx.ep && !mj_effPrecFold(m, d, ctx.ep, ctx.nefc, ctx.efc_D, ctx.is_sparse, ctx.J,
+                                ctx.J_rownnz, ctx.J_rowadr, ctx.J_colind)) {
+    ctx.ep = NULL;
   }
 
   // Mgrad = M \ grad: the CG preconditioned gradient, also the convergence certificate
@@ -2874,14 +3041,33 @@ static void mj_solPrimal(const mjModel* m, mjData* d, int island, int maxiter, i
 
   // Newton: compute and factorize Hessian, Mgrad = H \ grad
   if (!flg_done && flg_Newton) {
-    MakeHessian(d, &ctx);
-    FactorizeHessian(d, &ctx, /*flg_recompute=*/0);
-    PrimalUpdateMgrad(&ctx, /*flg_Newton=*/1);
+    if (MakeHessian(d, &ctx)) {
+      FactorizeHessian(d, &ctx, /*flg_recompute=*/0);
+      PrimalUpdateMgrad(&ctx, /*flg_Newton=*/1);
 
-    // Newton decrement already below tolerance: converged, skip the first line search
-    // (gradient-gated like the certificate: H^-1 suppresses stiff-direction force errors)
-    flg_done = flg_gradient &&
-               mju_max(0, 0.5*scale*mju_dot(ctx.grad, ctx.Mgrad, nv)) < m->opt.tolerance;
+      // Newton decrement already below tolerance: converged, skip the first line search
+      // (gradient-gated like the certificate: H^-1 suppresses stiff-direction force errors)
+      flg_done = flg_gradient &&
+                 mju_max(0, 0.5*scale*mju_dot(ctx.grad, ctx.Mgrad, nv)) < m->opt.tolerance;
+    } else {
+      // arena exhausted during Hessian/Cholesky setup: fall back to CG
+      flg_Newton = 0;
+      flg_done = flg_gap;
+      if (!flg_done) {
+        // PrimalAllocate unconditionally carves cholupd[nv], cholscratch[nv] (sparse) /
+        // L[nv*nv] (dense), and LTJ[6*nv] (elliptic) when flg_Newton is set; reuse them
+        // for the 4 CG vectors now that Newton is disabled
+        ctx.gradold  = ctx.cholupd;
+        ctx.Mgradold = ctx.is_sparse ? ctx.cholscratch : ctx.L;
+        mjtNum* cg_buf = ctx.LTJ ? ctx.LTJ : mjSTACKALLOC(d, 2*nv, mjtNum);
+        ctx.graddif  = cg_buf;
+        ctx.Mgraddif = cg_buf + nv;
+      }
+    }
+  } else if (!flg_done && ctx.ep && ctx.ep->F) {
+    ctx.ep->factor = mj_effCholFoldFactor(m, d, ctx.ep, ctx.nefc, ctx.efc_D, ctx.is_sparse, ctx.J,
+                                          ctx.J_rownnz, ctx.J_rowadr, ctx.J_colind);
+    PrimalUpdateMgrad(&ctx, /*flg_Newton=*/0);
   }
 
   // start both with preconditioned gradient

@@ -17,9 +17,11 @@ from collections.abc import Sequence
 
 from absl import app
 import mujoco
-import mujoco._render_filament as mjrf
+from mujoco import mjrf
 from mujoco.experimental.studio import window
+from mujoco.rendering.filament import model_scene
 from mujoco.rendering.filament import renderer
+import numpy as np
 
 
 def main(argv: Sequence[str]) -> None:
@@ -41,46 +43,39 @@ def main(argv: Sequence[str]) -> None:
   # create a renderer
   r = renderer.Renderer(ctx)
 
-  # create GPU objects (textures, meshes, etc.) from the model
-  model_objects = mjrf.ModelObjects(ctx, model)
+  # add lights and renderables defined in the model to a scene
+  scene = model_scene.ModelScene(ctx, model, r.scene("scn"))
 
-  # add model lights and renderables to a scene
-  scene = r.scene("scn")
-  scene.configure_from_model(model)
-  model_lights = mjrf.ModelLights(scene, model_objects)
-  model_renderables = mjrf.ModelRenderables(scene, model_objects)
-
+  # setup a camera
   vcam = mujoco.MjvCamera()
   mujoco.mjv_defaultFreeCamera(model, vcam)
   vcam.type = int(mujoco.mjtCamera.mjCAMERA_FIXED)
   vcam.fixedcamid = 0
 
-  # define a single view that connects a scene and camera to an output
-  r.view(
-      "v1",
-      scene="scn",
-      target="out",
-  )
-
+  buf = np.empty((0, 0, 3), dtype=np.uint8)
   while win.NewFrame():
     # simulate one step
     mujoco.mj_step(model, data)
 
-    # update the lights and renderables
-    model_lights.update(data)
-    model_renderables.update(data)
-
-    # update the camera
-    r.update_camera("v1", mujoco.mjv_camera2GLCamera(model, data, vcam))
+    # update the lights and renderables with the current `data` state
+    scene.update(data)
 
     # ensure output buffer is of right size (in case of window resize)
-    r.target("out", (win.GetWidth(), win.GetHeight()))
+    w, h = win.GetWidth(), win.GetHeight()
+    if buf.shape != (h, w, 3):
+      buf = np.empty((h, w, 3), dtype=np.uint8)
+      r.target("out", buf)
 
     # render the scene
-    r.render()
+    view = renderer.View(
+        scene="scn",
+        target="out",
+        camera=mujoco.mjv_camera2GLCamera(model, data, vcam),
+    )
+    r.render([view])
 
     # present the output image to the window
-    win.Present(r.get_image("out").pixels)
+    win.Present(buf)
 
 
 if __name__ == "__main__":

@@ -362,7 +362,8 @@ Orientation input charts of so3 actuators. These values are used in ``m->actuato
 mjtCtrlInput
 ~~~~~~~~~~~~
 
-Input bitflags of servo-family (pd, dcmotor) actuators. These values are used in ``m->actuator_ctrlspec``.
+Input bitflags of actuators: the input subset of pid and dcmotor actuators, and the declared input of actuators with
+fixed or affine gain. These values are used in ``m->actuator_ctrlspec``.
 
 .. mujoco-include:: mjtCtrlInput
 
@@ -936,6 +937,26 @@ Whether to align free joints with the inertial frame.
 
 .. mujoco-include:: mjtAlignFree
 
+.. _mjtPassthrough:
+
+mjtPassthrough
+~~~~~~~~~~~~~~
+
+Which assets the compiler leaves :ref:`by reference<CAssetReference>` instead of loading into :ref:`mjModel`, a
+bitmask; see :ref:`compiler/passthrough<compiler-passthrough>`.
+
+.. mujoco-include:: mjtPassthrough
+
+.. _mjtEmbed:
+
+mjtEmbed
+~~~~~~~~
+
+Whether an asset's payload is in the model or the asset is :ref:`by reference<CAssetReference>`; see
+:ref:`texture/embed<asset-texture-embed>`.
+
+.. mujoco-include:: mjtEmbed
+
 .. _mjtInertiaFromGeom:
 
 mjtInertiaFromGeom
@@ -972,6 +993,15 @@ Type of built-in procedural mesh.
 
 .. mujoco-include:: mjtMeshBuiltin
 
+.. _mjtFlexSection:
+
+mjtFlexSection
+~~~~~~~~~~~~~~
+
+Cross-section of 1D flex :ref:`elasticity<flex-elasticity>`, see :ref:`section<flex-elasticity-section>`.
+
+.. mujoco-include:: mjtFlexSection
+
 .. _mjtConflict:
 
 mjtConflict
@@ -980,6 +1010,26 @@ mjtConflict
 Conflict resolution mode for attach.
 
 .. mujoco-include:: mjtConflict
+
+.. _mjtScaling:
+
+mjtScaling
+~~~~~~~~~~
+
+Physical policy of a frame's :ref:`scale<frame-scale>`, see :ref:`scaling<frame-scaling>`.
+
+.. mujoco-include:: mjtScaling
+
+.. _mjtActuator:
+
+mjtActuator
+~~~~~~~~~~~
+
+The :ref:`actuator element<actuator>` an actuator is written with: :ref:`general<actuator-general>` or one of its
+:ref:`shortcuts<CActShortcuts>`. Set by the ``mjs_setTo*`` functions and by the parser; shortcut parameters are inherited
+only from a default written with the same shortcut.
+
+.. mujoco-include:: mjtActuator
 
 
 .. _mjtCTimer:
@@ -1573,7 +1623,7 @@ depending on the values of the material properties. There there are three lighti
 metallic-roughness workflows.
 
 2. Specular-glossiness (non-PBR): this is a legacy model designed to be compatible with classic
-:ref:`mjr<Rendering>` renderer, though it is not 100% identical.
+:ref:`mjr<ClassicRendering>` renderer, though it is not 100% identical.
 
 3. Unlit: this model ignores lighting and is used for rendering UX or decorative elements like
 contact forces and labels.
@@ -1610,14 +1660,14 @@ A single rendering operation.
 .. mujoco-include:: mjrfRenderRequest
 
 
-.. _mjrfReadPixelsRequest:
+.. _mjrfReadRequest:
 
-mjrfReadPixelsRequest
+mjrfReadRequest
 ~~~~~~~~~~~~~~~~~~~~~
 
 A single pixel read operation.
 
-.. mujoco-include:: mjrfReadPixelsRequest
+.. mujoco-include:: mjrfReadRequest
 
 
 .. _mjrfFrameStats:
@@ -1849,6 +1899,15 @@ mjsFlex
 ~~~~~~~
 
 Flex specification.
+
+The experimental integer ``elastic3d`` selects the material for non-interpolated 3D flexes: ``0`` (the default) is
+Saint Venant-Kirchhoff (StVK) elasticity, and ``1`` is simplified Stable Neo-Hookean (SNH) elasticity. Other values are rejected.
+SNH requires the :ref:`discrete integrator<option-integrator>`. The setting is available only through :ref:`mjSpec`,
+with no MJCF attribute. Specs with SNH enabled cannot be saved to MJCF; compiled models can be saved to MJB.
+SNH projects each element's material Hessian to positive semidefiniteness before mapping it to vertex coordinates.
+The discrete solver and Rayleigh damping reuse this projected operator. Energy and elastic forces are unchanged and
+remain defined through inversion. Material damping has non-positive instantaneous power, but projection does not
+guarantee inversion-free motion or stability at arbitrary timesteps.
 
 .. mujoco-include:: mjsFlex
 
@@ -2152,6 +2211,47 @@ This data structure defines an encoder. It contains a set of callbacks used for 
 
 
 
+.. _tyBatchStructure:
+
+Batched simulation
+^^^^^^^^^^^^^^^^^^
+
+These types are used by the :ref:`batch API<Batchedsimulation>`, declared in `mjbatch.h
+<https://github.com/google-deepmind/mujoco/blob/main/include/mujoco/mjbatch.h>`__.
+
+
+.. _mjBatch:
+
+mjBatch
+~~~~~~~
+
+An opaque handle to ``nsim`` simulations of one model and the thread pool that runs them, created by
+:ref:`mjb_makeBatch` and freed by :ref:`mjb_deleteBatch`. See :ref:`Batched simulation<siBatch>`.
+
+
+.. _mjBatchConfig:
+
+mjBatchConfig
+~~~~~~~~~~~~~
+
+The parameters of :ref:`mjb_makeBatch`, set to their defaults by :ref:`mjb_defaultConfig`.
+
+.. mujoco-include:: mjBatchConfig
+
+
+.. _mjBatchRecord:
+
+mjBatchRecord
+~~~~~~~~~~~~~
+
+A field or state recorded by :ref:`mjb_rollout` after every substep. ``buf`` holds ``n x nstep x size`` values for the
+``n`` simulations of the call, in call order, where ``size`` is the field's number of elements per simulation, or
+``mj_stateSize(m, spec)`` for a state given by the :ref:`mjtState` bits ``spec``, in which case the values are
+:ref:`mjtNum`.
+
+.. mujoco-include:: mjBatchRecord
+
+
 
 .. _tyFunction:
 
@@ -2360,12 +2460,13 @@ mjfDecode
 
 .. code-block:: C
 
-   typedef mjSpec* (*mjfDecode)(mjResource* resource, const mjVFS* vfs);
+   typedef mjSpec* (*mjfDecode)(mjResource* resource, const mjVFS* vfs, char* error, int error_sz);
 
 
 This callback is given an opened resource, and is responsible for decoding it into a :ref:`mjSpec`.
 Ownership of the resource and the returned spec is responsibility of the caller.
-When decoding fails, the callback should return NULL.
+When decoding fails, the callback should return NULL and, if ``error`` is not NULL, write a description of the
+failure into ``error`` (of size ``error_sz``).
 
 .. _mjfCanDecode:
 
@@ -2394,6 +2495,27 @@ mjfEncode
 This callback populates the :ref:`mjResource<mjResource>` `data` member with bytes representing the
 given spec in the format associated with the owning plugin. This may be called with the associated
 compiled :ref:`mjModel`.
+
+
+.. _tyBatchCallbacks:
+
+Batch callbacks
+^^^^^^^^^^^^^^^
+
+This function type is used by the :ref:`batch API<Batchedsimulation>`.
+
+
+.. _mjfBatchFunc:
+
+mjfBatchFunc
+~~~~~~~~~~~~
+
+.. code-block:: C
+
+   typedef void (*mjfBatchFunc)(const mjModel* m, mjData* d, int sim, void* arg);
+
+This is the function type run by :ref:`mjb_apply` on simulation ``sim``, on a batch thread. The model has the
+simulation's per-simulation fields applied, and ``d`` holds its state.
 
 
 .. _tyNotes:

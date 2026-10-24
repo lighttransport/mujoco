@@ -56,6 +56,8 @@ FilamentContext::FilamentContext(const mjrfContextConfig* config)
   engine_config.commandBufferSizeMB *= 8;
   engine_config.perFrameCommandsSizeMB *= 8;
   engine_config.perRenderPassArenaSizeMB *= 8;
+  // A model can define several directional lights, and the headlight is one.
+  engine_config.enableMultipleDirectionalLights = true;
 
   filament::Engine::Builder engine_builder;
   engine_builder.config(&engine_config);
@@ -81,6 +83,7 @@ FilamentContext::FilamentContext(const mjrfContextConfig* config)
 }
 
 FilamentContext::~FilamentContext() {
+  engine_->flushAndWait();
   material_manager_.reset();
   object_manager_.reset();
   engine_->destroy(renderer_);
@@ -91,7 +94,7 @@ FilamentContext::~FilamentContext() {
 
 mjrfFrameHandle FilamentContext::Render(
     std::span<const mjrfRenderRequest> requests,
-    std::span<const mjrfReadPixelsRequest> read_requests) {
+    std::span<const mjrfReadRequest> read_requests) {
   if (read_requests.size() > 1) {
     mju_error("Only one read request is supported for now.");
   }
@@ -146,7 +149,7 @@ mjrfFrameHandle FilamentContext::Render(
             "pointless.");
       }
 
-      const mjrfReadPixelsRequest& read_request = read_requests[0];
+      const mjrfReadRequest& read_request = read_requests[0];
       if (read_request.num_bytes == 0) {
         mju_error("Output buffer size is zero.");
       }

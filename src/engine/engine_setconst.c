@@ -14,6 +14,7 @@
 
 #include "engine/engine_setconst.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -27,6 +28,7 @@
 #include "engine/engine_forward.h"
 #include "engine/engine_io.h"
 #include "engine/engine_memory.h"
+#include "engine/engine_metric.h"
 #include "engine/engine_util_blas.h"
 #include "engine/engine_util_errmem.h"
 #include "engine/engine_util_solve.h"
@@ -190,6 +192,306 @@ static void setSameframe(mjModel* m) {
 }
 
 
+// minimum value in bound and fluid computations, must match the compiler's mjEPS
+static const double kBoundEps = 1e-14;
+
+
+// bounding box in (min, max) format and bounding sphere radius of a geom in its frame, return 0 for
+// mesh and SDF geoms, whose bounds are those of their mesh
+static int geomBound(const mjModel* m, int g, mjtNum aamm[6], mjtNum* rbound) {
+  const mjtNum* size = m->geom_size + 3*g;
+  switch ((mjtGeom) m->geom_type[g]) {
+  case mjGEOM_MESH:
+  case mjGEOM_SDF:
+    return 0;
+
+  case mjGEOM_HFIELD: {
+    const mjtNum* hsize = m->hfield_size + 4*m->geom_dataid[g];
+    aamm[0] = -hsize[0];
+    aamm[1] = -hsize[1];
+    aamm[2] = -hsize[3];
+    aamm[3] = hsize[0];
+    aamm[4] = hsize[1];
+    aamm[5] = hsize[2];
+    *rbound = mju_sqrt(hsize[0]*hsize[0] + hsize[1]*hsize[1] +
+                       mju_max(hsize[2]*hsize[2], hsize[3]*hsize[3]));
+    return 1;
+  }
+
+  case mjGEOM_PLANE:
+    aamm[0] = aamm[1] = aamm[2] = -mjMAXVAL;
+    aamm[3] = aamm[4] = mjMAXVAL;
+    aamm[5] = 0;
+    *rbound = 0;
+    return 1;
+
+  case mjGEOM_SPHERE:
+    aamm[3] = aamm[4] = aamm[5] = size[0];
+    *rbound = size[0];
+    break;
+
+  case mjGEOM_CAPSULE:
+    aamm[3] = aamm[4] = size[0];
+    aamm[5] = size[0] + size[1];
+    *rbound = size[0] + size[1];
+    break;
+
+  case mjGEOM_CYLINDER:
+    aamm[3] = aamm[4] = size[0];
+    aamm[5] = size[1];
+    *rbound = mju_sqrt(size[0]*size[0] + size[1]*size[1]);
+    break;
+
+  case mjGEOM_ELLIPSOID:
+    mju_copy3(aamm+3, size);
+    *rbound = mju_max(mju_max(size[0], size[1]), size[2]);
+    break;
+
+  case mjGEOM_BOX:
+    mju_copy3(aamm+3, size);
+    *rbound = mju_sqrt(size[0]*size[0] + size[1]*size[1] + size[2]*size[2]);
+    break;
+
+  default:
+    mju_copy3(aamm+3, size);
+    *rbound = 0;
+  }
+
+  // symmetric box
+  aamm[0] = -aamm[3];
+  aamm[1] = -aamm[4];
+  aamm[2] = -aamm[5];
+  return 1;
+}
+
+
+// set geom bounds, body collision masks and margins, and the bounding volumes of bodies
+static void setBound(mjModel* m, mjData* d) {
+  mj_markStack(d);
+
+  // bounding boxes and spheres of geoms whose bounds follow from their size
+  for (int i=0; i < m->ngeom; i++) {
+    if (m->geom_type[i] == mjGEOM_HFIELD) {
+      const mjtNum* hsize = m->hfield_size + 4*m->geom_dataid[i];
+      mjtNum* size = m->geom_size + 3*i;
+      size[0] = hsize[0];
+      size[1] = hsize[1];
+      size[2] = 0.25*hsize[2] + 0.5*hsize[3];
+    }
+
+    mjtNum aamm[6], rbound;
+    if (geomBound(m, i, aamm, &rbound)) {
+      mjtNum* aabb = m->geom_aabb + 6*i;
+      for (int k=0; k < 3; k++) {
+        aabb[k] = (aamm[k+3] + aamm[k]) / 2;
+        aabb[k+3] = (aamm[k+3] - aamm[k]) / 2;
+      }
+      m->geom_rbound[i] = rbound;
+    }
+  }
+
+  // body collision masks and margins, accumulated over geoms
+  for (int i=0; i < m->nbody; i++) {
+    int contype = 0, conaffinity = 0;
+    mjtNum margin = 0;
+    for (int g=m->body_geomadr[i]; g < m->body_geomadr[i]+m->body_geomnum[i]; g++) {
+      contype |= m->geom_contype[g];
+      conaffinity |= m->geom_conaffinity[g];
+      margin = mju_max(margin, m->geom_margin[g] + m->geom_gap[g]);
+    }
+    m->body_contype[i] = contype;
+    m->body_conaffinity[i] = conaffinity;
+    m->body_margin[i] = margin;
+  }
+
+  // bounding volume hierarchies of bodies, in their inertial frames: refit the hierarchy made by
+  // the compiler, whose children follow their parents
+  int nbvhmax = 0;
+  for (int i=0; i < m->nbody; i++) {
+    nbvhmax = mju_max(nbvhmax, m->body_bvhnum[i]);
+  }
+  mjtNum* node = mjSTACKALLOC(d, 6*mju_max(1, nbvhmax), mjtNum);
+  int* inbvh = mjSTACKALLOC(d, mju_max(1, m->ngeom), int);
+  mju_zeroInt(inbvh, m->ngeom);
+  for (int i=0; i < m->nbody; i++) {
+    int adr = m->body_bvhadr[i];
+    int num = m->body_bvhnum[i];
+    if (adr < 0) {
+      continue;
+    }
+    const mjtNum* ipos = m->body_ipos + 3*i;
+    const mjtNum* iquat = m->body_iquat + 4*i;
+    mjtNum qinv[4];
+    mju_negQuat(qinv, iquat);
+
+    // bounds of nodes in (min, max) format, children before parents
+    for (int j=num-1; j >= 0; j--) {
+      mjtNum* aamm = node + 6*j;
+      int g = m->bvh_nodeid[adr+j];
+
+      // leaf: corners of the geom box, in the inertial frame
+      if (g >= 0) {
+        inbvh[g] = 1;
+        const mjtNum* aabb = m->geom_aabb + 6*g;
+        const mjtNum* gpos = m->geom_pos + 3*g;
+        const mjtNum* gquat = m->geom_quat + 4*g;
+        aamm[0] = aamm[1] = aamm[2] = mjMAXVAL;
+        aamm[3] = aamm[4] = aamm[5] = -mjMAXVAL;
+        for (int v=0; v < 8; v++) {
+          mjtNum vert[3], box[3];
+          vert[0] = aabb[0] + (v & 1 ? aabb[3] : -aabb[3]);
+          vert[1] = aabb[1] + (v & 2 ? aabb[4] : -aabb[4]);
+          vert[2] = aabb[2] + (v & 4 ? aabb[5] : -aabb[5]);
+          mju_rotVecQuat(box, vert, gquat);
+          box[0] += gpos[0] - ipos[0];
+          box[1] += gpos[1] - ipos[1];
+          box[2] += gpos[2] - ipos[2];
+          mju_rotVecQuat(vert, box, qinv);
+          for (int k=0; k < 3; k++) {
+            aamm[k] = mju_min(aamm[k], vert[k]);
+            aamm[k+3] = mju_max(aamm[k+3], vert[k]);
+          }
+        }
+      }
+
+      // internal node: union of its children
+      else {
+        const mjtNum* child1 = node + 6*m->bvh_child[2*(adr+j)];
+        const mjtNum* child2 = node + 6*m->bvh_child[2*(adr+j)+1];
+        for (int k=0; k < 3; k++) {
+          aamm[k] = mju_min(child1[k], child2[k]);
+          aamm[k+3] = mju_max(child1[k+3], child2[k+3]);
+        }
+      }
+    }
+
+    // store in (center, size) format, inflate flat boxes
+    for (int j=0; j < num; j++) {
+      const mjtNum* aamm = node + 6*j;
+      mjtNum* aabb = m->bvh_aabb + 6*(adr+j);
+      for (int k=0; k < 3; k++) {
+        mjtNum lo = aamm[k], hi = aamm[k+3];
+        if (mju_abs(lo - hi) < kBoundEps) {
+          lo -= kBoundEps;
+          hi += kBoundEps;
+        }
+        aabb[k] = (hi + lo) / 2;
+        aabb[k+3] = (hi - lo) / 2;
+      }
+    }
+  }
+
+  // colliding geoms must be in the hierarchy of their body, if it has one
+  for (int i=0; i < m->ngeom; i++) {
+    int b = m->geom_bodyid[i];
+    if (m->body_bvhadr[b] >= 0 && !inbvh[i] && (m->geom_contype[i] || m->geom_conaffinity[i])) {
+      mj_freeStack(d);
+      mjERROR("geom %d collides but was not compiled to collide, recompile the model", i);
+      return;
+    }
+  }
+
+  mj_freeStack(d);
+}
+
+
+// 15-point Gauss-Kronrod quadrature of the added-mass coefficient of an ellipsoid with semi-axes
+// (dx, dy, dz) along dx: the integral over l in [0, inf) of dx*dy*dz / sqrt((dx^2 + l)^3 *
+// (dy^2 + l) * (dz^2 + l)), with the change of variables l = x^3 / (1-x)^2
+static double addedMassKappa(double dx, double dy, double dz) {
+  // K15 points x in [0, 1], unused, left in comment for completeness
+  // static const double kronrod_x[15] = {
+  //   0.00427231, 0.02544604, 0.06756779, 0.12923441, 0.20695638,
+  //   0.29707742, 0.39610752, 0.50000000, 0.60389248, 0.70292258,
+  //   0.79304362, 0.87076559, 0.93243221, 0.97455396, 0.99572769
+  // };
+
+  // K15 weights
+  static const double kronrod_w[15] = {
+    0.01146766, 0.03154605, 0.05239501, 0.07032663, 0.08450236,
+    0.09517529, 0.10221647, 0.10474107, 0.10221647, 0.09517529,
+    0.08450236, 0.07032663, 0.05239501, 0.03154605, 0.01146766
+  };
+
+  // l(x) at the K15 points x in [0, 1]
+  static const double kronrod_l[15] = {
+    7.865151709349917e-08, 1.7347976913907274e-05, 0.0003548008144506193,
+    0.002846636252924549, 0.014094260903596077, 0.053063261727396636,
+    0.17041978741317773, 0.5, 1.4036301548686991,
+    3.9353484827022642, 11.644841677041734, 39.53187807410903,
+    177.5711362220801, 1429.4772912937397, 54087.416549217705
+  };
+
+  // dl/dx at the K15 points
+  static const double kronrod_d[15] = {
+    5.538677720489877e-05, 0.002080868285293228, 0.016514126520723166,
+    0.07261900344370877, 0.23985243401862602, 0.6868318249020725,
+    1.8551129519182894, 5.0, 14.060031152313941,
+    43.28941239611009, 156.58546376397112, 747.9826085305024,
+    5827.4042950027115, 116754.0197944512, 25482945.327264845
+  };
+
+  double invdx2 = 1.0 / (dx*dx);
+  double invdy2 = 1.0 / (dy*dy);
+  double invdz2 = 1.0 / (dz*dz);
+
+  // l is non-dimensionalized by scale, since it enters as 1 + l/d^2
+  double scale = pow(dx*dx*dx*dy*dz, 0.4);
+  double kappa = 0;
+  for (int i=0; i < 15; i++) {
+    double lambda = scale * kronrod_l[i];
+    double denom = (1 + lambda*invdx2) *
+                   sqrt((1 + lambda*invdx2) * (1 + lambda*invdy2) * (1 + lambda*invdz2));
+    kappa += scale * kronrod_d[i] / denom * kronrod_w[i];
+  }
+  return kappa * invdx2;
+}
+
+
+// set the added mass and inertia of geoms in the ellipsoid fluid model, from their size
+static void setFluid(mjModel* m) {
+  for (int i=0; i < m->ngeom; i++) {
+    mjtNum* fluid = m->geom_fluid + mjNFLUID*i;
+    if (fluid[0] <= 0) {
+      continue;
+    }
+
+    // semi-axes of the equivalent ellipsoid
+    mjtNum semiaxes[3];
+    mju_geomSemiAxes(semiaxes, m->geom_size + 3*i, (mjtGeom) m->geom_type[i]);
+    double dx = semiaxes[0], dy = semiaxes[1], dz = semiaxes[2];
+
+    // volume of the equivalent ellipsoid
+    double volume = 4.0 / 3.0 * mjPI * dx * dy * dz;
+
+    // kappa is invariant to permutation of its last two arguments
+    double kx = addedMassKappa(dx, dy, dz);
+    double ky = addedMassKappa(dy, dz, dx);
+    double kz = addedMassKappa(dz, dx, dy);
+
+    // virtual moment of inertia factors: if (kz-ky) in the numerator is negative, so is the
+    // denominator, take absolute values of both and clip to kBoundEps
+    double yz = dy*dy - dz*dz;
+    double zx = dz*dz - dx*dx;
+    double xy = dx*dx - dy*dy;
+    double Ixfac = yz*yz * fabs(kz - ky) /
+                   mju_max(kBoundEps, fabs(2*yz + (dy*dy + dz*dz)*(ky - kz)));
+    double Iyfac = zx*zx * fabs(kx - kz) /
+                   mju_max(kBoundEps, fabs(2*zx + (dz*dz + dx*dx)*(kz - kx)));
+    double Izfac = xy*xy * fabs(ky - kx) /
+                   mju_max(kBoundEps, fabs(2*xy + (dx*dx + dy*dy)*(kx - ky)));
+
+    // virtual mass and inertia, entries 6-11 of the fluid coefficients
+    fluid[6] = volume * kx / mju_max(kBoundEps, 2 - kx);
+    fluid[7] = volume * ky / mju_max(kBoundEps, 2 - ky);
+    fluid[8] = volume * kz / mju_max(kBoundEps, 2 - kz);
+    fluid[9] = volume * Ixfac / 5;
+    fluid[10] = volume * Iyfac / 5;
+    fluid[11] = volume * Izfac / 5;
+  }
+}
+
+
 // set fixed quantities (do not depend on qpos0)
 static void setFixed(mjModel* m, mjData* d) {
   mj_markStack(d);
@@ -340,6 +642,14 @@ static void setFixed(mjModel* m, mjData* d) {
 
   // ----- apply compiler AUTO tree sleep policy
 
+  // resolve the AUTO policy anew: trees which a previous call resolved return to AUTO
+  for (int i=0; i < m->ntree; i++) {
+    int policy = m->tree_sleep_policy[i];
+    if (policy == mjSLEEP_AUTO_NEVER || policy == mjSLEEP_AUTO_ALLOWED) {
+      m->tree_sleep_policy[i] = mjSLEEP_AUTO;
+    }
+  }
+
   // actuators: trees with any actuated joint, site, body, or tendon do not auto-sleep
   for (int i=0; i < m->nactuator; i++) {
     int bodyid = -1, bodyid2 = -1;
@@ -430,15 +740,16 @@ static void setFixed(mjModel* m, mjData* d) {
             mjERROR("tree %d connected to tendon %d with non-zero stiffness or damping, "
                     "sleeping not allowed", treeid, i);
           }
+          return;
         }
       }
     }
   }
 
-  // flexes: constraint-free trees are not allowed to sleep
+  // flexes: constraint-free trees are not allowed to sleep unless metric-coupled
   for (int i = 0; i < m->nflex; ++i) {
-    // constrained flexes are allowed to sleep
-    if (m->flex_edgeequality[i]) {
+    // constrained or metric-coupled flexes are allowed to sleep
+    if (m->flex_edgeequality[i] || mj_effFlexPossible(m, i)) {
       continue;
     }
 
@@ -668,6 +979,7 @@ static void makeFlexSparse(mjModel* m, mjData* d) {
       }
 
       // precompute metric (Binv)
+      mjtNum mean_mass = mj_flexMeanVertMass(m, f);
       for (int v = 0; v < nvert; ++v) {
         mjtNum B[4] = {0};
         int v_global = vbase + v;
@@ -691,14 +1003,9 @@ static void makeFlexSparse(mjModel* m, mjData* d) {
             mjERROR("flex vertices are not in the same plane");
           }
 
-          // get mass of neighbor vertex
-          mjtNum weight = 1.0;
+          // get mass weight of neighbor vertex
           int neighbor_v = (v == v1) ? v2 : v1;
-          int b_neighbor = m->flex_vertbodyid[vbase + neighbor_v];
-          if (b_neighbor >= 0) {
-            weight = m->body_mass[b_neighbor];
-            if (weight < mjMINVAL) weight = mjMINVAL;
-          }
+          mjtNum weight = mj_flexvertWeight(m, vbase + neighbor_v, mean_mass);
 
           // accumulate B += w * dx * dx'
           for (int row = 0; row < 2; row++) {
@@ -788,8 +1095,8 @@ static void makeFlexSparse(mjModel* m, mjData* d) {
 }
 
 
-// align 2D flexes to the XY plane
-static void mj_alignFlex(mjModel* m, mjData* d) {
+// align 2D flexes with vertex equality constraints to the XY plane
+void mj_alignFlex(mjModel* m) {
   for (int f = 0; f < m->nflex; f++) {
     // only for 2D flexes with vertex equality constraints
     if (m->flex_dim[f] == 2 && m->flex_edgeequality[f] == 2) {
@@ -835,78 +1142,122 @@ static void mj_alignFlex(mjModel* m, mjData* d) {
   }
 }
 
-// set quantities that depend on qpos0
-static void set0(mjModel* m, mjData* d) {
-  makeTendonSparse(m);
-  makeFlexSparse(m, d);
 
-  mj_alignFlex(m, d);
-  int nv = m->nv;
-  mjtNum A[36] = {0}, pos[3], quat[4];
-  mj_markStack(d);
-  mjtNum* jac = mjSTACKALLOC(d, 6*nv, mjtNum);
-  mjtNum* tmp = mjSTACKALLOC(d, 6*nv, mjtNum);
-  mjtNum* moment = mjSTACKALLOC(d, nv, mjtNum);
-  int* cammode = 0;
-  int* lightmode = 0;
-
-  // save camera and light mode, set to fixed
-  if (m->ncam) {
-    cammode = mjSTACKALLOC(d, m->ncam, int);
-    for (int i=0; i < m->ncam; i++) {
-      cammode[i] = m->cam_mode[i];
-      m->cam_mode[i] = mjCAMLIGHT_FIXED;
-    }
-  }
-  if (m->nlight) {
-    lightmode = mjSTACKALLOC(d, m->nlight, int);
-    for (int i=0; i < m->nlight; i++) {
-      lightmode[i] = m->light_mode[i];
-      m->light_mode[i] = mjCAMLIGHT_FIXED;
-    }
-  }
-
+// run kinematics in qpos0, which the quantities that depend on qpos0 use
+static void kinematics0(mjModel* m, mjData* d) {
   // run computations in qpos0
   mju_copy(d->qpos, m->qpos0, m->nq);
   mj_kinematics(m, d);
   mj_comPos(m, d);
-  mj_camlight(m, d);
+
+  // run remaining computations
+  mj_tendon(m, d);
+  mj_flexSkip(m, d, 0);
+  mj_transmission(m, d);
+}
+
+
+// set kinematic quantities that depend on qpos0; assume kinematics0 already executed
+static void setKinematics0(mjModel* m, mjData* d) {
+  mjtNum pos[3], quat[4];
+
+  // copy fields
+  mju_copy(m->flexedge_length0, d->flexedge_length, m->nflexedge);
+  for (int f=0; f < m->nflex; f++) {
+    if (m->flex_interp[f]) {
+      mju_zero(m->flexedge_length0 + m->flex_edgeadr[f], m->flex_edgenum[f]);
+    }
+  }
+  mju_copy(m->tendon_length0, d->ten_length, m->ntendon);
+  mju_copy(m->actuator_length0, d->actuator_length, m->nout);
+
+  // equality constraints between bodies: the anchor of connects in the second body, and the
+  // relative pose of welds which are marked in data[11] for it to be computed
+  for (int i=0; i < m->neq; i++) {
+    if (m->eq_objtype[i] != mjOBJ_BODY) {
+      continue;
+    }
+    int id1 = m->eq_obj1id[i];
+    int id2 = m->eq_obj2id[i];
+    mjtNum* data = m->eq_data + mjNEQDATA*i;
+
+    // connect: anchor position is in body1 local frame
+    if (m->eq_type[i] == mjEQ_CONNECT) {
+      mj_local2Global(d, pos, 0, data, 0, id1, 0);
+
+      // data[3-5] = anchor position in body2 local frame
+      mju_subFrom3(pos, d->xpos+3*id2);
+      mju_mulMatTVec3(data+3, d->xmat+9*id2, pos);
+    }
+
+    // weld: anchor position is in body2 local frame
+    else if (m->eq_type[i] == mjEQ_WELD && data[11]) {
+      mj_local2Global(d, pos, 0, data, 0, id2, 0);
+
+      // data[3-5] = anchor position in body1 local frame
+      mju_subFrom3(pos, d->xpos+3*id1);
+      mju_mulMatTVec3(data+3, d->xmat+9*id1, pos);
+
+      // data[6-9] = neg(xquat1)*xquat2 = "xquat2-xquat1" in body1 local frame
+      mju_negQuat(quat, d->xquat+4*id1);
+      mju_mulQuat(data+6, quat, d->xquat+4*id2);
+    }
+  }
+
+  // camera compos0, pos0, mat0
+  for (int i=0; i < m->ncam; i++) {
+    // get body ids
+    int id = m->cam_bodyid[i];              // camera body
+    int id1 = m->cam_targetbodyid[i];       // target body
+
+    // pose in fixed mode
+    mj_local2Global(d, d->cam_xpos+3*i, d->cam_xmat+9*i,
+                    m->cam_pos+3*i, m->cam_quat+4*i, id, 0);
+
+    // compute positional offsets
+    mju_sub3(m->cam_pos0+3*i, d->cam_xpos+3*i, d->xpos+3*id);
+    mju_sub3(m->cam_poscom0+3*i, d->cam_xpos+3*i, d->subtree_com+ (id1 >= 0 ? 3*id1 : 3*id));
+
+    // copy mat
+    mju_copy9(m->cam_mat0+9*i, d->cam_xmat+9*i);
+  }
+
+  // light compos0, pos0, dir0
+  for (int i=0; i < m->nlight; i++) {
+    // get body ids
+    int id = m->light_bodyid[i];            // light body
+    int id1 = m->light_targetbodyid[i];     // target body
+
+    // pose in fixed mode
+    mj_local2Global(d, d->light_xpos+3*i, 0, m->light_pos+3*i, 0, id, 0);
+    mju_rotVecQuat(d->light_xdir+3*i, m->light_dir+3*i, d->xquat+4*id);
+    mju_normalize3(d->light_xdir+3*i);
+
+    // compute positional offsets
+    mju_sub3(m->light_pos0+3*i, d->light_xpos+3*i, d->xpos+3*id);
+    mju_sub3(m->light_poscom0+3*i, d->light_xpos+3*i, d->subtree_com + (id1 >= 0 ? 3*id1 : 3*id));
+
+    // copy dir
+    mju_copy3(m->light_dir0+3*i, d->light_xdir+3*i);
+  }
+}
+
+
+// set inertial quantities that depend on qpos0; assume kinematics0 already executed
+static void setInertia0(mjModel* m, mjData* d) {
+  int nv = m->nv;
+  mjtNum A[36] = {0};
+  mj_markStack(d);
+  mjtNum* jac = mjSTACKALLOC(d, 6*nv, mjtNum);
+  mjtNum* tmp = mjSTACKALLOC(d, 6*nv, mjtNum);
+  mjtNum* moment = mjSTACKALLOC(d, nv, mjtNum);
 
   // compute dof_M0 for CRB algorithm
   mj_setM0(m, d);
 
-  // save flex_rigid, temporarily make all flexes non-rigid
-  mjtByte* rigid = NULL;
-  if (m->nflex) {
-    rigid = mjSTACKALLOC(d, m->nflex, mjtByte);
-    memcpy(rigid, m->flex_rigid, m->nflex);
-    memset(m->flex_rigid, 0, m->nflex);
-  }
-
-  // run remaining computations
-  mj_tendon(m, d);
+  // factorize the inertia matrix
   mj_makeM(m, d);
   mj_factorM(m, d);
-  mj_flex(m, d);
-  mj_transmission(m, d);
-
-  // restore flex rigidity
-  if (m->nflex) {
-    memcpy(m->flex_rigid, rigid, m->nflex);
-  }
-
-  // restore camera and light mode
-  for (int i=0; i < m->ncam; i++) {
-    m->cam_mode[i] = cammode[i];
-  }
-  for (int i=0; i < m->nlight; i++) {
-    m->light_mode[i] = lightmode[i];
-  }
-
-  // copy fields
-  mju_copy(m->flexedge_length0, d->flexedge_length, m->nflexedge);
-  mju_copy(m->tendon_length0, d->ten_length, m->ntendon);
-  mju_copy(m->actuator_length0, d->actuator_length, m->nout);
 
   // compute body_invweight0
   m->body_invweight0[0] = m->body_invweight0[1] = 0.0;
@@ -993,6 +1344,7 @@ static void set0(mjModel* m, mjData* d) {
   }
 
   // compute flexedge_invweight0, tendon_invweight0, actuator_acc0
+  mju_zero(m->flexedge_invweight0, m->nflexedge);
   if (nv) {
     // compute flexedge_invweight0
     for (int f=0; f < m->nflex; f++) {
@@ -1052,133 +1404,6 @@ static void set0(mjModel* m, mjData* d) {
     mju_zero(m->actuator_acc0, m->nout);
   }
 
-  // compute missing eq_data for body constraints
-  for (int i=0; i < m->neq; i++) {
-    // get ids
-    int id1 = m->eq_obj1id[i];
-    int id2 = m->eq_obj2id[i];
-
-    // connect constraint
-    if (m->eq_type[i] == mjEQ_CONNECT) {
-      switch ((mjtObj) m->eq_objtype[i]) {
-        case mjOBJ_BODY:
-          // pos = anchor position in global frame
-          mj_local2Global(d, pos, 0, m->eq_data+mjNEQDATA*i, 0, id1, 0);
-
-          // data[3-5] = anchor position in body2 local frame
-          mju_subFrom3(pos, d->xpos+3*id2);
-          mju_mulMatTVec3(m->eq_data+mjNEQDATA*i+3, d->xmat+9*id2, pos);
-          break;
-        case mjOBJ_SITE:
-          // site-based connect, eq_data is unused
-          mju_zero(m->eq_data+mjNEQDATA*i, mjNEQDATA);
-          break;
-        default:
-          mjERROR("invalid objtype in connect constraint %d", i);
-      }
-    }
-
-    // weld constraint
-    else if (m->eq_type[i] == mjEQ_WELD) {
-      switch ((mjtObj) m->eq_objtype[i]) {
-        case mjOBJ_BODY: {
-          // skip if user has set any quaternion data
-          if (!mju_isZero(m->eq_data + mjNEQDATA*i + 6, 4)) {
-            // normalize quaternion just in case
-            mju_normalize4(m->eq_data+mjNEQDATA*i+6);
-            continue;
-          }
-
-          // anchor position is in body2 local frame
-          mj_local2Global(d, pos, 0, m->eq_data+mjNEQDATA*i, 0, id2, 0);
-
-          // data[3-5] = anchor position in body1 local frame
-          mju_subFrom3(pos, d->xpos+3*id1);
-          mju_mulMatTVec3(m->eq_data+mjNEQDATA*i+3, d->xmat+9*id1, pos);
-
-          // data[6-9] = neg(xquat1)*xquat2 = "xquat2-xquat1" in body1 local frame
-          mju_negQuat(quat, d->xquat+4*id1);
-          mju_mulQuat(m->eq_data+mjNEQDATA*i+6, quat, d->xquat+4*id2);
-          break;
-        }
-        case mjOBJ_SITE: {
-          break;
-        }
-        default:
-          mjERROR("invalid objtype in weld constraint %d", i);
-      }
-    }
-  }
-
-  // camera compos0, pos0, mat0
-  for (int i=0; i < m->ncam; i++) {
-    // get body ids
-    int id = m->cam_bodyid[i];              // camera body
-    int id1 = m->cam_targetbodyid[i];       // target body
-
-    // compute positional offsets
-    mju_sub3(m->cam_pos0+3*i, d->cam_xpos+3*i, d->xpos+3*id);
-    mju_sub3(m->cam_poscom0+3*i, d->cam_xpos+3*i, d->subtree_com+ (id1 >= 0 ? 3*id1 : 3*id));
-
-    // copy mat
-    mju_copy9(m->cam_mat0+9*i, d->cam_xmat+9*i);
-  }
-
-  // light compos0, pos0, dir0
-  for (int i=0; i < m->nlight; i++) {
-    // get body ids
-    int id = m->light_bodyid[i];            // light body
-    int id1 = m->light_targetbodyid[i];     // target body
-
-    // compute positional offsets
-    mju_sub3(m->light_pos0+3*i, d->light_xpos+3*i, d->xpos+3*id);
-    mju_sub3(m->light_poscom0+3*i, d->light_xpos+3*i, d->subtree_com + (id1 >= 0 ? 3*id1 : 3*id));
-
-    // copy dir
-    mju_copy3(m->light_dir0+3*i, d->light_xdir+3*i);
-  }
-
-  // compute actuator damping from dampratio
-  for (int i=0; i < m->nactuator; i++) {
-    // get bias, gain parameters
-    mjtNum* biasprm = m->actuator_biasprm + i*mjNBIAS;
-    mjtNum* gainprm = m->actuator_gainprm + i*mjNGAIN;
-
-    // not a position-like actuator: skip (PID single-sources kp in biasprm[1])
-    int is_pid = m->actuator_gaintype[i] == mjGAIN_PID;
-    if (!is_pid && gainprm[0] != -biasprm[1]) {
-      continue;
-    }
-
-    // damping is 0 or negative (interpreted as regular "kv"): skip
-    if (biasprm[2] <= 0) {
-      continue;
-    }
-
-    // === interpret biasprm[2] > 0 as dampratio for position-like actuators
-
-    // "reflected" inertia (inversely scaled by transmission squared)
-    int rownnz = d->moment_rownnz[m->actuator_outadr[i]];
-    int rowadr = d->moment_rowadr[m->actuator_outadr[i]];
-    mjtNum* transmission = d->actuator_moment + rowadr;
-    mjtNum mass = 0;
-    for (int j=0; j < rownnz; j++) {
-      mjtNum trn = mju_abs(transmission[j]);
-      mjtNum trn2 = trn*trn;  // transmission squared
-      if (trn2 > mjMINVAL) {
-        int dof = d->moment_colind[rowadr + j];
-        mass += m->dof_M0[dof] / trn2;
-      }
-    }
-
-    // damping = dampratio * 2 * sqrt(kp * mass)
-    mjtNum kp = is_pid ? -biasprm[1] : gainprm[0];
-    mjtNum damping = biasprm[2] * 2 * mju_sqrt(kp * mass);
-
-    // set biasprm[2] to negative damping
-    biasprm[2] = -damping;
-  }
-
   mj_freeStack(d);
 }
 
@@ -1192,15 +1417,277 @@ static void updateBox(mjtNum* xmin, mjtNum* xmax, mjtNum* pos, mjtNum radius) {
 }
 
 
-// compute stat; assume computations already executed in qpos0
+// approximate length associated with each body: the largest distance from its center of mass to a
+// joint of it or of a child, to the far side of a geom, or along a flex edge; at least 1E-5 for all
+// bodies but the world; assume computations already executed in qpos0
+static void bodySize(const mjModel* m, const mjData* d, mjtNum* body) {
+  // set body size to max com-joint distance
+  mju_zero(body, m->nbody);
+  for (int i=0; i < m->njnt; i++) {
+    // handle this body
+    int id = m->jnt_bodyid[i];
+    body[id] = mju_max(body[id], mju_dist3(d->xipos+3*id, d->xanchor+3*i));
+
+    // handle parent body
+    id = m->body_parentid[id];
+    body[id] = mju_max(body[id], mju_dist3(d->xipos+3*id, d->xanchor+3*i));
+  }
+  body[0] = 0;
+
+  // set body size to max of old value, and geom rbound + com-geom dist
+  for (int i=1; i < m->nbody; i++) {
+    for (int id=m->body_geomadr[i]; id < m->body_geomadr[i]+m->body_geomnum[i]; id++) {
+      if (m->geom_rbound[id] > 0) {
+        body[i] = mju_max(body[i], m->geom_rbound[id] + mju_dist3(d->xipos+3*i, d->geom_xpos+3*id));
+      }
+    }
+  }
+
+  // adjust body size for flex edges involving body
+  for (int f=0; f < m->nflex; f++) {
+    if (m->flex_interp[f]) {
+      for (int v1=m->flex_nodeadr[f]; v1 < m->flex_nodeadr[f]+m->flex_nodenum[f]; v1++) {
+        for (int v2=m->flex_nodeadr[f]; v2 < m->flex_nodeadr[f]+m->flex_nodenum[f]; v2++) {
+          mjtNum edge = mju_dist3(d->xpos+3*m->flex_nodebodyid[v1],
+                                  d->xpos+3*m->flex_nodebodyid[v2]);
+          body[m->flex_nodebodyid[v1]] = mju_max(body[m->flex_nodebodyid[v1]], edge);
+        }
+      }
+      continue;
+    }
+    for (int e=m->flex_edgeadr[f]; e < m->flex_edgeadr[f]+m->flex_edgenum[f]; e++) {
+      int b1 = m->flex_vertbodyid[m->flex_vertadr[f]+m->flex_edge[2*e]];
+      int b2 = m->flex_vertbodyid[m->flex_vertadr[f]+m->flex_edge[2*e+1]];
+
+      body[b1] = mju_max(body[b1], m->flexedge_length0[e]);
+      body[b2] = mju_max(body[b2], m->flexedge_length0[e]);
+    }
+  }
+
+  // make sure all sizes are above min
+  for (int i=1; i < m->nbody; i++) {
+    body[i] = mju_max(body[i], 1E-5);
+  }
+}
+
+
+// set dof_length: 1 for translations, the size of the body for rotations; assume computations
+// already executed in qpos0
+static void setDofLength(mjModel* m, mjData* d) {
+  mj_markStack(d);
+  mjtNum* body = mjSTACKALLOC(d, m->nbody, mjtNum);
+  bodySize(m, d, body);
+
+  // inherit dof length from parent body
+  for (int i=0; i < m->nv; i++) {
+    // default to linear dof, already has length units
+    m->dof_length[i] = 1;
+
+    // if rotational dof, inherit from body
+    int jnt = m->dof_jntid[i];
+    mjtJoint type = m->jnt_type[jnt];
+    int offset = i - m->jnt_dofadr[jnt];
+    if (type == mjJNT_BALL  ||
+        type == mjJNT_HINGE ||
+        (type == mjJNT_FREE && offset >= 3)) {
+      m->dof_length[i] = body[m->dof_bodyid[i]];
+    }
+  }
+
+  mj_freeStack(d);
+}
+
+
+// run computations in qpos_spring, whose frames setEfm0Factor uses
+static void setSpring(mjModel* m, mjData* d) {
+  mju_copy(d->qpos, m->qpos_spring, m->nq);
+  mj_kinematics(m, d);
+  mj_comPos(m, d);
+  mj_tendon(m, d);
+  mj_transmission(m, d);
+}
+
+
+// constant part of the implicit effective metric factor (currently dim-2 bending): sparse
+// reverse-Cholesky of M + (h^2 + h*damping)*K_bend over
+// the dofs of unpinned vertices of standard dim-2 flexes with bending. The matrix is constant
+// (flat-rest bending stiffness, independent point masses), so it is computed here once and reused
+// by the implicit-flex constraint solve every step. Bending couples full 3x3 blocks when vertex
+// frames differ. Row order (body order, coordinate fastest) and the fill count must match the
+// compiler's symbolic sizing (checked below).
+static void setEfm0Factor(mjModel* m, mjData* d) {
+  int nbd = m->nefm0dof;
+  if (!nbd) {
+    return;
+  }
+  mj_markStack(d);
+  mjtNum h = m->opt.timestep;
+
+  // enumerate covered vertices: compact slot per unpinned vertex of qualifying flexes
+  // (filter matches the compiler's sizing and, for bending, mjd_flexStiff_active in
+  // engine_derivative.c: constant bending stencils exist only for dim-2 flexes; 1D rod
+  // bending is state-dependent and assembled per step)
+  int* bodyslot = mjSTACKALLOC(d, m->nbody, int);
+  for (int b=0; b < m->nbody; b++) {
+    bodyslot[b] = -1;
+  }
+  for (int f=0; f < m->nflex; f++) {
+    if (m->flex_interp[f] || m->flex_rigid[f] || m->flex_dim[f] != 2 ||
+        m->flex_bendingadr[f] < 0 || !mj_flexSimple(m, f)) {
+      continue;
+    }
+    for (int lv=0; lv < m->flex_vertnum[f]; lv++) {
+      int gv = m->flex_vertadr[f] + lv;
+      int wid = m->body_weldid[m->flex_vertbodyid[gv]];
+      if (m->body_dofnum[wid] == 3) {
+        bodyslot[wid] = 1;
+      }
+    }
+  }
+  int nfree = 0;
+  for (int b=0; b < m->nbody; b++) {
+    if (bodyslot[b] > 0) {
+      int s = nfree++;
+      bodyslot[b] = s;
+      int da = m->body_dofadr[b];
+      for (int k=0; k < 3; k++) {
+        m->efm0_dofid[3*s + k] = da + k;
+      }
+    }
+  }
+  if (3*nfree != nbd) {
+    mj_freeStack(d);
+    mjERROR("constant metric factor dof count mismatch: compiler sized %d, engine found %d",
+            nbd, 3*nfree);
+    return;
+  }
+
+  // assemble the bending-only stiffness K = (h^2 + h*damping)*K_bend over all dofs with the
+  // shared stencil walker from engine_derivative. Only fixed-frame attachments participate;
+  // their orientations were computed by setSpring. As in the per-step metric, the h^2 and
+  // h*damping parts enter only when the spring and damper forces are enabled.
+  mjtNum s1 = mjDISABLED(mjDSBL_SPRING) ? 0 : h*h;
+  mjtNum s2 = mjDISABLED(mjDSBL_DAMPER) ? 0 : h;
+  int nv = m->nv;
+  int* K_rownnz = mjSTACKALLOC(d, nv, int);
+  int* K_rowadr = mjSTACKALLOC(d, nv, int);
+  int nK = mjd_flexStiff_assemble(m, d, K_rownnz, K_rowadr, NULL, NULL, s1, s2,
+                                  /*flg_bend=*/1, /*flg_stretch=*/0, NULL);
+  int* K_colind = mjSTACKALLOC(d, nK > 0 ? nK : 1, int);
+  mjtNum* K_val = mjSTACKALLOC(d, nK > 0 ? nK : 1, mjtNum);
+  mjd_flexStiff_assemble(m, d, K_rownnz, K_rowadr, K_colind, K_val, s1, s2, 1, 0, NULL);
+
+  // inverse map: dof address -> compact factor row (monotone: slots follow dof order)
+  int* dofrow = mjSTACKALLOC(d, nv, int);
+  for (int i=0; i < nv; i++) {
+    dofrow[i] = -1;
+  }
+  for (int r=0; r < nbd; r++) {
+    dofrow[m->efm0_dofid[r]] = r;
+  }
+
+  // Compact K_bend to covered rows, retaining full off-diagonal blocks Q_ij * R_i^T * R_j.
+  // Only same-body blocks are diagonal, even when several vertices share a weld parent.
+  // Keep structural zeros between bodies so the pattern is independent of their orientations.
+  // H = M + (h^2+h*d)*K_bend in compact dof indices: lower CSR (values) + upper CSR (pattern)
+  int nHl = 0, nHu = 0;
+  for (int r=0; r < nbd; r++) {
+    int dof = m->efm0_dofid[r];
+    for (int c=0; c < K_rownnz[dof]; c++) {
+      int rc = dofrow[K_colind[K_rowadr[dof] + c]];
+      if (rc < 0 || (rc != r && rc/3 == r/3)) continue;
+      if (rc < r) nHl++;
+      else if (rc > r) nHu++;
+    }
+  }
+  nHl += nbd;  // diagonals: always present, also for rows without bending entries
+  int* Hl_rownnz = mjSTACKALLOC(d, nbd, int);
+  int* Hl_rowadr = mjSTACKALLOC(d, nbd, int);
+  int* Hl_colind = mjSTACKALLOC(d, nHl, int);
+  mjtNum* Hl_val  = mjSTACKALLOC(d, nHl, mjtNum);
+  int* Hu_rownnz = mjSTACKALLOC(d, nbd, int);
+  int* Hu_rowadr = mjSTACKALLOC(d, nbd, int);
+  int* Hu_colind = mjSTACKALLOC(d, nHu > 0 ? nHu : 1, int);
+
+  int ladr = 0, uadr = 0;
+  for (int r=0; r < nbd; r++) {
+    int dof = m->efm0_dofid[r];
+    Hl_rowadr[r] = ladr;
+    Hu_rowadr[r] = uadr;
+    mjtNum diag = 0;
+    // B columns are dof-ascending, so filtered lower/upper columns stay ascending
+    for (int c=0; c < K_rownnz[dof]; c++) {
+      int adr = K_rowadr[dof] + c;
+      int rc = dofrow[K_colind[adr]];
+      if (rc < 0 || (rc != r && rc/3 == r/3)) continue;
+      if (rc < r) {
+        Hl_colind[ladr] = rc;
+        Hl_val[ladr++] = K_val[adr];
+      } else if (rc > r) {
+        Hu_colind[uadr++] = rc;
+      } else {
+        diag = K_val[adr];
+      }
+    }
+    // diagonal last: composite point mass + armature + bending diagonal
+    Hl_colind[ladr] = r;
+    Hl_val[ladr++] = m->dof_M0[dof] + diag;
+    Hl_rownnz[r] = ladr - Hl_rowadr[r];
+    Hu_rownnz[r] = uadr - Hu_rowadr[r];
+  }
+
+  // symbolic factorization: counting phase (from the upper-triangle pattern)
+  int* LT_rownnz = mjSTACKALLOC(d, nbd, int);
+  int* LT_rowadr = mjSTACKALLOC(d, nbd, int);
+  int nnz = mju_cholFactorSymbolic(NULL, m->efm0_L_rownnz, m->efm0_L_rowadr,
+                                   NULL, LT_rownnz, LT_rowadr, NULL,
+                                   Hu_rownnz, Hu_rowadr, Hu_colind, nbd, d);
+  if (nnz != m->nefm0L) {
+    mj_freeStack(d);
+    mjERROR("constant metric factor size mismatch: compiler sized %d, symbolic found %d",
+            (int)m->nefm0L, nnz);
+    return;
+  }
+
+  // symbolic factorization: filling phase
+  int* LT_colind = mjSTACKALLOC(d, nnz, int);
+  int* LT_map = mjSTACKALLOC(d, nnz, int);
+  mju_cholFactorSymbolic(m->efm0_L_colind, m->efm0_L_rownnz, m->efm0_L_rowadr,
+                         LT_colind, LT_rownnz, LT_rowadr, LT_map,
+                         Hu_rownnz, Hu_rowadr, Hu_colind, nbd, d);
+
+  // numeric factorization
+  mjtNum* scratch = mjSTACKALLOC(d, nbd, mjtNum);
+  int rank = mju_cholFactorNumeric(m->efm0_L, nbd, mjMINVAL,
+                                   m->efm0_L_rownnz, m->efm0_L_rowadr, m->efm0_L_colind,
+                                   LT_rownnz, LT_rowadr, LT_colind, LT_map,
+                                   Hl_val, Hl_rownnz, Hl_rowadr, Hl_colind, scratch);
+  if (rank != nbd) {
+    // The factor is consumed only when no per-step flex stiffness is assembled (bending-only
+    // models): with stretch (or assemblable interp) present, mj_effBuild assembles the full
+    // metric every step and the per-step blocks replace this factor, so a singular
+    // M + K_bend (e.g. vanishing vertex masses) is harmless there.
+    if (mjd_flexStiff_any(m, mjd_flexInterpAssemblable(m))) {
+      mj_freeStack(d);
+      return;
+    }
+    mj_freeStack(d);
+    mjERROR("constant metric factor is rank-deficient (%d of %d)", rank, nbd);
+    return;
+  }
+
+  mj_freeStack(d);
+}
+
+
+//----------------------------- constants set once by compilation ----------------------------------
+
+// compute the model statistics; assume computations already executed in qpos0
 static void setStat(mjModel* m, mjData* d) {
   mjtNum xmin[3] = {1E+10, 1E+10, 1E+10};
   mjtNum xmax[3] = {-1E+10, -1E+10, -1E+10};
   mjtNum rbound;
   mj_markStack(d);
-
-  // approximate length associated with each body
-  mjtNum* body = mjSTACKALLOC(d, m->nbody, mjtNum);
 
   // compute bounding box of bodies, joint centers, geoms and sites
   for (int i=1; i < m->nbody; i++) {
@@ -1247,71 +1734,13 @@ static void setStat(mjModel* m, mjData* d) {
     m->stat.extent = mju_max(1E-5,
                              mju_max(xmax[0]-xmin[0], mju_max(xmax[1]-xmin[1], xmax[2]-xmin[2])));
 
-  // set body size to max com-joint distance
-  mju_zero(body, m->nbody);
-  for (int i=0; i < m->njnt; i++) {
-    // handle this body
-    int id = m->jnt_bodyid[i];
-    body[id] = mju_max(body[id], mju_dist3(d->xipos+3*id, d->xanchor+3*i));
-
-    // handle parent body
-    id = m->body_parentid[id];
-    body[id] = mju_max(body[id], mju_dist3(d->xipos+3*id, d->xanchor+3*i));
-  }
-  body[0] = 0;
-
-  // set body size to max of old value, and geom rbound + com-geom dist
-  for (int i=1; i < m->nbody; i++) {
-    for (int id=m->body_geomadr[i]; id < m->body_geomadr[i]+m->body_geomnum[i]; id++) {
-      if (m->geom_rbound[id] > 0) {
-        body[i] = mju_max(body[i], m->geom_rbound[id] + mju_dist3(d->xipos+3*i, d->geom_xpos+3*id));
-      }
-    }
-  }
-
-  // adjust body size for flex edges involving body
-  for (int f=0; f < m->nflex; f++) {
-    if (m->flex_interp[f]) {
-      for (int v1=m->flex_nodeadr[f]; v1 < m->flex_nodeadr[f]+m->flex_nodenum[f]; v1++) {
-        for (int v2=m->flex_nodeadr[f]; v2 < m->flex_nodeadr[f]+m->flex_nodenum[f]; v2++) {
-          mjtNum edge = mju_dist3(d->xpos+3*m->flex_nodebodyid[v1],
-                                  d->xpos+3*m->flex_nodebodyid[v2]);
-          body[m->flex_nodebodyid[v1]] = mju_max(body[m->flex_nodebodyid[v1]], edge);
-        }
-      }
-      continue;
-    }
-    for (int e=m->flex_edgeadr[f]; e < m->flex_edgeadr[f]+m->flex_edgenum[f]; e++) {
-      int b1 = m->flex_vertbodyid[m->flex_vertadr[f]+m->flex_edge[2*e]];
-      int b2 = m->flex_vertbodyid[m->flex_vertadr[f]+m->flex_edge[2*e+1]];
-
-      body[b1] = mju_max(body[b1], m->flexedge_length0[e]);
-      body[b2] = mju_max(body[b2], m->flexedge_length0[e]);
-    }
-  }
-
-  // compute meansize, make sure all sizes are above min
+  // compute meansize
   if (m->nbody > 1) {
+    mjtNum* body = mjSTACKALLOC(d, m->nbody, mjtNum);
+    bodySize(m, d, body);
     m->stat.meansize = 0;
     for (int i=1; i < m->nbody; i++) {
-      body[i] = mju_max(body[i], 1E-5);
       m->stat.meansize += body[i]/(m->nbody-1);
-    }
-  }
-
-  // inherit dof length from parent body
-  for (int i=0; i < m->nv; i++) {
-    // default to linear dof, already has length units
-    m->dof_length[i] = 1;
-
-    // if rotational dof, inherit from body
-    int jnt = m->dof_jntid[i];
-    mjtJoint type = m->jnt_type[jnt];
-    int offset = i - m->jnt_dofadr[jnt];
-    if (type == mjJNT_BALL  ||
-        type == mjJNT_HINGE ||
-        (type == mjJNT_FREE && offset >= 3)) {
-      m->dof_length[i] = body[m->dof_bodyid[i]];
     }
   }
 
@@ -1340,223 +1769,205 @@ static void setStat(mjModel* m, mjData* d) {
 }
 
 
-// set quantities that depend qpos_spring
-static void setSpring(mjModel* m, mjData* d) {
-  // run computations in qpos_spring
-  mju_copy(d->qpos, m->qpos_spring, m->nq);
-  mj_kinematics(m, d);
-  mj_comPos(m, d);
-  mj_tendon(m, d);
-  mj_transmission(m, d);
-
-  // copy if model spring length is -1
-  for (int i=0; i < m->ntendon; i++) {
-    if (m->tendon_lengthspring[2*i] == -1 && m->tendon_lengthspring[2*i+1] == -1) {
-      // explicit springlength unused, set equal to ten_length
-      m->tendon_lengthspring[2*i] = m->tendon_lengthspring[2*i+1] = d->ten_length[i];
-    }
-  }
-}
-
-
-// entry point: set all remaining constant fields of mjModel, except for lengthrange
-
-// constant part of the implicit effective metric factor (currently dim-2 bending): sparse
-// reverse-Cholesky of M + (h^2 + h*damping)*K_bend over
-// the dofs of unpinned vertices of standard dim-2 flexes with bending. The matrix is constant
-// (flat-rest bending stiffness, point masses), so the factor is computed here once and reused
-// by the implicit-flex constraint solve every step. Bending couples only same-coordinate dofs,
-// so the pattern is three interleaved copies of the vertex flap adjacency. Row order (flex
-// order, vertex order, coordinate fastest) and the resulting fill count must match the
-// compiler's symbolic sizing (checked below).
-static void setEfm0Factor(mjModel* m, mjData* d) {
-  int nbd = m->nefm0dof;
-  if (!nbd) {
-    return;
-  }
+// compute the damping of position-like actuators which have a damping ratio, given as a positive
+// biasprm[2]; assume computations already executed in qpos0
+static void setDampRatio(mjModel* m, mjData* d) {
+  int nv = m->nv;
   mj_markStack(d);
-  mjtNum h = m->opt.timestep;
+  mjtNum* tmp = mjSTACKALLOC(d, nv, mjtNum);
+  mjtNum* moment = mjSTACKALLOC(d, nv, mjtNum);
 
-  // enumerate covered vertices: compact slot per unpinned vertex of qualifying flexes
-  // (filter matches the compiler's sizing and, for bending, flexStiff_active in
-  // engine_derivative.c: bending data exists only for dim-2 flexes)
-  int* vslot = mjSTACKALLOC(d, m->nflexvert > 0 ? m->nflexvert : 1, int);
-  for (int i=0; i < m->nflexvert; i++) {
-    vslot[i] = -1;
-  }
-  int nfree = 0;
-  for (int f=0; f < m->nflex; f++) {
-    if (m->flex_interp[f] || m->flex_rigid[f] || m->flex_dim[f] != 2 ||
-        m->flex_bendingadr[f] < 0) {
+  for (int i=0; i < m->nactuator; i++) {
+    // get bias, gain parameters
+    mjtNum* biasprm = m->actuator_biasprm + i*mjNBIAS;
+    mjtNum* gainprm = m->actuator_gainprm + i*mjNGAIN;
+
+    // not a position-like actuator: skip (PID single-sources kp in biasprm[1])
+    int is_pid = m->actuator_gaintype[i] == mjGAIN_PID;
+    if (!is_pid && gainprm[0] != -biasprm[1]) {
       continue;
     }
-    for (int lv=0; lv < m->flex_vertnum[f]; lv++) {
-      int gv = m->flex_vertadr[f] + lv;
-      if (m->body_dofnum[m->flex_vertbodyid[gv]] == 3) {
-        vslot[gv] = nfree;
-        nfree++;
+
+    // damping is 0 or negative (interpreted as regular "kv"): skip
+    if (biasprm[2] <= 0) {
+      continue;
+    }
+
+    // "reflected" inertia: 1 / (J * inv(M) * J'), averaged over force outputs
+    mjtNum mass = 0;
+    if (nv) {
+      int outadr = m->actuator_outadr[i];
+      int outnum = m->actuator_outnum[i];
+      mjtNum w = 0;
+      for (int k=0; k < outnum; k++) {
+        int j = outadr + k;
+        mju_sparse2dense(moment, d->actuator_moment, 1, nv, d->moment_rownnz + j,
+                         d->moment_rowadr + j, d->moment_colind);
+        mj_solveM(m, d, tmp, moment, 1);
+        w += mju_dot(moment, tmp, nv);
+      }
+      w /= outnum;
+      if (w > mjMINVAL) {
+        mass = 1 / w;
       }
     }
-  }
-  if (3*nfree != nbd) {
-    mj_freeStack(d);
-    mjERROR("constant metric factor dof count mismatch: compiler sized %d, engine found %d",
-            nbd, 3*nfree);
-  }
 
-  // fill row -> dof address (row 3*slot + k, coordinate fastest)
-  for (int gv=0; gv < m->nflexvert; gv++) {
-    if (vslot[gv] >= 0) {
-      int da = m->body_dofadr[m->flex_vertbodyid[gv]];
-      for (int k=0; k < 3; k++) {
-        m->efm0_dofid[3*vslot[gv] + k] = da + k;
-      }
-    }
-  }
+    // damping = dampratio * 2 * sqrt(kp * mass)
+    mjtNum kp = is_pid ? -biasprm[1] : gainprm[0];
+    mjtNum damping = biasprm[2] * 2 * mju_sqrt(kp * mass);
 
-  // assemble the bending-only stiffness K = (h^2 + h*damping)*K_bend over all dofs with the
-  // shared stencil walker from engine_derivative: bending values are configuration-independent
-  // and stretch/interp are gated off, so the call is valid at set-constants time (d is used
-  // for stack scratch only)
-  int nv = m->nv;
-  int* K_rownnz = mjSTACKALLOC(d, nv, int);
-  int* K_rowadr = mjSTACKALLOC(d, nv, int);
-  int nK = mjd_flexStiff_assemble(m, d, K_rownnz, K_rowadr, NULL, NULL, h*h, h,
-                                  /*flg_bend=*/1, /*flg_stretch=*/0, NULL);
-  int* K_colind = mjSTACKALLOC(d, nK > 0 ? nK : 1, int);
-  mjtNum* K_val = mjSTACKALLOC(d, nK > 0 ? nK : 1, mjtNum);
-  mjd_flexStiff_assemble(m, d, K_rownnz, K_rowadr, K_colind, K_val, h*h, h, 1, 0, NULL);
-
-  // inverse map: dof address -> compact factor row (monotone: slots follow dof order)
-  int* dofrow = mjSTACKALLOC(d, nv, int);
-  for (int i=0; i < nv; i++) {
-    dofrow[i] = -1;
-  }
-  for (int r=0; r < nbd; r++) {
-    dofrow[m->efm0_dofid[r]] = r;
-  }
-
-  // compact B to covered rows, keeping same-coordinate entries only: bending blocks are
-  // isotropic (q * I3), so the off-coordinate entries of assemble's 3x3 block pattern are
-  // structurally zero and dropping them preserves the pattern the compiler sized.
-  // H = M + (h^2+h*d)*K_bend in compact dof indices: lower CSR (values) + upper CSR (pattern)
-  int nHl = 0, nHu = 0;
-  for (int r=0; r < nbd; r++) {
-    int dof = m->efm0_dofid[r];
-    for (int c=0; c < K_rownnz[dof]; c++) {
-      int rc = dofrow[K_colind[K_rowadr[dof] + c]];
-      if (rc < 0 || (rc - r) % 3 != 0) continue;  // uncovered or off-coordinate
-      if (rc < r) nHl++;
-      else if (rc > r) nHu++;
-    }
-  }
-  nHl += nbd;  // diagonals: always present, also for rows without bending entries
-  int* Hl_rownnz = mjSTACKALLOC(d, nbd, int);
-  int* Hl_rowadr = mjSTACKALLOC(d, nbd, int);
-  int* Hl_colind = mjSTACKALLOC(d, nHl, int);
-  mjtNum* Hl_val  = mjSTACKALLOC(d, nHl, mjtNum);
-  int* Hu_rownnz = mjSTACKALLOC(d, nbd, int);
-  int* Hu_rowadr = mjSTACKALLOC(d, nbd, int);
-  int* Hu_colind = mjSTACKALLOC(d, nHu > 0 ? nHu : 1, int);
-
-  int ladr = 0, uadr = 0;
-  for (int r=0; r < nbd; r++) {
-    int dof = m->efm0_dofid[r];
-    Hl_rowadr[r] = ladr;
-    Hu_rowadr[r] = uadr;
-    mjtNum diag = 0;
-    // B columns are dof-ascending, so filtered lower/upper columns stay ascending
-    for (int c=0; c < K_rownnz[dof]; c++) {
-      int adr = K_rowadr[dof] + c;
-      int rc = dofrow[K_colind[adr]];
-      if (rc < 0 || (rc - r) % 3 != 0) continue;
-      if (rc < r) {
-        Hl_colind[ladr] = rc;
-        Hl_val[ladr++] = K_val[adr];
-      } else if (rc > r) {
-        Hu_colind[uadr++] = rc;
-      } else {
-        diag = K_val[adr];
-      }
-    }
-    // diagonal last: point mass + armature + bending diagonal
-    Hl_colind[ladr] = r;
-    Hl_val[ladr++] = m->body_mass[m->dof_bodyid[dof]] + m->dof_armature[dof] + diag;
-    Hl_rownnz[r] = ladr - Hl_rowadr[r];
-    Hu_rownnz[r] = uadr - Hu_rowadr[r];
-  }
-
-  // symbolic factorization: counting phase (from the upper-triangle pattern)
-  int* LT_rownnz = mjSTACKALLOC(d, nbd, int);
-  int* LT_rowadr = mjSTACKALLOC(d, nbd, int);
-  int nnz = mju_cholFactorSymbolic(NULL, m->efm0_L_rownnz, m->efm0_L_rowadr,
-                                   NULL, LT_rownnz, LT_rowadr, NULL,
-                                   Hu_rownnz, Hu_rowadr, Hu_colind, nbd, d);
-  if (nnz != m->nefm0L) {
-    mj_freeStack(d);
-    mjERROR("constant metric factor size mismatch: compiler sized %d, symbolic found %d",
-            (int)m->nefm0L, nnz);
-  }
-
-  // symbolic factorization: filling phase
-  int* LT_colind = mjSTACKALLOC(d, nnz, int);
-  int* LT_map = mjSTACKALLOC(d, nnz, int);
-  mju_cholFactorSymbolic(m->efm0_L_colind, m->efm0_L_rownnz, m->efm0_L_rowadr,
-                         LT_colind, LT_rownnz, LT_rowadr, LT_map,
-                         Hu_rownnz, Hu_rowadr, Hu_colind, nbd, d);
-
-  // numeric factorization
-  mjtNum* scratch = mjSTACKALLOC(d, nbd, mjtNum);
-  int rank = mju_cholFactorNumeric(m->efm0_L, nbd, mjMINVAL,
-                                   m->efm0_L_rownnz, m->efm0_L_rowadr, m->efm0_L_colind,
-                                   LT_rownnz, LT_rowadr, LT_colind, LT_map,
-                                   Hl_val, Hl_rownnz, Hl_rowadr, Hl_colind, scratch);
-  if (rank != nbd) {
-    mj_freeStack(d);
-    mjERROR("constant metric factor is rank-deficient (%d of %d)", rank, nbd);
+    // set biasprm[2] to negative damping
+    biasprm[2] = -damping;
   }
 
   mj_freeStack(d);
 }
 
 
-void mj_setConst(mjModel* m, mjData* d) {
-  // compute npolygonmax and nmeshdegmax
-  m->npolygonmax = 0;
-  for (int i=0; i < m->nmeshpoly; i++) {
-    m->npolygonmax = mjMAX(m->npolygonmax, m->mesh_polyvertnum[i]);
+// set the spring length range of tendons which have none, given as (-1, -1), to their length;
+// assume computations already executed in qpos_spring
+static void setSpringLength(mjModel* m, mjData* d) {
+  for (int i=0; i < m->ntendon; i++) {
+    if (m->tendon_lengthspring[2*i] == -1 && m->tendon_lengthspring[2*i+1] == -1) {
+      m->tendon_lengthspring[2*i] = m->tendon_lengthspring[2*i+1] = d->ten_length[i];
+    }
+  }
+}
+
+
+//----------------------------- entry points -------------------------------------------------------
+
+// run the groups of mj_setConst computations selected by the bits of groups, in order
+void mj_setConstGroups(mjModel* m, mjData* d, int groups) {
+  // quantities independent of the configuration
+  if (groups & mjSCGROUP_FIXED) {
+    // compute npolygonmax and nmeshdegmax
+    m->npolygonmax = 0;
+    for (int i=0; i < m->nmeshpoly; i++) {
+      m->npolygonmax = mjMAX(m->npolygonmax, m->mesh_polyvertnum[i]);
+    }
+
+    m->nmeshdegmax = 0;
+    for (int i=0; i < m->nmeshvert; i++) {
+      m->nmeshdegmax = mjMAX(m->nmeshdegmax, m->mesh_polymapnum[i]);
+    }
+
+    // recompute sameframe flags from current model geometry
+    setSameframe(m);
+
+    // error if simple body lost sameframe (user must set simple="false")
+    for (int i = 1; i < m->nbody; i++) {
+      if (m->body_simple[i] > 0 && m->body_sameframe[i] != mjSAMEFRAME_BODY) {
+        mjERROR("body %d is compiled as simple but sameframe no longer holds, "
+                "use body/simple='false'", i);
+      }
+    }
+
+    // set geom and body bounds
+    setBound(m, d);
+
+    // set fluid added mass
+    setFluid(m);
+
+    // set fixed quantities
+    setFixed(m, d);
+
+    // set Jacobian sparsity of tendons and flexes
+    makeTendonSparse(m);
+    makeFlexSparse(m, d);
   }
 
-  m->nmeshdegmax = 0;
-  for (int i=0; i < m->nmeshvert; i++) {
-    m->nmeshdegmax = mjMAX(m->nmeshdegmax, m->mesh_polymapnum[i]);
+  // computations below cover all bodies, sleeping or not (not restored if an error is raised)
+  int enableflags = m->opt.enableflags;
+  m->opt.enableflags &= ~mjENBL_SLEEP;
+
+  // the constants do not depend on the contacts of d, which mj_transmission averages for adhesion
+  // actuators: clear them and the constraints, as collision detection does
+  if (groups & (mjSCGROUP_KIN0 | mjSCGROUP_INERT0 | mjSCGROUP_SPRING)) {
+    d->ncon = 0;
+    mj_clearEfc(d);
   }
 
-  // recompute sameframe flags from current model geometry
-  setSameframe(m);
-
-  // error if simple body lost sameframe (user must set simple="false")
-  for (int i = 1; i < m->nbody; i++) {
-    if (m->body_simple[i] > 0 && m->body_sameframe[i] != mjSAMEFRAME_BODY) {
-      mjERROR("body %d is compiled as simple but sameframe no longer holds, "
-              "use body/simple='false'", i);
+  // set mocap bodies to their model pose (restored after setSpring)
+  int mocap = m->nmocap && (groups & (mjSCGROUP_KIN0 | mjSCGROUP_INERT0 | mjSCGROUP_SPRING));
+  mjtNum* mocap_pos = NULL;
+  mjtNum* mocap_quat = NULL;
+  if (mocap) {
+    mj_markStack(d);
+    mocap_pos = mjSTACKALLOC(d, 3*m->nmocap, mjtNum);
+    mocap_quat = mjSTACKALLOC(d, 4*m->nmocap, mjtNum);
+    mju_copy(mocap_pos, d->mocap_pos, 3*m->nmocap);
+    mju_copy(mocap_quat, d->mocap_quat, 4*m->nmocap);
+    for (int i=0; i < m->nbody; i++) {
+      int id = m->body_mocapid[i];
+      if (id >= 0) {
+        mju_copy3(d->mocap_pos+3*id, m->body_pos+3*i);
+        mju_copy4(d->mocap_quat+4*id, m->body_quat+4*i);
+      }
     }
   }
 
-  // set fixed quantities
-  setFixed(m, d);
-
   // set quantities that depend on qpos0
-  set0(m, d);
+  if (groups & (mjSCGROUP_KIN0 | mjSCGROUP_INERT0)) {
+    kinematics0(m, d);
+    if (groups & mjSCGROUP_KIN0) {
+      setKinematics0(m, d);
+      setDofLength(m, d);
+    }
+    if (groups & mjSCGROUP_INERT0) {
+      setInertia0(m, d);
+    }
+  }
 
-  // compute statistics
-  setStat(m, d);
+  // set quantities that depend on qpos_spring
+  if (groups & mjSCGROUP_SPRING) {
+    setSpring(m, d);
+  }
 
-  // set quantities that depend qpos_spring
-  setSpring(m, d);
+  if (mocap) {
+    mju_copy(d->mocap_pos, mocap_pos, 3*m->nmocap);
+    mju_copy(d->mocap_quat, mocap_quat, 4*m->nmocap);
+    mj_freeStack(d);
+  }
 
-  // precompute the constant part of the implicit effective metric factor
-  setEfm0Factor(m, d);
+  if (groups & mjSCGROUP_SPRING) {
+    // precompute the constant part of the implicit effective metric factor
+    setEfm0Factor(m, d);
+
+    // the vertex ordering of the metric's sparse factor
+    mj_effCholSetConst(m, d);
+  }
+
+  m->opt.enableflags = enableflags;
+}
+
+
+// set all remaining constant fields of mjModel, except for lengthrange
+static void setConst(mjModel* m, mjData* d, int compiled) {
+  mj_setConstGroups(m, d, mjSCGROUP_FIXED | mjSCGROUP_KIN0 | mjSCGROUP_INERT0);
+
+  // in compilation, the other qpos0 quantities
+  if (compiled) {
+    setDampRatio(m, d);
+    setStat(m, d);
+  }
+
+  mj_setConstGroups(m, d, mjSCGROUP_SPRING);
+
+  // in compilation, the other qpos_spring quantities
+  if (compiled) {
+    setSpringLength(m, d);
+  }
+}
+
+
+void mj_setConst(mjModel* m, mjData* d) {
+  setConst(m, d, 0);
+}
+
+
+void mj_setCompiledConst(mjModel* m, mjData* d) {
+  setConst(m, d, 1);
 }
 
 

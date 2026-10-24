@@ -157,7 +157,10 @@ def _generate_field_data(
         and inner_type.name in constants.PRIMITIVE_TYPES
     ):
       ptr_expr = f"ptr_->{f.name}"
-      if len(f.type.extents) > 1:
+      if inner_type.name == "mjtBool":
+        # Embind has no memory_view<bool>, so expose mjtBool as Uint8Array.
+        ptr_expr = f"reinterpret_cast<uint8_t*>({ptr_expr})"
+      elif len(f.type.extents) > 1:
         # for multi-dimensional arrays, we need to cast the field
         # to a pointer, so embind can correctly interpret the memory
         # view
@@ -286,6 +289,9 @@ def _generate_field_data(
     # exposed as emscripten::typed_memory_view.
     else:
       ptr_field_expr = f"ptr_->{f.name}"
+      if inner_type_name == "mjtBool":
+        # Embind has no memory_view<bool>, so expose mjtBool as Uint8Array.
+        ptr_field_expr = f"reinterpret_cast<uint8_t*>({ptr_field_expr})"
       array_size_str = ""
       if is_dynamically_sized:
         array_size_str = parse_array_extent(f.array_extent, w, f.name)  # pyrefly: ignore[bad-argument-type]

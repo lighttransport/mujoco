@@ -40,8 +40,11 @@
   X(mjtInertiaFromGeom, inertiafromgeom,   1) \
   XVEC(int,             inertiagrouprange, 2) \
   X(mjtBool,            saveinertial,      1) \
+  X(mjtBool,            savecompiled,      1) \
+  X(mjtBool,            savecanonical,     1) \
   X(mjtBool,            alignfree,         1) \
   X(mjtConflict,        conflict,          1) \
+  X(mjtPassthrough,     passthrough,       1) \
   X(mjLROpt,            LRopt,             1) \
   X(mjString*,          meshdir,           1) \
   X(mjString*,          texturedir,        1) \
@@ -115,6 +118,7 @@
     X   ( double,          gravcomp,         1 ) \
     X   ( mjtSleepPolicy,  sleep,            1 ) \
     X   ( mjtByte,         simple,           1 ) \
+    X   ( mjtByte,         fuse,             1 ) \
     X   ( mjDoubleVec*,    userdata,         1 ) \
     X   ( mjtBool,         explicitinertial, 1 ) \
     X   ( mjsPlugin,       plugin,           1 ) \
@@ -129,6 +133,9 @@
     XVEC( double,         pos,        3 ) \
     XVEC( double,         quat,       4 ) \
     X   ( mjsOrientation, alt,        1 ) \
+    XVEC( double,         scale,      3 ) \
+    X   ( mjtScaling,     scaling,    1 ) \
+    X   ( double,         massscale,  1 ) \
     X   ( mjString*,      info,       1 )
 
 
@@ -271,44 +278,46 @@
 
 #define MJSFLEX_FIELDS                           \
     X   ( mjsElement*,   element,       1      ) \
-    X   ( int,           contype,       1      ) \
-    X   ( int,           conaffinity,   1      ) \
-    X   ( int,           condim,        1      ) \
-    X   ( int,           priority,      1      ) \
-    XVEC( double,        friction,      3      ) \
-    X   ( double,        solmix,        1      ) \
-    XVEC( mjtNum,        solref,        mjNREF ) \
-    XVEC( mjtNum,        solimp,        mjNIMP ) \
-    X   ( double,        margin,        1      ) \
-    X   ( double,        gap,           1      ) \
-    X   ( int,           dim,           1      ) \
-    X   ( double,        radius,        1      ) \
-    XVEC( double,        size,          3      ) \
-    X   ( mjtBool,       internal,      1      ) \
-    X   ( mjtBool,       flatskin,      1      ) \
-    X   ( mjtFlexSelf,   selfcollide,   1      ) \
-    X   ( int,           passive,       1      ) \
-    X   ( int,           activelayers,  1      ) \
-    X   ( int,           group,         1      ) \
-    X   ( double,        edgestiffness, 1      ) \
-    X   ( double,        edgedamping,   1      ) \
-    XVEC( float,         rgba,          4      ) \
-    X   ( mjString*,     material,      1      ) \
-    X   ( double,        young,         1      ) \
-    X   ( double,        poisson,       1      ) \
-    X   ( double,        damping,       1      ) \
-    X   ( double,        thickness,     1      ) \
-    X   ( int,           elastic2d,     1      ) \
-    XVEC( int,           cellcount,     3      ) \
-    X   ( int,           order,         1      ) \
-    X   ( mjStringVec*,  nodebody,      1      ) \
-    X   ( mjStringVec*,  vertbody,      1      ) \
-    X   ( mjDoubleVec*,  node,          1      ) \
-    X   ( mjDoubleVec*,  vert,          1      ) \
-    X   ( mjIntVec*,     elem,          1      ) \
-    X   ( mjFloatVec*,   texcoord,      1      ) \
-    X   ( mjIntVec*,     elemtexcoord,  1      ) \
-    X   ( mjString*,     info,          1      )
+    X   ( int,            contype,       1      ) \
+    X   ( int,            conaffinity,   1      ) \
+    X   ( int,            condim,        1      ) \
+    X   ( int,            priority,      1      ) \
+    XVEC( double,         friction,      3      ) \
+    X   ( double,         solmix,        1      ) \
+    XVEC( mjtNum,         solref,        mjNREF ) \
+    XVEC( mjtNum,         solimp,        mjNIMP ) \
+    X   ( double,         margin,        1      ) \
+    X   ( double,         gap,           1      ) \
+    X   ( int,            dim,           1      ) \
+    X   ( double,         radius,        1      ) \
+    XVEC( double,         size,          3      ) \
+    X   ( mjtBool,        flatskin,      1      ) \
+    X   ( mjtFlexSelf,    selfcollide,   1      ) \
+    X   ( int,            passive,       1      ) \
+    X   ( int,            activelayers,  1      ) \
+    X   ( int,            group,         1      ) \
+    X   ( double,         edgestiffness, 1      ) \
+    X   ( double,         edgedamping,   1      ) \
+    XVEC( float,          rgba,          4      ) \
+    X   ( mjString*,      material,      1      ) \
+    X   ( double,         young,         1      ) \
+    X   ( double,         poisson,       1      ) \
+    X   ( double,         damping,       1      ) \
+    X   ( double,         thickness,     1      ) \
+    X   ( int,            elastic2d,     1      ) \
+    X   ( int,            elastic3d,     1      ) \
+    X   ( mjtFlexSection, section,       1      ) \
+    XVEC( double,         sectionsize,   2      ) \
+    XVEC( int,            cellcount,     3      ) \
+    X   ( int,            order,         1      ) \
+    X   ( mjStringVec*,   nodebody,      1      ) \
+    X   ( mjStringVec*,   vertbody,      1      ) \
+    X   ( mjDoubleVec*,   node,          1      ) \
+    X   ( mjDoubleVec*,   vert,          1      ) \
+    X   ( mjIntVec*,      elem,          1      ) \
+    X   ( mjFloatVec*,    texcoord,      1      ) \
+    X   ( mjIntVec*,      elemtexcoord,  1      ) \
+    X   ( mjString*,      info,          1      )
 
 
 //-------------------------------- mjsMesh ---------------------------------------------------------
@@ -330,6 +339,8 @@
     X   ( mjIntVec*,       userface,         1 ) \
     X   ( mjIntVec*,       userfacenormal,   1 ) \
     X   ( mjIntVec*,       userfacetexcoord, 1 ) \
+    X   ( mjDoubleVec*,    usernode,         1 ) \
+    X   ( mjIntVec*,       usertet,          1 ) \
     X   ( mjsPlugin,       plugin,           1 ) \
     X   ( mjString*,       material,         1 ) \
     X   ( int,             octree_maxdepth,  1 ) \
@@ -392,6 +403,7 @@
     X   ( mjByteVec*,     data,         1  ) \
     X   ( mjtBool,        hflip,        1  ) \
     X   ( mjtBool,        vflip,        1  ) \
+    X   ( mjtEmbed,       embed,        1  ) \
     X   ( mjString*,      info,         1  )
 
 
@@ -491,6 +503,7 @@
 
 #define MJSACTUATOR_FIELDS                          \
     X   ( mjsElement*,   element,       1         ) \
+    X   ( mjtActuator,   type,          1         ) \
     X   ( mjtGain,       gaintype,      1         ) \
     XVEC( double,        gainprm,       mjNGAIN   ) \
     X   ( mjtBias,       biastype,      1         ) \
@@ -603,6 +616,7 @@
     X( mjsLight*,    light,    1 ) \
     X( mjsFlex*,     flex,     1 ) \
     X( mjsMesh*,     mesh,     1 ) \
+    X( mjsTexture*,  texture,  1 ) \
     X( mjsMaterial*, material, 1 ) \
     X( mjsPair*,     pair,     1 ) \
     X( mjsEquality*, equality, 1 ) \

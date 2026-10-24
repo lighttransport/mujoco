@@ -64,7 +64,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
          ),
-         doc='Mount a ResourceProvider to handle file operations under the given path; return 0: success, 2: repeated name, -1: invalid resource provider.',  # pylint: disable=line-too-long
+         doc='Mount a provider to handle file operations under the given path; return 0: success, 2: repeated name, -1: invalid provider.',  # pylint: disable=line-too-long
      )),
     ('mj_unmountVFS',
      FunctionDecl(
@@ -84,7 +84,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
          ),
-         doc='Unmount a previously mounted ResourceProvider; return 0: success, -1: not found in VFS.',  # pylint: disable=line-too-long
+         doc='Unmount a previously mounted provider; return 0: success, -1: not found in VFS.',  # pylint: disable=line-too-long
      )),
     ('mj_addFileVFS',
      FunctionDecl(
@@ -525,7 +525,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
          ),
-         doc='Copy real-valued arrays from model to spec; return 1 on success.',
+         doc='Copy the values which were changed in a model to the spec it was compiled from; return 1 on success.',  # pylint: disable=line-too-long
      )),
     ('mj_recompile',
      FunctionDecl(
@@ -559,6 +559,91 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Recompile spec to model, preserving the state; return 0 on success.',  # pylint: disable=line-too-long
+     )),
+    ('mj_loadTexture',
+     FunctionDecl(
+         name='mj_loadTexture',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='m',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjModel', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='id',
+                 type=ValueType(name='int'),
+             ),
+             FunctionParameterDecl(
+                 name='data',
+                 type=PointerType(
+                     inner_type=PointerType(
+                         inner_type=ValueType(name='mjtByte'),
+                     ),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='width',
+                 type=PointerType(
+                     inner_type=ValueType(name='int'),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='height',
+                 type=PointerType(
+                     inner_type=ValueType(name='int'),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='colorspace',
+                 type=PointerType(
+                     inner_type=ValueType(name='int'),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='error',
+                 type=PointerType(
+                     inner_type=ValueType(name='char'),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='error_sz',
+                 type=ValueType(name='int'),
+             ),
+         ),
+         doc='Decode texture id to raw bytes, exactly what compilation would store in tex_data, with tex_nchannel channels; embedded textures are copied from the model. The buffer is allocated with mju_malloc and freed by the caller; colorspace receives the resolved colorspace (mjtColorSpace). Return 0 on success.',  # pylint: disable=line-too-long
+     )),
+    ('mj_embedAssets',
+     FunctionDecl(
+         name='mj_embedAssets',
+         return_type=PointerType(
+             inner_type=ValueType(name='mjModel'),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='m',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjModel', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='error',
+                 type=PointerType(
+                     inner_type=ValueType(name='char'),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='error_sz',
+                 type=ValueType(name='int'),
+             ),
+         ),
+         doc='Copy of m with every by-reference asset loaded into it, as compilation would have stored it. Return NULL with error on a file that does not resolve. A hermetic MJB file of a model with by-reference assets is mj_embedAssets, then mj_saveModel, then mj_deleteModel.',  # pylint: disable=line-too-long
      )),
     ('mj_saveLastXML',
      FunctionDecl(
@@ -954,7 +1039,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='buffer_sz',
-                 type=ValueType(name='int'),
+                 type=ValueType(name='mjtSize'),
              ),
          ),
          doc='Save model to binary MJB file or memory buffer; buffer has precedence when given.',  # pylint: disable=line-too-long
@@ -997,7 +1082,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='buffer_sz',
-                 type=ValueType(name='int'),
+                 type=ValueType(name='mjtSize'),
              ),
          ),
          doc='Load model from memory buffer.',
@@ -2782,7 +2867,9 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
     ('mj_readCtrl',
      FunctionDecl(
          name='mj_readCtrl',
-         return_type=ValueType(name='mjtNum'),
+         return_type=PointerType(
+             inner_type=ValueType(name='mjtNum', is_const=True),
+         ),
          parameters=(
              FunctionParameterDecl(
                  name='m',
@@ -2805,11 +2892,17 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  type=ValueType(name='mjtNum'),
              ),
              FunctionParameterDecl(
+                 name='result',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjtNum'),
+                 ),
+             ),
+             FunctionParameterDecl(
                  name='interp',
                  type=ValueType(name='int'),
              ),
          ),
-         doc='Read ctrl value for actuator at given time. Returns d->ctrl[id] if no history, otherwise reads from history buffer. interp: 0=zero-order-hold, 1=linear, 2=cubic spline.',  # pylint: disable=line-too-long
+         doc='Read ctrl value for actuator at given time. Returns pointer to ctrl (no history) or history buffer (exact match), or NULL if interpolation performed (writes to result). interp: 0=zero-order-hold, 1=linear, 2=cubic spline.',  # pylint: disable=line-too-long
      )),
     ('mj_readSensor',
      FunctionDecl(
@@ -5733,7 +5826,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  type=ValueType(name='int'),
              ),
          ),
-         doc='Upload texture to GPU, overwriting previous upload if any.',
+         doc='Upload texture to GPU, overwriting previous upload if any. A by-reference texture (tex_adr == -1) is decoded with mj_loadTexture.',  # pylint: disable=line-too-long
      )),
     ('mjr_uploadMesh',
      FunctionDecl(
@@ -9810,9 +9903,9 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Look up a plugin by the registered slot number that was returned by mjp_registerPlugin.',  # pylint: disable=line-too-long
      )),
-    ('mjp_defaultResourceProvider',
+    ('mjp_defaultProvider',
      FunctionDecl(
-         name='mjp_defaultResourceProvider',
+         name='mjp_defaultProvider',
          return_type=ValueType(name='void'),
          parameters=(
              FunctionParameterDecl(
@@ -9822,11 +9915,11 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
          ),
-         doc='Set default resource provider definition.',
+         doc='Set default provider definition.',
      )),
-    ('mjp_registerResourceProvider',
+    ('mjp_registerProvider',
      FunctionDecl(
-         name='mjp_registerResourceProvider',
+         name='mjp_registerProvider',
          return_type=ValueType(name='int'),
          parameters=(
              FunctionParameterDecl(
@@ -9836,18 +9929,18 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
          ),
-         doc='Globally register a resource provider in a thread-safe manner. The provider must have a prefix that is not a sub-prefix or super-prefix of any current registered providers. Return a slot number >= 0 on success, -1 on failure.',  # pylint: disable=line-too-long
+         doc='Globally register a provider in a thread-safe manner. The provider must have a prefix that is not a sub-prefix or super-prefix of any current registered providers. Return a slot number >= 0 on success, -1 on failure.',  # pylint: disable=line-too-long
      )),
-    ('mjp_resourceProviderCount',
+    ('mjp_providerCount',
      FunctionDecl(
-         name='mjp_resourceProviderCount',
+         name='mjp_providerCount',
          return_type=ValueType(name='int'),
          parameters=(),
-         doc='Return the number of globally registered resource providers.',
+         doc='Return the number of globally registered providers.',
      )),
-    ('mjp_getResourceProvider',
+    ('mjp_findProvider',
      FunctionDecl(
-         name='mjp_getResourceProvider',
+         name='mjp_findProvider',
          return_type=PointerType(
              inner_type=ValueType(name='mjpResourceProvider', is_const=True),
          ),
@@ -9859,11 +9952,11 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
          ),
-         doc='Return the resource provider with the prefix that matches against the resource name. If no match, return NULL.',  # pylint: disable=line-too-long
+         doc='Return the provider with the prefix that matches against the resource name. If no match, return NULL.',  # pylint: disable=line-too-long
      )),
-    ('mjp_getResourceProviderAtSlot',
+    ('mjp_getProviderAtSlot',
      FunctionDecl(
-         name='mjp_getResourceProviderAtSlot',
+         name='mjp_getProviderAtSlot',
          return_type=PointerType(
              inner_type=ValueType(name='mjpResourceProvider', is_const=True),
          ),
@@ -9873,7 +9966,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  type=ValueType(name='int'),
              ),
          ),
-         doc='Look up a resource provider by slot number returned by mjp_registerResourceProvider. If invalid slot number, return NULL.',  # pylint: disable=line-too-long
+         doc='Look up a provider by slot number returned by mjp_registerProvider. If invalid slot number, return NULL.',  # pylint: disable=line-too-long
      )),
     ('mjp_registerDecoder',
      FunctionDecl(
@@ -9923,7 +10016,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
          ),
-         doc='Return the resource provider with the prefix that matches against the resource name. If no match, return NULL.',  # pylint: disable=line-too-long
+         doc='Return the decoder that matches against the resource or content type. If no match, return NULL.',  # pylint: disable=line-too-long
      )),
     ('mjp_registerEncoder',
      FunctionDecl(
@@ -9975,6 +10068,43 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Return the encoder that matches against the content type or filename extension. If no match, return NULL.',  # pylint: disable=line-too-long
      )),
+    ('mjp_registerArchiveProvider',
+     FunctionDecl(
+         name='mjp_registerArchiveProvider',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='provider',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjpResourceProvider', is_const=True),  # pylint: disable=line-too-long
+                 ),
+             ),
+         ),
+         doc='Globally register an archive provider. This function is thread-safe. provider->prefix specifies the filename extension(s) (e.g. .mjz|.zip).',  # pylint: disable=line-too-long
+     )),
+    ('mjp_findArchiveProvider',
+     FunctionDecl(
+         name='mjp_findArchiveProvider',
+         return_type=PointerType(
+             inner_type=ValueType(name='mjpResourceProvider', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='resource_name',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Return the archive provider that matches against the resource name. If no match, return NULL.',  # pylint: disable=line-too-long
+     )),
+    ('mjp_archiveProviderCount',
+     FunctionDecl(
+         name='mjp_archiveProviderCount',
+         return_type=ValueType(name='int'),
+         parameters=(),
+         doc='Return the number of globally registered archive providers.',
+     )),
     ('mju_openResource',
      FunctionDecl(
          name='mju_openResource',
@@ -10014,7 +10144,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  type=ValueType(name='size_t'),
              ),
          ),
-         doc="Open a resource; if the name doesn't have a prefix matching a registered resource provider, then the OS filesystem is used.",  # pylint: disable=line-too-long
+         doc="Open a resource; if the name doesn't have a prefix matching a registered provider, then the OS filesystem is used.",  # pylint: disable=line-too-long
      )),
     ('mju_closeResource',
      FunctionDecl(
@@ -10092,7 +10222,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  type=ValueType(name='size_t'),
              ),
          ),
-         doc='Write resource data via its resource provider, return bytes written or -1 on error.',  # pylint: disable=line-too-long
+         doc='Write resource data via its provider, return bytes written or -1 on error.',  # pylint: disable=line-too-long
      )),
     ('mju_getResourceDir',
      FunctionDecl(
@@ -10168,8 +10298,19 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
                  nullable=True,
              ),
+             FunctionParameterDecl(
+                 name='error',
+                 type=PointerType(
+                     inner_type=ValueType(name='char'),
+                 ),
+                 nullable=True,
+             ),
+             FunctionParameterDecl(
+                 name='error_sz',
+                 type=ValueType(name='int'),
+             ),
          ),
-         doc='Find the decoder for a resource and return the decoded spec. The caller takes ownership of the spec and is responsible for cleaning it up.',  # pylint: disable=line-too-long
+         doc='Find the decoder for a resource and return the decoded spec. The caller takes ownership of the spec and is responsible for cleaning it up. On failure, return NULL and write the reason to error.',  # pylint: disable=line-too-long
      )),
     ('mju_threadpool',
      FunctionDecl(
@@ -11419,6 +11560,13 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                      inner_type=ValueType(name='mjSpec'),
                  ),
              ),
+             FunctionParameterDecl(
+                 name='def',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsDefault', is_const=True),
+                 ),
+                 nullable=True,
+             ),
          ),
          doc='Add texture.',
      )),
@@ -12332,6 +12480,83 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Resolve alternative orientations to quat; return error if any.',
+     )),
+    ('mjs_fuseStatic',
+     FunctionDecl(
+         name='mjs_fuseStatic',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='s',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjSpec'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='vfs',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjVFS', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+         ),
+         doc='Fuse the static bodies of the spec with their parents; return the number fused, -1 on error.',  # pylint: disable=line-too-long
+     )),
+    ('mjs_discardVisual',
+     FunctionDecl(
+         name='mjs_discardVisual',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='s',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjSpec'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='vfs',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjVFS', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+         ),
+         doc='Discard the visual elements of the spec; return the number discarded, -1 on error.',  # pylint: disable=line-too-long
+     )),
+    ('mjs_dedupAssets',
+     FunctionDecl(
+         name='mjs_dedupAssets',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='s',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjSpec'),
+                 ),
+             ),
+         ),
+         doc='Merge the textures and meshes of the spec which would compile to the same asset; return the number merged, -1 on error.',  # pylint: disable=line-too-long
+     )),
+    ('mjs_adoptInertial',
+     FunctionDecl(
+         name='mjs_adoptInertial',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='body',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsBody'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='vfs',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjVFS', is_const=True),
+                 ),
+                 nullable=True,
+             ),
+         ),
+         doc='Make the inertial which compilation infers for a body part of the spec, return 0 on success.',  # pylint: disable=line-too-long
      )),
     ('mjs_bodyToFrame',
      FunctionDecl(

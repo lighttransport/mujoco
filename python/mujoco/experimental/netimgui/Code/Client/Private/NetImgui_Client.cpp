@@ -5,6 +5,14 @@
 //  - Added cmdTexture.mpNext = nullptr in TexturePendingServerAdd to
 //    terminate the linked list when appending a new texture command.
 //  - Added logging for network events.
+//  - Free outgoing CmdBackground commands and any in-flight auto-freed
+//    commands on disconnect.
+//  - Synchronize mPendingTextures and CmdHeader::mSent accesses under
+//    mPendingTexturesLock, and use atomics for ClientInfo fields shared
+//    between the main thread and communication thread.
+//  - Receive loop and handshake validate the command size received from the
+//    network (PendingCom::SizeMax / IsBiggerBufferNeeded).
+//  - Incoming commands are validated (size, offsets) before being used.
 #include "NetImgui_Shared.h"
 #include "google/logging.h"
 
@@ -142,10 +150,17 @@ static void SetClipboardTextFn_NetImguiImpl(ImGuiContext* ctx,
 //=================================================================================================
 void Communications_Incoming_Input(ClientInfo& client) {
   auto pCmdInput = static_cast<CmdInput*>(client.mPendingRcv.pCommand);
+  if (pCmdInput->mSize < sizeof(CmdInput)) {
+    client.mPendingRcv.bError = true;  // Invalid command received
+    return;
+  }
   client.mPendingRcv.bAutoFree = false;  // Taking ownership of the data
   client.mDesiredFps =
       pCmdInput->mDesiredFps > 0.f ? pCmdInput->mDesiredFps : 0.f;
   size_t keyCount(pCmdInput->mKeyCharCount);
+  if (keyCount > ArrayCount(pCmdInput->mKeyChars)) {
+    keyCount = ArrayCount(pCmdInput->mKeyChars);
+  }
   client.mPendingKeyIn.AddData(pCmdInput->mKeyChars, keyCount);
 
   VLOG(2, "CmdInput: mDesiredFps=%.1f, screen=%dx%d, mouse=%d,%d",
@@ -162,8 +177,11 @@ void Communications_Incoming_Input(ClientInfo& client) {
 //=================================================================================================
 void Communications_Incoming_Clipboard(ClientInfo& client) {
   auto pCmdClipboard = static_cast<CmdClipboard*>(client.mPendingRcv.pCommand);
+  if (!pCmdClipboard->ToPointers()) {
+    client.mPendingRcv.bError = true;  // Invalid command received
+    return;
+  }
   client.mPendingRcv.bAutoFree = false;  // Taking ownership of the data
-  pCmdClipboard->ToPointers();
   client.mPendingClipboardIn.Assign(pCmdClipboard);
 }
 
@@ -172,17 +190,15 @@ void Communications_Incoming_Clipboard(ClientInfo& client) {
 // Transmit the next pending texture command
 //=================================================================================================
 void Communications_Outgoing_Textures(ClientInfo& client) {
+  std::lock_guard<std::mutex> guard(client.mPendingTexturesLock);
   if (client.mPendingTextures) {
-    std::lock_guard<std::mutex> guard(client.mPendingTexturesLock);
-    if (client.mPendingTextures) {
-      // Get oldest texture command to sent to server
-      CmdTexture* pPendingTexture = client.mPendingTextures;
-      client.mPendingTextures = client.mPendingTextures->mpNext;
-      pPendingTexture->mpNext = nullptr;
-      client.mPendingSend.pCommand = pPendingTexture;
-      client.mPendingSend.bAutoFree =
-          false;  // free handled by main update thread
-    }
+    // Get oldest texture command to sent to server
+    CmdTexture* pPendingTexture = client.mPendingTextures;
+    client.mPendingTextures = client.mPendingTextures->mpNext;
+    pPendingTexture->mpNext = nullptr;
+    client.mPendingSend.pCommand = pPendingTexture;
+    client.mPendingSend.bAutoFree =
+        false;  // free handled by main update thread
   }
 }
 
@@ -194,7 +210,7 @@ void Communications_Outgoing_Background(ClientInfo& client) {
   CmdBackground* pPendingBackground = client.mPendingBackgroundOut.Release();
   if (pPendingBackground) {
     client.mPendingSend.pCommand = pPendingBackground;
-    client.mPendingSend.bAutoFree = false;
+    client.mPendingSend.bAutoFree = true;
   }
 }
 
@@ -260,6 +276,7 @@ void Communications_Incoming(ClientInfo& client) {
     if (client.mPendingRcv.IsReady()) {
       client.mCmdPendingRead = CmdPendingRead();
       client.mPendingRcv.pCommand = &client.mCmdPendingRead;
+      client.mPendingRcv.SizeMax = sizeof(client.mCmdPendingRead);
       client.mPendingRcv.bAutoFree = false;
     }
 
@@ -270,12 +287,12 @@ void Communications_Incoming(ClientInfo& client) {
       Network::DataReceive(client.mpSocketComs, client.mPendingRcv);
 
       // Detected a new command bigger than header, allocate memory for it
-      if (client.mPendingRcv.pCommand->mSize > sizeof(CmdPendingRead) &&
-          client.mPendingRcv.pCommand == &client.mCmdPendingRead) {
+      if (client.mPendingRcv.IsBiggerBufferNeeded()) {
         CmdPendingRead* pCmdHeader = reinterpret_cast<CmdPendingRead*>(
             netImguiSizedNew<uint8_t>(client.mPendingRcv.pCommand->mSize));
         *pCmdHeader = client.mCmdPendingRead;
         client.mPendingRcv.pCommand = pCmdHeader;
+        client.mPendingRcv.SizeMax = pCmdHeader->mSize;
         client.mPendingRcv.bAutoFree = true;
       }
     }
@@ -339,7 +356,10 @@ void Communications_Outgoing(ClientInfo& client) {
            static_cast<int>(client.mPendingSend.pCommand->mType),
            client.mPendingSend.pCommand->mSize,
            client.mPendingSend.IsError() ? "Y" : "N");
-      client.mPendingSend.pCommand->mSent = true;
+      {
+        std::lock_guard<std::mutex> guard(client.mPendingTexturesLock);
+        client.mPendingSend.pCommand->mSent = true;
+      }
       if (client.mPendingSend.IsError()) {
         client.mbDisconnectPending = true;
       }
@@ -411,6 +431,7 @@ bool Communications_Initialize(ClientInfo& client) {
   // Handshake confirming connection validity
   //---------------------------------------------------------------------
   PendingRcv.pCommand = reinterpret_cast<CmdPendingRead*>(&cmdVersionRcv);
+  PendingRcv.SizeMax = sizeof(cmdVersionRcv);
   while (!PendingRcv.IsDone() &&
          cmdVersionRcv.mType == CmdHeader::eCommands::Version) {
     auto start_time = std::chrono::steady_clock::now();
@@ -434,6 +455,7 @@ bool Communications_Initialize(ClientInfo& client) {
       (cmdVersionRcv.mFlags &
        static_cast<uint8_t>(CmdVersion::eFlags::ConnectForce)) != 0;
   bool bCanConnect = !PendingRcv.IsError() &&
+                     cmdVersionRcv.mSize == sizeof(CmdVersion) &&
                      cmdVersionRcv.mType == cmdVersionSend.mType &&
                      cmdVersionRcv.mVersion == cmdVersionSend.mVersion &&
                      cmdVersionRcv.mWCharSize == cmdVersionSend.mWCharSize &&
@@ -511,6 +533,15 @@ void Communications_Loop(void* pClientVoid) {
          pClient->mbDisconnectPending ? "Y" : "N");
   }
   VLOG(1, "Communications_Loop: exiting loop");
+
+  if (pClient->mPendingRcv.bAutoFree) {
+    netImguiDeleteSafe(pClient->mPendingRcv.pCommand);
+  }
+  pClient->mPendingRcv = PendingCom();
+  if (pClient->mPendingSend.bAutoFree) {
+    netImguiDeleteSafe(pClient->mPendingSend.pCommand);
+  }
+  pClient->mPendingSend = PendingCom();
 
   Network::SocketInfo* pSocket = pClient->mpSocketComs.exchange(nullptr);
   if (pSocket) {
@@ -902,6 +933,7 @@ void ClientInfo::TextureTrackingUpdate(bool bResendAll) {
 
   //----------------------------------------
   if (mbTrackedTexturesPending) {
+    std::lock_guard<std::mutex> guard(mPendingTexturesLock);
     int TrackedCount(mTrackedTextures.Size);
     mbTrackedTexturesPending = false;
     for (int i(0); i < TrackedCount; ++i) {
@@ -968,10 +1000,13 @@ bool ClientInfo::TextureTrackingRem(ClientTextureID clientTextureID) {
     CmdTexture* pCmdTexture = mTrackedTextures[i];
     if (pCmdTexture && pCmdTexture->mTextureClientID == clientTextureID &&
         pCmdTexture->mStatus == CmdTexture::eType::Create) {
-      pCmdTexture->mSent = false;
-      pCmdTexture->mStatus =
-          CmdTexture::eType::Destroy;  // Re-purpose create cmd to destroy the
-                                       // texture
+      {
+        std::lock_guard<std::mutex> guard(mPendingTexturesLock);
+        pCmdTexture->mSent = false;
+        pCmdTexture->mStatus =
+            CmdTexture::eType::Destroy;  // Re-purpose create cmd to destroy the
+                                         // texture
+      }
       TexturePendingServerAdd(*pCmdTexture);
 
       // Remove item from our list
@@ -1027,7 +1062,7 @@ void ClientInfo::ProcessDrawData(const ImDrawData* pDearImguiData,
 
   VLOG(2, "ProcessDrawData: %s (mbValidDrawFrame=%s, mDesiredFps=%.1f)",
        mbValidDrawFrame ? "SENDING" : "SKIPPED",
-       mbValidDrawFrame ? "true" : "false", mDesiredFps);
+       mbValidDrawFrame ? "true" : "false", mDesiredFps.load());
 
   CmdDrawFrame* pDrawFrameNew =
       ConvertToCmdDrawFrame(pDearImguiData, mouseCursor);

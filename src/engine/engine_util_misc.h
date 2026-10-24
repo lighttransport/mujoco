@@ -28,8 +28,8 @@ extern "C" {
 //------------------------------ tendons and actuators ---------------------------------------------
 
 // wrap tendons around spheres and cylinders
-mjtNum mju_wrap(mjtNum wpnt[6], const mjtNum x0[3], const mjtNum x1[3], const mjtNum xpos[3],
-                const mjtNum xmat[9], mjtNum radius, int type, const mjtNum side[3]);
+MJAPI mjtNum mju_wrap(mjtNum wpnt[6], const mjtNum x0[3], const mjtNum x1[3], const mjtNum xpos[3],
+                      const mjtNum xmat[9], mjtNum radius, int type, const mjtNum side[3]);
 
 // normalized muscle length-gain curve
 MJAPI mjtNum mju_muscleGainLength(mjtNum length, mjtNum lmin, mjtNum lmax);
@@ -92,8 +92,8 @@ MJAPI mjtNum mju_evalBasis(const mjtNum x[3], int i, int order);
 MJAPI void mju_evalBasisArray(mjtNum* basis, const mjtNum x[3], int order);
 
 // map global parametric coord to cell-local coord and build node indices
-MJAPI int mju_cellLookup(const mjtNum coord[3], const int cellnum[3], int order, mjtNum local[3],
-                         int* nodeindices);
+MJAPI int mju_cellLookup(const mjtNum coord[3], const int cellnum[3], int order,
+                         int cell, mjtNum local[3], int* nodeindices);
 
 // interpolate a function at x with given interpolation coefficients and order n
 MJAPI void mju_interpolate3D(mjtNum res[3], const mjtNum x[3], const mjtNum* coeff, int order,

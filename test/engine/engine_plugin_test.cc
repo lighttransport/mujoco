@@ -18,16 +18,22 @@
 #include "src/engine/engine_plugin.h"
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>  // NOLINT
+#include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>  // NOLINT
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <absl/strings/str_format.h>
-#include <absl/strings/str_replace.h>
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_replace.h"
 #include <mujoco/mujoco.h>
 #include "test/fixture.h"
 
@@ -711,6 +717,137 @@ TEST_F(EnginePluginTest, FilteredActuatorPlugin) {
   EXPECT_THAT(d->act[6],
               MjNear(0.5 + expected_act_dot * m->opt.timestep, 1e-6, 1e-4));
 }
+
+// a plugin of a compiled child attached by reference starts from its initial
+// state when the parent is recompiled, as an attached copy does
+TEST_F(EnginePluginTest, RecompileAttachByReference) {
+  static constexpr char xml_parent[] = R"(
+  <mujoco>
+    <extension>
+      <plugin plugin="mujoco.test.sensor"/>
+    </extension>
+    <worldbody>
+      <frame name="f"/>
+    </worldbody>
+    <sensor>
+      <plugin plugin="mujoco.test.sensor"/>
+    </sensor>
+  </mujoco>
+  )";
+  static constexpr char xml_child[] = R"(
+  <mujoco>
+    <extension>
+      <plugin plugin="mujoco.test.sensor"/>
+    </extension>
+    <worldbody>
+      <body name="x"/>
+    </worldbody>
+    <sensor>
+      <plugin plugin="mujoco.test.sensor"/>
+    </sensor>
+  </mujoco>
+  )";
+
+  char error[1024] = {0};
+  for (bool deepcopy : {false, true}) {
+    mjSpec* parent = mj_parseXMLString(xml_parent, 0, error, sizeof(error));
+    ASSERT_THAT(parent, NotNull()) << error;
+    mjSpec* child = mj_parseXMLString(xml_child, 0, error, sizeof(error));
+    ASSERT_THAT(child, NotNull()) << error;
+    mjs_setDeepCopy(parent, deepcopy);
+    mjModel* m = mj_compile(child, nullptr);
+    ASSERT_THAT(m, NotNull()) << mjs_getError(child);
+    mj_deleteModel(m);
+
+    m = mj_compile(parent, nullptr);
+    ASSERT_THAT(m, NotNull()) << mjs_getError(parent);
+    mjData* d = mj_makeData(m);
+    ASSERT_EQ(m->npluginstate, 3);
+    d->plugin_state[0] = 7;
+    d->plugin_state[1] = 8;
+    d->plugin_state[2] = 9;
+
+    ASSERT_THAT(mjs_attach(mjs_findFrame(parent, "f")->element,
+                           mjs_findBody(child, "x")->element, "c_", ""),
+                NotNull())
+        << mjs_getError(parent);
+    ASSERT_EQ(mj_recompile(parent, nullptr, m, d), 0) << mjs_getError(parent);
+    ASSERT_EQ(m->npluginstate, 6);
+    EXPECT_THAT(AsVector(d->plugin_state, 6),
+                testing::ElementsAreArray({7, 8, 9, 1, 0, 0}));
+
+    mj_deleteData(d);
+    mj_deleteModel(m);
+    mj_deleteSpec(child);
+    mj_deleteSpec(parent);
+  }
+}
+
+TEST_F(EnginePluginTest, ArchiveProviderRegistration) {
+  int initial_count = mjp_archiveProviderCount();
+
+  mjpResourceProvider provider;
+  mjp_defaultProvider(&provider);
+  provider.prefix = ".testarchive|.alsoarchive";
+  provider.open = [](mjResource* res) {
+    res->data = const_cast<char*>("test_handle");
+    return 1;
+  };
+  provider.read = [](mjResource* res, const void** buf) {
+    static const char data[] = "test data";
+    *buf = data;
+    return static_cast<int>(sizeof(data) - 1);
+  };
+  provider.close = [](mjResource* res) {};
+
+  mjp_registerArchiveProvider(&provider);
+
+  EXPECT_GT(mjp_archiveProviderCount(), initial_count);
+
+  const mjpResourceProvider* found1 =
+      mjp_findArchiveProvider("model.testarchive");
+  ASSERT_THAT(found1, NotNull());
+  EXPECT_TRUE(found1->open != nullptr);
+
+  const mjpResourceProvider* found2 =
+      mjp_findArchiveProvider("model.alsoarchive");
+  ASSERT_THAT(found2, NotNull());
+}
+
+#if !defined(_WIN32) && !defined(__CYGWIN__)
+// mju_error from a failing dlopen must not longjmp past the plugin table lock,
+// or the std::string locals of mj_loadAllPluginLibraries; leaks are detected
+// when running under asan
+TEST_F(MujocoTest, LoadAllPluginLibrariesErrorReleasesLock) {
+  #if defined(__APPLE__)
+  const char* suffix = ".dylib";
+  #else
+  const char* suffix = ".so";
+  #endif
+  std::filesystem::path dir =
+      std::filesystem::temp_directory_path() /
+      "mujoco_load_all_plugin_libraries_error_directory_longer_than_sso";
+  std::filesystem::create_directories(dir);
+  std::ofstream(dir / (std::string("not_a_library") + suffix)) << "not an ELF";
+
+  auto load_all = MjuErrorMessageFrom(mj_loadAllPluginLibraries);
+  EXPECT_THAT(load_all(dir.string().c_str(), nullptr),
+              HasSubstr("Error loading plugin library"));
+  std::filesystem::remove_all(dir);
+
+  // registering an identical plugin takes the table lock on another thread
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  std::thread([done] {
+    mjpPlugin plugin = *mjp_getPluginAtSlot(0);
+    mjp_registerPlugin(&plugin);
+    *done = true;
+  }).detach();
+  for (int i = 0; i < 500 && !*done; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(*done) << "plugin table lock was not released";
+}
+#endif
 
 }  // namespace
 }  // namespace mujoco

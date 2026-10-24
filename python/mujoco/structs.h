@@ -33,7 +33,7 @@
 #include <utility>
 #include <vector>
 
-#include <absl/types/span.h>
+#include "absl/types/span.h"
 #include <mujoco/mjxmacro.h>
 #include <mujoco/mujoco.h>
 #include "gil.h"
@@ -1195,6 +1195,23 @@ static void DefinePyStr(pybind11::class_<C, O...> c, const char* name,
         }
         rhs.copy(c.get()->*arr, actual_len);
         (c.get()->*arr)[actual_len] = '\0';
+      });
+}
+
+// Defines a struct property of a Python class that supports assignments by
+// copying the underlying C struct in place.
+//
+// Use `DefinePyStruct(c, "somestruct", &MjStructHolder<C>::somestruct)`
+// as a drop-in replacement for
+// `c.def_readonly("somestruct", &MjStructHolder<C>::somestruct)`.
+template <typename T, typename C, typename... O>
+static void DefinePyStruct(pybind11::class_<C, O...> c, const char* name,
+                           T C::* member) {
+  c.def_property(
+      name,
+      [member](const C& wrapper) -> const T& { return wrapper.*member; },
+      [member](C& wrapper, const T& rhs) {
+        *(wrapper.*member).get() = *rhs.get();
       });
 }
 

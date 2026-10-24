@@ -10,9 +10,10 @@
 #   * The compiler matrix lives in build_matrix.json. Pull requests build the
 #     representative "core" subset; pushes to main run the full compiler sweep.
 #     (See generate_matrix() in build_steps.sh.)
-#   * Studio/Filament and WASM are NOT built in the main matrix - they are covered
-#     by the dedicated `studio` and `wasm` jobs below. WASM in particular is built
-#     with emcc, which ignores the host compiler, so building it per-compiler added
+#   * Studio/Filament is built in the core matrix jobs (after Build MuJoCo Core
+#     and before Build MuJoCo Tests). WASM is NOT built in the main matrix - it
+#     is covered by the dedicated `wasm` job below because it is built with
+#     emcc, which ignores the host compiler, so building it per-compiler added
 #     no coverage.
 #   * ccache is used to wrap the compiler. PR branches fall back to main's cache, so
 #     the expensive (and pinned) Filament build is restored rather than recompiled.
@@ -49,6 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.generate.outputs.matrix }}
+      bazel_matrix: ${{ steps.generate.outputs.bazel_matrix }}
     steps:
     - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       with:
@@ -62,6 +64,7 @@ jobs:
   mujoco:
     needs: setup
     strategy:
+      fail-fast: false
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
 
     name: "${{ matrix.label }}"
@@ -71,6 +74,28 @@ jobs:
     - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       with:
         persist-credentials: false
+
+    - name: Prepare Windows (setup MSVC)
+      if: ${{ runner.os == 'Windows' }}
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vswhere -products * -latest -prerelease -property installationPath
+        $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
+        $before = @{}
+        Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+        $lines = cmd.exe /c "`"$vcvars`" x64 >nul && set"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        foreach ($line in $lines) {
+          $idx = $line.IndexOf("=")
+          if ($idx -gt 0) {
+            $name = $line.Substring(0, $idx)
+            $val = $line.Substring($idx + 1)
+            if ($before[$name] -ne $val) {
+              "$name=$val" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+          }
+        }
 
     - name: Prepare Linux
       if: ${{ runner.os == 'Linux' }}
@@ -82,7 +107,8 @@ jobs:
 
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
-        python-version: "3.11"
+        # Shared with the Bazel build (MODULE.bazel python.defaults).
+        python-version-file: .github/workflows/python-version
 
     # uv makes the dependency install much faster, with a cross-run cache. POSIX
     # only: Windows stays on pip (it is not a Python-setup bottleneck, and this
@@ -102,30 +128,54 @@ jobs:
 
     # ccache dramatically speeds up warm rebuilds. The key is the matrix label so
     # each compiler gets its own cache; the action's restore-keys let PR branches
-    # fall back to main's cache. ccache on Windows/MSVC is finicky and Windows
-    # isn't the bottleneck, so we skip it there.
+    # fall back to main's cache. MSVC is skipped because it is finicky with /Zi,
+    # but Windows with Clang uses ccache via Ninja.
     - name: Setup ccache
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ runner.os != 'Windows' || contains(matrix.label, 'clang') }}
       uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
       with:
-        key: ${{ matrix.label }}
-        max-size: "1.5G"
+        key: ${{ matrix.label }}-mujoco
+        max-size: ${{ contains(matrix.cmake_args, 'MUJOCO_BUILD_STUDIO:BOOL=ON') && '300M' || '150M' }}
+        save: ${{ github.ref_name == 'main' }}
+
+    - name: Cache external dependencies
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ runner.temp }}/external_deps
+        key: external-deps-${{ runner.os == 'Windows' && 'windows' || 'posix' }}-${{ hashFiles('cmake/MujocoDependencies.cmake') }}
+        restore-keys: |
+          external-deps-${{ runner.os == 'Windows' && 'windows' || 'posix' }}-
 
     - name: Configure MuJoCo
       env:
         TMPDIR: ${{ matrix.tmpdir }}
+        EXTERNAL_DEPS: "eigen3"
+        EXTERNAL_DEPS_DIR: ${{ runner.temp }}/external_deps
         CMAKE_ARGS: ${{ matrix.cmake_args }}
       run: bash ./.github/workflows/build_steps.sh configure_mujoco
 
     - name: Upload CMake Configure Log
       if: always()
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: cmake-configure-log-${{ matrix.label }}
         path: build/CMakeFiles/CMakeConfigureLog.yaml
         retention-days: 5
 
-    - name: Build MuJoCo
+    - name: Build MuJoCo Core
+      working-directory: build
+      env:
+        CMAKE_BUILD_ARGS: ${{ matrix.cmake_build_args }}
+      run: bash ../.github/workflows/build_steps.sh build_mujoco_core
+
+    - name: Build MuJoCo Studio
+      if: ${{ contains(matrix.cmake_args, 'MUJOCO_BUILD_STUDIO:BOOL=ON') }}
+      working-directory: build
+      env:
+        CMAKE_BUILD_ARGS: ${{ matrix.cmake_build_args }}
+      run: bash ../.github/workflows/build_steps.sh build_mujoco_studio
+
+    - name: Build MuJoCo Tests
       working-directory: build
       env:
         CMAKE_BUILD_ARGS: ${{ matrix.cmake_build_args }}
@@ -152,6 +202,13 @@ jobs:
       env:
         TMPDIR: ${{ matrix.tmpdir }}
       run: bash ../.github/workflows/build_steps.sh copy_plugins_window
+
+    - name: Install MuJoCo Studio platform
+      if: ${{ contains(matrix.cmake_args, 'MUJOCO_BUILD_STUDIO:BOOL=ON') }}
+      shell: bash
+      env:
+        TMPDIR: ${{ matrix.tmpdir }}
+      run: bash ./.github/workflows/build_steps.sh install_studio_platform
 
     - name: Configure samples
       working-directory: sample
@@ -187,16 +244,17 @@ jobs:
       run: bash ../.github/workflows/build_steps.sh make_python_sdist
 
     - name: Build Python bindings
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ runner.os != 'Windows' || contains(matrix.label, 'clang') }}
       shell: bash
       working-directory: python/dist
       env:
         TMPDIR: ${{ matrix.tmpdir }}
+        EXTERNAL_DEPS_DIR: ${{ runner.temp }}/external_deps
         CMAKE_ARGS: ${{ matrix.cmake_args }}
       run: bash ../../.github/workflows/build_steps.sh build_python_bindings
 
     - name: Install Python bindings
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ runner.os != 'Windows' || contains(matrix.label, 'clang') }}
       shell: bash
       working-directory: python/dist
       env:
@@ -204,7 +262,7 @@ jobs:
       run: bash ../../.github/workflows/build_steps.sh install_python_bindings
 
     - name: Test Python bindings
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ runner.os != 'Windows' || contains(matrix.label, 'clang') }}
       shell: bash
       env:
         MUJOCO_GL: disable
@@ -213,85 +271,6 @@ jobs:
 
     # MJX (mujoco.mjx) is covered by the dedicated `mjx` job below; it is
     # compiler-independent so it does not need to run in every matrix job.
-
-    - name: Notify team chat
-      if: failure() && github.ref_name == 'main' && github.event_name == 'push'
-      uses: ./.github/actions/notify-chat
-      with:
-        service-account-key: ${{ secrets.CHAT_SERVICE_ACCOUNT_KEY }}
-        user-id-map: ${{ secrets.CHAT_USER_ID_MAP }}
-        space-id: "spaces/AAAAzcCLt1A"
-
-  # This job quickly determines if MuJoCo Studio is broken. It is the only place
-  # Filament is compiled in CI, so ccache here is what keeps the long pole short.
-  studio:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            label: "ubuntu-24.04-clang-18-studio"
-            cmake_args: >-
-              -G Ninja
-              -DCMAKE_C_COMPILER:STRING=clang-18
-              -DCMAKE_CXX_COMPILER:STRING=clang++-18
-              -DMUJOCO_HARDEN:BOOL=ON
-          # gcc canary: Filament is compiler-dependent and historically finicky on
-          # gcc, so keep one gcc Studio build even though the matrix no longer does.
-          - os: ubuntu-24.04
-            label: "ubuntu-24.04-gcc-14-studio"
-            cmake_args: >-
-              -G Ninja
-              -DCMAKE_C_COMPILER:STRING=gcc-14
-              -DCMAKE_CXX_COMPILER:STRING=g++-14
-              -DCMAKE_EXE_LINKER_FLAGS:STRING=-Wl,--no-as-needed
-          - os: windows-2025
-            label: "windows-2025-ninja-studio"
-            cmake_args: >-
-              -G Ninja
-              -DCMAKE_SYSTEM_VERSION=10.0.26100.0
-          - os: macos-15
-            label: "macos-15-arm64-studio"
-            cmake_args: >-
-              -G Ninja
-              -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-declarations"
-              -DMUJOCO_HARDEN:BOOL=ON
-
-    name: "${{ matrix.label }}"
-    runs-on: ${{ matrix.os }}
-
-    steps:
-    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      with:
-        persist-credentials: false
-
-    - name: Prepare Windows (setup MSVC)
-      if: ${{ runner.os == 'Windows' }}
-      uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-
-    - name: Prepare Linux
-      if: ${{ runner.os == 'Linux' }}
-      run: bash ./.github/workflows/build_steps.sh prepare_linux
-
-    # Key the cache on the Filament pin: hashing cmake/third_party_deps/filament.cmake
-    # captures BOTH the pinned commit hash and the FILAMENT_* build flags, so bumping
-    # either starts a fresh cache namespace instead of restoring stale artifacts.
-    # (Correctness does not depend on this: ccache is content-addressed on the full
-    # compiler invocation, so changing any build flag forces a recompile regardless.)
-    - name: Setup ccache
-      if: ${{ runner.os != 'Windows' }}
-      uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
-      with:
-        key: ${{ matrix.label }}-filament-${{ hashFiles('cmake/third_party_deps/filament.cmake') }}
-        restore-keys: ${{ matrix.label }}-filament-
-        max-size: "2.0G"
-
-    - name: Configure Studio
-      env:
-        CMAKE_ARGS: ${{ matrix.cmake_args }}
-      run: bash ./.github/workflows/build_steps.sh configure_studio
-
-    - name: Build Studio
-      run: bash ./.github/workflows/build_steps.sh build_studio
 
     - name: Notify team chat
       if: failure() && github.ref_name == 'main' && github.event_name == 'push'
@@ -331,16 +310,33 @@ jobs:
       uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
       with:
         key: ${{ env.label }}
-        max-size: "1.5G"
+        max-size: "250M"
+        save: ${{ github.ref_name == 'main' }}
 
-    # For convenience run multiple build_steps functions in a single step.
-    - name: Prepare, Build and Test WASM bindings
+    - name: Setup Emscripten
+      run: bash ./.github/workflows/build_steps.sh setup_emsdk
+
+    # Cache Emscripten's compiled sysroot libraries (e.g. multithreaded +
+    # exception-enabled libc/libc++/libgl/embind built on demand for Studio
+    # WASM). Keyed on the static Emscripten version so it occupies a single ~50MB
+    # slot without creating new cache entries per commit.
+    - name: Cache Emscripten sysroot
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: emsdk/upstream/emscripten/cache
+        key: emsdk-sysroot-4.0.10
+
+    - name: Build and Test WASM bindings
       env:
         CMAKE_ARGS: ${{ env.cmake_args }}
       run: |
         bash ./.github/workflows/build_steps.sh npm_ci
-        bash ./.github/workflows/build_steps.sh setup_emsdk
         bash ./.github/workflows/build_steps.sh build_test_wasm
+
+    - name: Build MuJoCo Studio WASM
+      env:
+        CMAKE_ARGS: ${{ env.cmake_args }}
+      run: bash ./.github/workflows/build_steps.sh build_studio_wasm
 
     - name: Notify team chat
       if: failure() && github.ref_name == 'main' && github.event_name == 'push'
@@ -376,7 +372,8 @@ jobs:
 
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
-        python-version: "3.11"
+        # Shared with the Bazel build (MODULE.bazel python.defaults).
+        python-version-file: .github/workflows/python-version
 
     - name: Install uv
       uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -391,9 +388,21 @@ jobs:
       uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
       with:
         key: ubuntu-24.04-clang-18-mjx
-        max-size: "1.0G"
+        max-size: "100M"
+        save: ${{ github.ref_name == 'main' }}
+
+    - name: Cache external dependencies
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ runner.temp }}/external_deps
+        key: external-deps-${{ runner.os == 'Windows' && 'windows' || 'posix' }}-${{ hashFiles('cmake/MujocoDependencies.cmake') }}
+        restore-keys: |
+          external-deps-${{ runner.os == 'Windows' && 'windows' || 'posix' }}-
 
     - name: Configure MuJoCo
+      env:
+        EXTERNAL_DEPS: "eigen3"
+        EXTERNAL_DEPS_DIR: ${{ runner.temp }}/external_deps
       run: bash ./.github/workflows/build_steps.sh configure_mujoco
 
     - name: Build MuJoCo
@@ -414,6 +423,8 @@ jobs:
 
     - name: Build Python bindings
       working-directory: python/dist
+      env:
+        EXTERNAL_DEPS_DIR: ${{ runner.temp }}/external_deps
       run: bash ../../.github/workflows/build_steps.sh build_python_bindings
 
     - name: Install Python bindings
@@ -431,6 +442,90 @@ jobs:
     - name: Test MJX
       working-directory: mjx
       run: bash ../.github/workflows/build_steps.sh test_mjx
+
+    - name: Notify team chat
+      if: failure() && github.ref_name == 'main' && github.event_name == 'push'
+      uses: ./.github/actions/notify-chat
+      with:
+        service-account-key: ${{ secrets.CHAT_SERVICE_ACCOUNT_KEY }}
+        user-id-map: ${{ secrets.CHAT_USER_ID_MAP }}
+        space-id: "spaces/AAAAzcCLt1A"
+
+
+  bazel:
+    needs: setup
+    strategy:
+      fail-fast: false
+      # bazel_version is passed to bazelisk as USE_BAZEL_VERSION. Empty means
+      # the version pinned in .bazelversion. PRs test only the pinned version.
+      # Pushes (postsubmits) also test 8.x, the oldest LTS allowed by
+      # bazel_compatibility in MODULE.bazel, and latest, which catches breakage
+      # from new Bazel releases early. See build_matrix.json.
+      matrix: ${{ fromJson(needs.setup.outputs.bazel_matrix) }}
+    name: "${{ matrix.label }}"
+    runs-on: ${{ matrix.os }}
+    # A new upstream Bazel release can break the "latest" job without any
+    # MuJoCo change, so report it without failing the workflow.
+    continue-on-error: ${{ matrix.bazel_version == 'latest' }}
+    steps:
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      with:
+        persist-credentials: false
+
+    - name: Prepare Linux
+      if: ${{ runner.os == 'Linux' }}
+      run: bash ./.github/workflows/build_steps.sh prepare_linux
+
+    - name: Setup Bazel
+      uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+      with:
+        bazelisk-cache: true
+        repository-cache: true
+        # Bazel 9 keeps unpacked external repos (the repo contents cache) inside
+        # the repository cache, which roughly doubles what is saved to the
+        # GitHub cache. Re-extracting them from the cached archives only takes
+        # seconds, so turn it off here. It is already off by default in Bazel 8.
+        bazelrc: common --repo_contents_cache=
+
+    # Bazel disk cache, only for jobs with disk_cache in build_matrix.json. Like
+    # ccache above, each push to main saves a new entry and every run restores
+    # the newest one. (setup-bazel's disk-cache only saves when the BUILD files
+    # change, so it goes stale.)
+    - name: Restore Bazel disk cache
+      if: ${{ matrix.disk_cache }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ~/.cache/bazel-disk
+        key: bazel-disk-${{ matrix.label }}-${{ github.sha }}
+        restore-keys: bazel-disk-${{ matrix.label }}-
+
+    - name: Enable Bazel disk cache
+      if: ${{ matrix.disk_cache }}
+      run: |
+        mkdir -p ~/.cache/bazel-disk
+        echo "build --disk_cache=${HOME}/.cache/bazel-disk" >> ~/.bazelrc
+        # Bazel refreshes the mtime of every disk cache entry it uses, so
+        # entries older than this marker after the build were not used.
+        touch "${RUNNER_TEMP}/bazel-disk-cache-start"
+
+    - name: Build and Test with Bazel
+      env:
+        USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
+      run: bash ./.github/workflows/build_steps.sh test_bazel
+
+    # Drop the entries this build didn't use before saving, so the cache only
+    # holds the current build's outputs instead of growing (and growing more
+    # stale) with every push.
+    - name: Prune Bazel disk cache
+      if: ${{ matrix.disk_cache && github.event_name == 'push' && github.ref_name == 'main' }}
+      run: find ~/.cache/bazel-disk -type f ! -newer "${RUNNER_TEMP}/bazel-disk-cache-start" -delete
+
+    - name: Save Bazel disk cache
+      if: ${{ matrix.disk_cache && github.event_name == 'push' && github.ref_name == 'main' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ~/.cache/bazel-disk
+        key: bazel-disk-${{ matrix.label }}-${{ github.sha }}
 
     - name: Notify team chat
       if: failure() && github.ref_name == 'main' && github.event_name == 'push'

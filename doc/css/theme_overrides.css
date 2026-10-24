@@ -124,24 +124,11 @@ body[data-theme="dark"] table.docutils:not(.mjcf-attributes) {
   display: none;
 }
 
-.multiccd-enabled.nativeccd-enabled:not(.margin-enabled) .multiccd-native {
+.multiccd-enabled.nativeccd-enabled .multiccd-native {
   display: inline;
 }
 
-.multiccd-enabled:not(.nativeccd-enabled) .multiccd-legacy,
-.multiccd-enabled.nativeccd-enabled.margin-enabled .multiccd-legacy {
-  display: inline;
-}
-
-.margin-show {
-  display: none;
-}
-
-.margin-enabled .margin-hide {
-  display: none;
-}
-
-.margin-enabled .margin-show {
+.multiccd-enabled:not(.nativeccd-enabled) .multiccd-legacy {
   display: inline;
 }
 
@@ -385,10 +372,10 @@ dt .at {
     padding: 0.5rem 1rem !important; /* Standardize body padding */
 }
 
-/* Align the title text perfectly with the body text */
+/* Align the title text perfectly with the body text. Block, not flex: a flex
+   container drops the space between text and inline markup such as links. */
 .admonition .admonition-title {
-    display: flex;
-    align-items: center;
+    display: block;
     margin-left: -0.25rem; /* Pulls the title slightly left to balance the icon */
     padding-bottom: 0.25rem;
 }

@@ -17,7 +17,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <string_view>
 
 #include <filament/Color.h>
 #include <filament/Material.h>
@@ -33,11 +32,6 @@
 #include "render/filament/support/filament_util.h"
 
 namespace mujoco {
-
-template <class T>
-static void Combine(uint64_t& seed, const T* v) {
-  seed ^= std::hash<T>()(*v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-}
 
 static void Combine(uint64_t& seed, const mjrfTexture* texture) {
   if (texture) {
@@ -124,7 +118,7 @@ static MaterialManager::MaterialKey BuildMaterialKey(
 
 MaterialManager::MaterialType MaterialManager::GetMaterialType(
     const mjrfMaterial& material, const Mesh* mesh) {
-  if (material.decor_ux) {
+  if (material.decor) {
     if (material.color_texture) {
       return ObjectManager::kUnlitUi;
     } else if (material.color[3] < 1.0f) {
@@ -133,7 +127,7 @@ MaterialManager::MaterialType MaterialManager::GetMaterialType(
       return ObjectManager::kDecor;
     }
   } else if (material.orm_texture) {
-    if (material.opacity_texture) {
+    if (material.opacity_texture || material.color[3] < 1.0f) {
       return ObjectManager::kPbrPackedTransparent;
     } else if (material.reflectance > 0) {
       return ObjectManager::kPbrPackedReflect;
@@ -141,15 +135,15 @@ MaterialManager::MaterialType MaterialManager::GetMaterialType(
       return ObjectManager::kPbrPacked;
     }
   } else if (material.metallic_texture) {
-    if (material.opacity_texture) {
-      return ObjectManager::kPbrPackedTransparent;
+    if (material.opacity_texture || material.color[3] < 1.0f) {
+      return ObjectManager::kPbrTransparent;
     } else if (material.reflectance > 0) {
       return ObjectManager::kPbrReflect;
     } else {
       return ObjectManager::kPbr;
     }
   } else if (material.roughness_texture) {
-    if (material.color[3] < 1.0f) {
+    if (material.opacity_texture || material.color[3] < 1.0f) {
       return ObjectManager::kPbrTransparent;
     } else if (material.reflectance > 0) {
       return ObjectManager::kPbrReflect;
@@ -322,14 +316,25 @@ void MaterialManager::UpdateMaterialInstance(
                            ReadMat4(material.reflection_view_proj));
   }
 
-  // All textures use the same default sampler.
+  // Use CLAMP_TO_EDGE for UI/ImGui textures so opposite borders do not bleed
+  // across UV 0/1 boundaries under bilinear magnification.
+  const auto wrap_mode = material.decor
+                             ? filament::TextureSampler::WrapMode::CLAMP_TO_EDGE
+                             : filament::TextureSampler::WrapMode::REPEAT;
+  // UI textures are drawn at their native size, and Dear ImGui rasterizes
+  // glyphs with horizontal oversampling (2 atlas texels per pixel), so a
+  // mipmapped minification filter would sample text from a half-resolution
+  // mip level. Sample them without mipmaps, like Dear ImGui's own backends.
+  const auto min_filter =
+      material.decor
+          ? filament::TextureSampler::MinFilter::LINEAR
+          : filament::TextureSampler::MinFilter::LINEAR_MIPMAP_LINEAR;
   filament::TextureSampler sampler;
-  sampler.setWrapModeR(filament::TextureSampler::WrapMode::REPEAT);
-  sampler.setWrapModeS(filament::TextureSampler::WrapMode::REPEAT);
-  sampler.setWrapModeT(filament::TextureSampler::WrapMode::REPEAT);
+  sampler.setWrapModeR(wrap_mode);
+  sampler.setWrapModeS(wrap_mode);
+  sampler.setWrapModeT(wrap_mode);
   sampler.setMagFilter(filament::TextureSampler::MagFilter::LINEAR);
-  sampler.setMinFilter(
-      filament::TextureSampler::MinFilter::LINEAR_MIPMAP_LINEAR);
+  sampler.setMinFilter(min_filter);
 
   auto TrySetTexture = [&](const char* name, const mjrfTexture* texture,
                            mjtTextureRole role) {

@@ -76,6 +76,9 @@ namespace Mujoco {
       }
 
       Configuration = mjcf.GetFloatAttribute("ref", 0.0f);
+      if (!MjSceneImportSettings.AnglesInDegrees) {
+        Configuration *= Mathf.Rad2Deg;
+      }
 
       Settings.FromMjcf(mjcf);
     }
@@ -91,7 +94,7 @@ namespace Mujoco {
         throw new ArgumentException("Lower range value can't be bigger than Higher");
       }
       mjcf.SetAttribute("range", MjEngineTool.MakeLocaleInvariant($"{RangeLower} {RangeUpper}"));
-      mjcf.SetAttribute("ref", $"{Configuration}");
+      mjcf.SetAttribute("ref", MjEngineTool.MakeLocaleInvariant($"{Configuration}"));
 
       return mjcf;
     }

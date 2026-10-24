@@ -27,9 +27,12 @@
         <attribute name="inertiafromgeom" type="keyword" valid_values="false true auto" default="auto"/>
         <attribute name="inertiagrouprange" type="array" array_type="int" array_size="2" default="0 5"/>
         <attribute name="saveinertial" type="keyword" valid_values="false true"/>
+        <attribute name="savecompiled" type="keyword" valid_values="false true" default="true"/>
+        <attribute name="savecanonical" type="keyword" valid_values="false true" default="true"/>
         <attribute name="assetdir" type="basepath" path_namespace="asset" conflict_allowed="true"/>
         <attribute name="alignfree" type="keyword" valid_values="false true"/>
         <attribute name="conflict" type="keyword" valid_values="warning merge error"/>
+        <attribute name="passthrough" type="keyword" valid_values="none textures"/>
       </attributes>
       <children>
         <element name="lengthrange">
@@ -261,6 +264,26 @@
                 <attribute name="inertia" type="keyword" valid_values="convex legacy exact shell" default="legacy"/>
               </attributes>
             </element>
+            <element name="texture">
+              <attributes>
+                <attribute name="type" type="keyword" valid_values="2d cube skybox" default="cube"/>
+                <attribute name="colorspace" type="keyword" valid_values="auto linear sRGB" default="auto"/>
+                <attribute name="gridsize" type="array" array_type="int" array_size="2" default="1 1"/>
+                <attribute name="gridlayout" type="string"/>
+                <attribute name="builtin" type="keyword" valid_values="none gradient checker flat"/>
+                <attribute name="rgb1" type="array" array_type="float" array_size="3" default="0.8 0.8 0.8"/>
+                <attribute name="rgb2" type="array" array_type="float" array_size="3" default="0.5 0.5 0.5"/>
+                <attribute name="mark" type="keyword" valid_values="none edge cross random"/>
+                <attribute name="markrgb" type="array" array_type="float" array_size="3"/>
+                <attribute name="random" type="float" default="0.01"/>
+                <attribute name="width" type="int"/>
+                <attribute name="height" type="int"/>
+                <attribute name="hflip" type="keyword" valid_values="false true"/>
+                <attribute name="vflip" type="keyword" valid_values="false true"/>
+                <attribute name="nchannel" type="int" default="3"/>
+                <attribute name="embed" type="keyword" valid_values="false true auto" default="auto"/>
+              </attributes>
+            </element>
             <element name="material">
               <attributes>
                 <attribute name="texture" type="reference" reference_namespace="texture"/>
@@ -464,9 +487,10 @@
                 <attribute name="armature" type="float"/>
                 <attribute name="cranklength" type="float"/>
                 <attribute name="actdim" type="int" default="-1"/>
-                <attribute name="input" type="keyword" valid_values="expmap quat"/>
+                <attribute name="input" type="string"/>
                 <attribute name="velrange" type="array" array_type="float" array_size="2"/>
                 <attribute name="ffrange" type="array" array_type="float" array_size="2"/>
+                <attribute name="inheritrange" type="float"/>
                 <attribute name="dyntype" type="keyword" valid_values="none integrator filter filterexact muscle dcmotor pid user" default="none"/>
                 <attribute name="gaintype" type="keyword" valid_values="fixed affine muscle dcmotor so3 pid user" default="fixed"/>
                 <attribute name="biastype" type="keyword" valid_values="none affine muscle dcmotor so3 user" default="none"/>
@@ -656,6 +680,26 @@
             <attribute name="scale" type="array" array_type="float" array_size="3" default="1 1 1"/>
             <attribute name="maxhullvert" type="int" default="-1"/>
             <attribute name="inertia" type="keyword" valid_values="convex legacy exact shell" default="legacy"/>
+          </attributes>
+        </element>
+        <element name="texture">
+          <attributes>
+            <attribute name="type" type="keyword" valid_values="2d cube skybox" default="cube"/>
+            <attribute name="colorspace" type="keyword" valid_values="auto linear sRGB" default="auto"/>
+            <attribute name="gridsize" type="array" array_type="int" array_size="2" default="1 1"/>
+            <attribute name="gridlayout" type="string"/>
+            <attribute name="builtin" type="keyword" valid_values="none gradient checker flat"/>
+            <attribute name="rgb1" type="array" array_type="float" array_size="3" default="0.8 0.8 0.8"/>
+            <attribute name="rgb2" type="array" array_type="float" array_size="3" default="0.5 0.5 0.5"/>
+            <attribute name="mark" type="keyword" valid_values="none edge cross random"/>
+            <attribute name="markrgb" type="array" array_type="float" array_size="3"/>
+            <attribute name="random" type="float" default="0.01"/>
+            <attribute name="width" type="int"/>
+            <attribute name="height" type="int"/>
+            <attribute name="hflip" type="keyword" valid_values="false true"/>
+            <attribute name="vflip" type="keyword" valid_values="false true"/>
+            <attribute name="nchannel" type="int" default="3"/>
+            <attribute name="embed" type="keyword" valid_values="false true auto" default="auto"/>
           </attributes>
         </element>
         <element name="material">
@@ -861,9 +905,10 @@
             <attribute name="armature" type="float"/>
             <attribute name="cranklength" type="float"/>
             <attribute name="actdim" type="int" default="-1"/>
-            <attribute name="input" type="keyword" valid_values="expmap quat"/>
+            <attribute name="input" type="string"/>
             <attribute name="velrange" type="array" array_type="float" array_size="2"/>
             <attribute name="ffrange" type="array" array_type="float" array_size="2"/>
+            <attribute name="inheritrange" type="float"/>
             <attribute name="dyntype" type="keyword" valid_values="none integrator filter filterexact muscle dcmotor pid user" default="none"/>
             <attribute name="gaintype" type="keyword" valid_values="fixed affine muscle dcmotor so3 pid user" default="fixed"/>
             <attribute name="biastype" type="keyword" valid_values="none affine muscle dcmotor so3 user" default="none"/>
@@ -1090,7 +1135,7 @@
             <attribute name="smoothnormal" type="keyword" valid_values="false true"/>
             <attribute name="maxhullvert" type="int" default="-1"/>
             <attribute name="inertia" type="keyword" valid_values="convex legacy exact shell" default="legacy"/>
-            <attribute name="builtin" type="keyword" valid_values="none sphere hemisphere cone supertorus supersphere wedge plate"/>
+            <attribute name="builtin" type="keyword" valid_values="none sphere hemisphere cone supertorus supersphere wedge plate grid box cylinder ellipsoid square disc"/>
             <attribute name="params" type="array" array_type="float"/>
             <attribute name="material" type="reference" reference_namespace="material"/>
           </attributes>
@@ -1149,6 +1194,7 @@
         <element name="texture" repeated="true">
           <attributes>
             <attribute name="name" type="identifier"/>
+            <attribute name="class" type="reference" reference_namespace="default"/>
             <attribute name="type" type="keyword" valid_values="2d cube skybox" default="cube"/>
             <attribute name="colorspace" type="keyword" valid_values="auto linear sRGB" default="auto"/>
             <attribute name="content_type" type="string"/>
@@ -1172,6 +1218,7 @@
             <attribute name="hflip" type="keyword" valid_values="false true"/>
             <attribute name="vflip" type="keyword" valid_values="false true"/>
             <attribute name="nchannel" type="int" default="3"/>
+            <attribute name="embed" type="keyword" valid_values="false true auto" default="auto"/>
           </attributes>
         </element>
         <element name="material" repeated="true">
@@ -1216,6 +1263,7 @@
             <attribute name="gravcomp" type="float"/>
             <attribute name="sleep" type="keyword" valid_values="auto never allowed init"/>
             <attribute name="simple" type="keyword" valid_values="false auto" default="auto"/>
+            <attribute name="fuse" type="keyword" valid_values="false auto" default="auto"/>
             <attribute name="user" type="array" array_type="float"/>
           </attributes>
           <children>
@@ -1413,7 +1461,7 @@
                 <attribute name="count" type="array" array_type="int" array_size="3"/>
                 <attribute name="offset" type="array" array_type="float" array_size="3"/>
                 <attribute name="vertex" type="array" array_type="float"/>
-                <attribute name="initial" type="string"/>
+                <attribute name="initial" type="keyword" valid_values="none free ball" default="ball"/>
                 <attribute name="curve" type="string"/>
                 <attribute name="size" type="array" array_type="float" array_size="3"/>
                 <attribute name="quat" type="array" array_type="float" array_size="4"/>
@@ -1514,6 +1562,7 @@
                 <attribute name="inertiabox" type="float"/>
                 <attribute name="scale" type="array" array_type="float" array_size="3"/>
                 <attribute name="file" type="file"/>
+                <attribute name="mesh" type="reference" reference_namespace="mesh"/>
                 <attribute name="point" type="array" array_type="float"/>
                 <attribute name="element" type="array" array_type="float"/>
                 <attribute name="texcoord" type="array" array_type="float"/>
@@ -1545,6 +1594,8 @@
                     <attribute name="damping" type="float"/>
                     <attribute name="thickness" type="float" default="-1"/>
                     <attribute name="elastic2d" type="keyword" valid_values="none bend stretch both"/>
+                    <attribute name="section" type="keyword" valid_values="circle box"/>
+                    <attribute name="sectionsize" type="array" array_type="float" array_size="2"/>
                   </attributes>
                 </element>
                 <element name="contact">
@@ -1559,7 +1610,6 @@
                     <attribute name="solimp" type="array" array_type="float" array_size="5" default="0.9 0.95 0.001 0.5 2"/>
                     <attribute name="margin" type="float"/>
                     <attribute name="gap" type="float"/>
-                    <attribute name="internal" type="keyword" valid_values="false true"/>
                     <attribute name="selfcollide" type="keyword" valid_values="none narrow bvh sap auto" default="auto"/>
                     <attribute name="activelayers" type="int" default="1"/>
                     <attribute name="passive" type="keyword" valid_values="false true"/>
@@ -1723,7 +1773,7 @@
             <attribute name="count" type="array" array_type="int" array_size="3"/>
             <attribute name="offset" type="array" array_type="float" array_size="3"/>
             <attribute name="vertex" type="array" array_type="float"/>
-            <attribute name="initial" type="string"/>
+            <attribute name="initial" type="keyword" valid_values="none free ball" default="ball"/>
             <attribute name="curve" type="string"/>
             <attribute name="size" type="array" array_type="float" array_size="3"/>
             <attribute name="quat" type="array" array_type="float" array_size="4"/>
@@ -1824,6 +1874,7 @@
             <attribute name="inertiabox" type="float"/>
             <attribute name="scale" type="array" array_type="float" array_size="3"/>
             <attribute name="file" type="file"/>
+            <attribute name="mesh" type="reference" reference_namespace="mesh"/>
             <attribute name="point" type="array" array_type="float"/>
             <attribute name="element" type="array" array_type="float"/>
             <attribute name="texcoord" type="array" array_type="float"/>
@@ -1855,6 +1906,8 @@
                 <attribute name="damping" type="float"/>
                 <attribute name="thickness" type="float" default="-1"/>
                 <attribute name="elastic2d" type="keyword" valid_values="none bend stretch both"/>
+                <attribute name="section" type="keyword" valid_values="circle box"/>
+                <attribute name="sectionsize" type="array" array_type="float" array_size="2"/>
               </attributes>
             </element>
             <element name="contact">
@@ -1869,7 +1922,6 @@
                 <attribute name="solimp" type="array" array_type="float" array_size="5" default="0.9 0.95 0.001 0.5 2"/>
                 <attribute name="margin" type="float"/>
                 <attribute name="gap" type="float"/>
-                <attribute name="internal" type="keyword" valid_values="false true"/>
                 <attribute name="selfcollide" type="keyword" valid_values="none narrow bvh sap auto" default="auto"/>
                 <attribute name="activelayers" type="int" default="1"/>
                 <attribute name="passive" type="keyword" valid_values="false true"/>
@@ -1935,7 +1987,6 @@
                 <attribute name="solimp" type="array" array_type="float" array_size="5" default="0.9 0.95 0.001 0.5 2"/>
                 <attribute name="margin" type="float"/>
                 <attribute name="gap" type="float"/>
-                <attribute name="internal" type="keyword" valid_values="false true"/>
                 <attribute name="selfcollide" type="keyword" valid_values="none narrow bvh sap auto" default="auto"/>
                 <attribute name="activelayers" type="int" default="1"/>
                 <attribute name="passive" type="keyword" valid_values="false true"/>
@@ -1954,6 +2005,8 @@
                 <attribute name="damping" type="float"/>
                 <attribute name="thickness" type="float" default="-1"/>
                 <attribute name="elastic2d" type="keyword" valid_values="none bend stretch both"/>
+                <attribute name="section" type="keyword" valid_values="circle box"/>
+                <attribute name="sectionsize" type="array" array_type="float" array_size="2"/>
               </attributes>
             </element>
           </children>
@@ -2019,7 +2072,7 @@
             <attribute name="class" type="reference" reference_namespace="default"/>
             <attribute name="group" type="int"/>
             <attribute name="limited" type="keyword" valid_values="false true auto" default="auto"/>
-            <attribute name="actuatorfrclimited" type="keyword" valid_values="false true auto"/>
+            <attribute name="actuatorfrclimited" type="keyword" valid_values="false true auto" default="auto"/>
             <attribute name="range" type="array" array_type="float" array_size="2"/>
             <attribute name="actuatorfrcrange" type="array" array_type="float" array_size="2"/>
             <attribute name="solreflimit" type="array" array_type="float" array_size="2" default="0.02 1"/>
@@ -2062,7 +2115,7 @@
             <attribute name="class" type="reference" reference_namespace="default"/>
             <attribute name="group" type="int"/>
             <attribute name="limited" type="keyword" valid_values="false true auto" default="auto"/>
-            <attribute name="actuatorfrclimited" type="keyword" valid_values="false true auto"/>
+            <attribute name="actuatorfrclimited" type="keyword" valid_values="false true auto" default="auto"/>
             <attribute name="range" type="array" array_type="float" array_size="2"/>
             <attribute name="actuatorfrcrange" type="array" array_type="float" array_size="2"/>
             <attribute name="solreflimit" type="array" array_type="float" array_size="2" default="0.02 1"/>
@@ -2208,9 +2261,10 @@
             <attribute name="refsite" type="reference" reference_namespace="site"/>
             <attribute name="body" type="reference" reference_namespace="body"/>
             <attribute name="actdim" type="int" default="-1"/>
-            <attribute name="input" type="keyword" valid_values="expmap quat"/>
+            <attribute name="input" type="string"/>
             <attribute name="velrange" type="array" array_type="float" array_size="2"/>
             <attribute name="ffrange" type="array" array_type="float" array_size="2"/>
+            <attribute name="inheritrange" type="float"/>
             <attribute name="dyntype" type="keyword" valid_values="none integrator filter filterexact muscle dcmotor pid user" default="none"/>
             <attribute name="gaintype" type="keyword" valid_values="fixed affine muscle dcmotor so3 pid user" default="fixed"/>
             <attribute name="biastype" type="keyword" valid_values="none affine muscle dcmotor so3 user" default="none"/>
@@ -3049,6 +3103,7 @@
             <attribute name="site" type="reference" reference_namespace="site" required="true"/>
             <attribute name="objtype" type="keyword" valid_values="body xbody geom site camera" required="true"/>
             <attribute name="objname" type="reference" reference_namespace="attrib:objtype" required="true"/>
+            <attribute name="enclosed" type="keyword" valid_values="false true" default="false"/>
           </attributes>
         </element>
         <element name="distance" repeated="true" namespace="sensor">

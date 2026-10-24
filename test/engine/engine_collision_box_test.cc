@@ -43,8 +43,10 @@ static const char* const kBad1FilePath =
 TEST_F(MjCollisionBoxTest, BadContacts) {
   for (const char* local_path : {kBad0FilePath, kBad1FilePath}) {
     const std::string xml_path = GetTestDataFilePath(local_path);
-    mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, 0, 0);
-    ASSERT_THAT(model, NotNull());
+    char error[1024];
+    mjModel* model =
+        mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+    ASSERT_THAT(model, NotNull()) << error;
     mjData* data = mj_makeData(model);
     mj_forward(model, data);
 
@@ -143,8 +145,9 @@ static const char* const kDuplicateFilePath =
 
 TEST_F(MjCollisionBoxTest, DuplicateContacts) {
   const std::string xml_path = GetTestDataFilePath(kDuplicateFilePath);
-  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, 0, 0);
-  ASSERT_THAT(model, NotNull());
+  char error[1024];
+  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+  ASSERT_THAT(model, NotNull()) << error;
   mjData* data = mj_makeData(model);
   mj_forward(model, data);
 
@@ -229,8 +232,9 @@ static const char* const kDeepFilePath =
 
 TEST_F(MjCollisionBoxTest, DeepPenetration) {
   const std::string xml_path = GetTestDataFilePath(kDeepFilePath);
-  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, 0, 0);
-  ASSERT_THAT(model, NotNull());
+  char error[1024];
+  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+  ASSERT_THAT(model, NotNull()) << error;
   mjData* data = mj_makeData(model);
   mj_forward(model, data);
 
@@ -825,6 +829,41 @@ TEST_F(MjCollisionBoxTest, CanonicalFaceAndEdgeAlignments) {
     EXPECT_NEAR(precon[i].dist, -0.002, MjTol(1e-7, 1e-5));
     EXPECT_NEAR(precon[i].normal[2], 1.0, MjTol(1e-7, 1e-5));
   }
+}
+
+TEST_F(MjCollisionBoxTest, CapsuleBoxLargeMarginDistance) {
+  constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <geom name="box" type="box" size="0.1 0.1 0.1"/>
+      <geom name="capsule" type="capsule" size="0.1 0.2" pos="0 0 3.5"/>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  mj_kinematics(model.get(), data.get());
+
+  mjtNum distmax = 5.0;
+  mjtNum fromto[6];
+
+  // Face-closest capsule-box pair separated by 3.1 (< distmax = 5.0)
+  mjtNum dist_face =
+      mj_geomDistance(model.get(), data.get(), 0, 1, distmax, fromto);
+  EXPECT_NEAR(dist_face, 3.1, MjTol(1e-12, 1e-5));
+  EXPECT_NEAR(fromto[2], 0.1, MjTol(1e-12, 1e-5));
+  EXPECT_NEAR(fromto[5], 3.2, MjTol(1e-12, 1e-5));
+
+  // Edge-closest capsule-box pair separated by 2.4*sqrt(2) - 0.1 (< distmax)
+  data->geom_xpos[3] = 2.5;
+  data->geom_xpos[4] = 2.5;
+  data->geom_xpos[5] = 0.0;
+  mjtNum expected_edge = 2.4 * std::sqrt(2.0) - 0.1;
+  mjtNum dist_edge =
+      mj_geomDistance(model.get(), data.get(), 0, 1, distmax, fromto);
+  EXPECT_NEAR(dist_edge, expected_edge, MjTol(1e-12, 1e-5));
 }
 
 }  // namespace

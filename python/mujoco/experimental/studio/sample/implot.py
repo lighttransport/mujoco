@@ -11,45 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Example to run studio in the native viewer with responsive ImPlot UI.
+r"""Viewer plugin that draws body-inspection plots using ImGui and ImPlot.
 
-This script runs a Studio viewer and adds an 'Inspect Body' window using ImGui
-and ImPlot bindings to visualize selected body data. The example demonstrates
-how responsive UI layout rules are easily implemented.
+Run with the Studio viewer::
 
-Provide a model file via the --model flag or positional argument to launch.
+  python -m mujoco.experimental.studio.viewer \
+      --model=model/humanoid/humanoid.xml \
+      --plugins=python/mujoco/experimental/studio/sample/implot.py
 """
 
 import math
-import os
-import sys
 
-from absl import app as _app
-from absl import flags as _flags
 import mujoco
-from mujoco.experimental.studio import launch_passive
 from mujoco.experimental.studio import messages
-from mujoco.experimental.studio import parser
-from mujoco.experimental.studio import step_control
+from mujoco.experimental.studio import plugin
 from mujoco.experimental.studio import viewer_app
-from mujoco.experimental.studio import viewer_protocol
 import numpy as np
 
 from mujoco.experimental.dear_imgui import dear_imgui as imgui
 from mujoco.experimental.implot import implot
-
-vp = viewer_protocol
-
-_MODEL = _flags.DEFINE_string('model', None, 'Path to model file.')
-_GFX = _flags.DEFINE_enum(
-    'gfx', None, vp.GFX_MODES, 'Graphics mode ("web" launches Web Viewer).'
-)
-_PORT = _flags.DEFINE_integer(
-    'port', 0, 'Web Viewer port (0 picks first free port >= 8080).'
-)
-_WIDTH = _flags.DEFINE_integer('width', 1200, 'Width of the output image.')
-_HEIGHT = _flags.DEFINE_integer('height', 800, 'Height of the output image')
-
 
 _N_HISTORY = 100
 
@@ -111,7 +91,7 @@ def _setup_angle_axis(plot_size: imgui.Vec2) -> None:
   )
 
 
-class BodyInspector:
+class BodyInspector(plugin.ViewerPlugin):
   """Handler that draws body-inspection plots using ImGui/ImPlot."""
 
   def __init__(self) -> None:
@@ -125,6 +105,14 @@ class BodyInspector:
     """Caches the ViewerApp reference on startup."""
     assert isinstance(event.viewer_app, viewer_app.ViewerApp)
     self._app = event.viewer_app
+
+  @messages.handler
+  def on_post_model(self, event: messages.PostModelEvent) -> None:
+    """Resets plotted history and body selection when the model changes."""
+    del event
+    self._centroid = [np.zeros(3) for _ in range(_N_HISTORY)]
+    self._euler = [np.zeros(3) for _ in range(_N_HISTORY)]
+    self._body_id = -1
 
   @messages.handler
   def inspect_body(self, _: messages.BuildGuiEvent) -> None:
@@ -211,45 +199,3 @@ class BodyInspector:
     else:
       self._centroid.append(np.zeros(3))
       self._euler.append(np.zeros(3))
-
-
-def main(argv: list[str]) -> None:
-  model_path = _MODEL.value or (
-      argv[1] if len(argv) > 1 and not argv[1].startswith('--') else None
-  )
-  if not model_path:
-    print('Usage: implot --model=<model_path.xml>')
-    sys.exit(1)
-
-  if (data := parser.parse(model_path)) is None:
-    print(f'Error loading model from {model_path!r}')
-    sys.exit(1)
-  model = data.model
-
-  title = os.path.basename(sys.argv[0])
-
-  config = viewer_protocol.ViewerConfig(
-      title=title,
-      width=_WIDTH.value,
-      height=_HEIGHT.value,
-      gfx=_GFX.value or '',
-      http_port=_PORT.value,
-  )
-
-  with launch_passive.launch_passive(
-      config,
-      viewer_plugins=[viewer_app.ViewerApp(), BodyInspector()],
-      sim_plugins=[step_control.StepControl()],
-  ) as handle:
-    handle.send_to_viewer(messages.ModelEvent(model=model))
-
-    try:
-      while handle.is_running():
-        model, data = handle.sync(model, data)
-    except KeyboardInterrupt:
-      # Ctrl+C is the documented way to quit; exit cleanly, no traceback.
-      print('\nShutting down.', flush=True)
-
-
-if __name__ == '__main__':
-  _app.run(main)

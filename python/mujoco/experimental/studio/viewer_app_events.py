@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Temporary event handling functions for ViewerApp."""
+"""Temporary input (e.g., keyboard, mouse) handling functions for ViewerApp."""
 
 # TODO(matijak): These free functions implement the keyboard and mouse event
 # handling for Studio. They are separated from the main ViewerApp class to
@@ -179,6 +179,46 @@ def handle_step_control_keyboard_events(
   return False
 
 
+def handle_sim_history_keyboard_events(
+    step_control: sim.StepControl,
+    ux_state: ux.UxState,
+) -> bool:
+  """Handles keyboard shortcuts for scrubbing the simulation history.
+
+  Left/Right load the previous/next recorded frame while paused; Right at the
+  head of the history requests a single step instead. Matches the C++ Studio
+  app.
+
+  Args:
+    step_control: The simulation step control object.
+    ux_state: The UX state holding the timeline history size and index.
+
+  Returns:
+    True if a key was handled, False otherwise.
+  """
+  if imgui.GetIO().WantCaptureKeyboard or ux_state.history_size <= 0:
+    return False
+
+  # Scrubbing only makes sense while paused: a running sim would immediately
+  # step away from the loaded frame.
+  if step_control.get_pause_state() != sim.PauseState.NORMAL_PAUSED:
+    return False
+
+  pressed = imgui.IsKeyChordPressed
+
+  if pressed(imgui.Key.LeftArrow):
+    ux_state.history_index -= 1
+    return True
+  elif pressed(imgui.Key.RightArrow):
+    if ux_state.history_index == 0:
+      step_control.request_single_step()
+    else:
+      ux_state.history_index += 1
+    return True
+
+  return False
+
+
 def handle_reset_keyboard_events(
     model: mujoco.MjModel, data: mujoco.MjData
 ) -> bool:
@@ -233,10 +273,13 @@ def handle_camera_select_keyboard_events(
 
 
 def handle_miscellaneous_keyboard_events(app: Any) -> bool:
-  """Handles miscellaneous keyboard shortcuts (e.g. F2 for Info, F3 for Profiler).
+  """Handles miscellaneous keyboard shortcuts for toggling panels and windows.
+
+  Tab/Shift+Tab toggle Options and Inspector panels.
+  F2/F3 the Info and Profiler windows.
 
   Args:
-    app: The viewer application instance with UI state flags.
+    app: The viewer application instance, whose config holds the UI state flags.
 
   Returns:
     True if a key was handled, False otherwise.
@@ -244,11 +287,18 @@ def handle_miscellaneous_keyboard_events(app: Any) -> bool:
   if imgui.GetIO().WantCaptureKeyboard:
     return False
 
-  if imgui.IsKeyChordPressed(imgui.Key.F2):
-    app.show_info = not app.show_info
+  # Shift+Tab has to be tested before Tab, else the plain chord consumes it.
+  if imgui.IsKeyChordPressed(int(imgui.Key.Tab) | int(imgui.Key.Shift)):
+    app.config.show_inspector = not app.config.show_inspector
+    return True
+  elif imgui.IsKeyChordPressed(imgui.Key.Tab):
+    app.config.show_options = not app.config.show_options
+    return True
+  elif imgui.IsKeyChordPressed(imgui.Key.F2):
+    app.config.show_info = not app.config.show_info
     return True
   elif imgui.IsKeyChordPressed(imgui.Key.F3):
-    app.show_profiler = not app.show_profiler
+    app.config.show_profiler = not app.config.show_profiler
     return True
 
   return False
@@ -442,6 +492,7 @@ def handle_camera_tracking_mouse_events(
         aspect_ratio,
         vis_options,
     )
+    camera.lookat[:] = picked.point
     if picked.body > 0 and io.KeyCtrl:
       # Switch camera to tracking mode and track the selected body.
       camera.type = int(mujoco.mjtCamera.mjCAMERA_TRACKING)

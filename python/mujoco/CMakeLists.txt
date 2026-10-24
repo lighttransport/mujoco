@@ -45,6 +45,9 @@ add_link_options(${CMDLINE_LINK_OPTIONS})
 
 if(MSVC)
   add_compile_options(/Gy /Gw /Oi)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(/MP)
+  endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-fdata-sections -ffunction-sections)
 endif()
@@ -99,7 +102,7 @@ if(NOT TARGET mujoco)
     if(MUJOCO_FRAMEWORK)
       message("MuJoCo framework is at ${MUJOCO_FRAMEWORK}/mujoco.framework")
       set(MUJOCO_LIBRARY
-          ${MUJOCO_FRAMEWORK}/mujoco.framework/Versions/A/libmujoco.3.13.1.dylib
+          ${MUJOCO_FRAMEWORK}/mujoco.framework/Versions/A/libmujoco.3.17.1.dylib
       )
       target_compile_options(mujoco INTERFACE -F${MUJOCO_FRAMEWORK})
       set(MUJOCO_INCLUDE "${MUJOCO_FRAMEWORK}/mujoco.framework/Versions/A/Headers")
@@ -108,7 +111,7 @@ if(NOT TARGET mujoco)
 
   if(NOT MUJOCO_FRAMEWORK)
     find_library(
-      MUJOCO_LIBRARY mujoco mujoco.3.13.1 HINTS ${MUJOCO_LIBRARY_DIR} REQUIRED
+      MUJOCO_LIBRARY mujoco mujoco.3.17.1 HINTS ${MUJOCO_LIBRARY_DIR} REQUIRED
     )
     find_path(MUJOCO_INCLUDE mujoco/mujoco.h HINTS ${MUJOCO_INCLUDE_DIR} REQUIRED)
     message("MuJoCo is at ${MUJOCO_LIBRARY}")
@@ -289,7 +292,7 @@ findorfetch(
   GIT_REPO
   https://gitlab.com/libeigen/eigen
   GIT_TAG
-  ea13a98decd497a8c5588fb5de71b57bcf10d864
+  b1f8b0c3b8db9c3711349144acf951226700ddb4
   TARGETS
   Eigen3::Eigen
   EXCLUDE_FROM_ALL
@@ -325,6 +328,17 @@ target_sources(mujoco_private_api_header INTERFACE private.h)
 set_target_properties(mujoco_private_api_header PROPERTIES PUBLIC_HEADER private.h)
 target_link_libraries(mujoco_private_api_header INTERFACE mujoco)
 
+# enum_traits.h, function_traits.h and specs.cc.inc are pre-generated into the
+# sdist by make_sdist.sh, so only the EXISTS branches below are taken by any
+# build we run: CI and Kokoro both build the wheel from an sdist.
+#
+# The else() branches are stale and are not known to work. The generators do
+# `from mujoco.introspect import ...`, which needs the *parent* of the mujoco
+# package on PYTHONPATH, not the package itself as set below; and importing
+# mujoco.introspect executes mujoco/__init__.py, which imports the native
+# _specs and _structs extensions that do not exist yet at codegen time. Making
+# these branches usable therefore needs more than a corrected PYTHONPATH --
+# see the TODO in .github/workflows/README.md.
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/enum_traits.h)
   add_library(enum_traits INTERFACE)
   target_sources(enum_traits INTERFACE enum_traits.h)
@@ -519,7 +533,47 @@ target_link_libraries(
           structs_header
 )
 
+mujoco_pybind11_module(_batch batch.cc)
+
 mujoco_pybind11_module(_rollout rollout.cc threadpool.cc)
+
+# The Filament rendering API binding. It needs the Filament C API library, the
+# Filament engine archives and the source-tree headers under
+# MUJOCO_INCLUDE/mujoco, all of which the Studio platform target carries in its
+# interface (includes, C++20, dependency archives); a Studio SDK is what makes
+# the binding buildable, so key on that target.
+if(TARGET mujoco::platform)
+  add_library(_render_filament_header INTERFACE)
+  target_sources(
+    _render_filament_header
+    INTERFACE render_filament.h
+  )
+  set_target_properties(_render_filament_header PROPERTIES PUBLIC_HEADER render_filament.h)
+  target_include_directories(_render_filament_header INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(
+    _render_filament_header
+    INTERFACE mujoco
+              structs_header
+              mujoco::platform
+  )
+
+  mujoco_pybind11_module(
+    _render_filament
+    render_filament.cc
+    render_filament_generated.cc.inc
+  )
+  target_link_libraries(
+    _render_filament
+    PRIVATE Eigen3::Eigen
+            mujoco
+            mujoco::platform
+            raw
+            structs_header
+            _render_filament_header
+  )
+endif()
+
+target_link_libraries(_batch PRIVATE functions_header mujoco raw)
 target_link_libraries(_rollout PRIVATE functions_header mujoco raw)
 
 mujoco_pybind11_module(
@@ -585,6 +639,7 @@ target_link_libraries(
 add_subdirectory(experimental/studio)
 
 set(LIBRARIES_FOR_WHEEL
+    "$<TARGET_FILE:_batch>"
     "$<TARGET_FILE:_callbacks>"
     "$<TARGET_FILE:_constants>"
     "$<TARGET_FILE:_enums>"
@@ -602,6 +657,9 @@ if(MUJOCO_STUDIO_TARGETS)
   foreach(target IN LISTS MUJOCO_STUDIO_TARGETS)
     list(APPEND LIBRARIES_FOR_WHEEL "$<TARGET_FILE:${target}>")
   endforeach()
+endif()
+if(TARGET _render_filament)
+  list(APPEND LIBRARIES_FOR_WHEEL "$<TARGET_FILE:_render_filament>")
 endif()
 
 if(APPLE)
@@ -627,6 +685,7 @@ if(MUJOCO_PYTHON_MAKE_WHEEL)
 
   add_dependencies(
     wheel
+    _batch
     _callbacks
     _constants
     _enums
@@ -641,6 +700,9 @@ if(MUJOCO_PYTHON_MAKE_WHEEL)
   )
   if(MUJOCO_STUDIO_TARGETS)
     add_dependencies(wheel ${MUJOCO_STUDIO_TARGETS})
+  endif()
+  if(TARGET _render_filament)
+    add_dependencies(wheel _render_filament)
   endif()
   if(APPLE)
     add_dependencies(wheel mjpython)

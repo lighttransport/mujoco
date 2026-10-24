@@ -82,6 +82,9 @@ class SceneView : public mjrfScene {
   // scene view accordingly.
   void Configure(const mjModel* model);
 
+  // Sets the number of multi-sample anti-aliasing samples; <= 1 disables MSAA.
+  void SetMsaa(int samples);
+
   static SceneView* downcast(mjrfScene* scene) {
     return static_cast<SceneView*>(scene);
   }
@@ -101,6 +104,9 @@ class SceneView : public mjrfScene {
 
   // Scene objects.
   std::unordered_set<Light*> lights_;
+  // The headlight belongs to the render request, not to the scene, so it is
+  // owned here and re-aimed at each request's camera.
+  std::unique_ptr<Light> headlight_;
   std::unordered_set<Renderable*> renderables_;
   filament::Skybox* skybox_ = nullptr;
 

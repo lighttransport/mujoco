@@ -49,7 +49,7 @@ class AssetRegistry {
 
   // Registers asset contents with the given filename.
   void RegisterAsset(std::string filename, std::string contents) {
-    std::filesystem::path(filename).filename().string();
+    filename = std::filesystem::path(filename).filename().string();
     assets_[filename] = std::move(contents);
   }
 
@@ -143,6 +143,7 @@ struct FetchEntry {
   std::string url;
   std::string data;
   std::string filename;
+  int refcount = 0;
 };
 
 // Cache for data fetched via HTTP/HTTPS. Stores downloaded (or pre-primed)
@@ -160,7 +161,11 @@ class FetchCache {
   // returned without touching the network. Returns 0 on fetch failure.
   int Fetch(const char* url) {
     if (auto it = entries_.find(url); it != entries_.end()) {
-      return static_cast<int>(it->second.data.size());
+      int size = static_cast<int>(it->second.data.size());
+      if (size > 0) {
+        ++it->second.refcount;
+      }
+      return size;
     }
     char* buf = nullptr;
     std::int32_t size = 0;
@@ -175,8 +180,12 @@ class FetchCache {
     if (filename_str) std::free(filename_str);
 
     FetchEntry entry{url, std::move(data), std::move(filename)};
-    return static_cast<int>(
-        entries_.emplace(url, std::move(entry)).first->second.data.size());
+    auto& stored = entries_.emplace(url, std::move(entry)).first->second;
+    int stored_size = static_cast<int>(stored.data.size());
+    if (stored_size > 0) {
+      ++stored.refcount;
+    }
+    return stored_size;
   }
 
   const FetchEntry* GetEntry(const char* url) const {
@@ -208,7 +217,15 @@ class FetchCache {
     return static_cast<int>(it->second.data.size());
   }
 
-  void Close(const char* url) { entries_.erase(url); }
+  void Close(const char* url) {
+    auto it = entries_.find(url);
+    if (it == entries_.end()) {
+      return;
+    }
+    if (--it->second.refcount <= 0) {
+      entries_.erase(it);
+    }
+  }
 
  private:
   std::unordered_map<std::string, FetchEntry> entries_;
@@ -249,7 +266,7 @@ void Init(const std::string& title, bool dark_theme) {
   const std::string ini_path = "";
 
   mjpResourceProvider resource_provider;
-  mjp_defaultResourceProvider(&resource_provider);
+  mjp_defaultProvider(&resource_provider);
 
   resource_provider.open = [](mjResource* resource) {
     AssetRegistry& r = AssetRegistry::Instance();
@@ -264,15 +281,15 @@ void Init(const std::string& title, bool dark_theme) {
   resource_provider.close = [](mjResource* resource) {};
 
   resource_provider.prefix = "font";
-  mjp_registerResourceProvider(&resource_provider);
+  mjp_registerProvider(&resource_provider);
   resource_provider.prefix = "filament";
-  mjp_registerResourceProvider(&resource_provider);
+  mjp_registerProvider(&resource_provider);
 
   // Register HTTP/HTTPS resource providers so that models loaded from URLs
   // can automatically fetch referenced assets (meshes, textures, etc.) over
   // the network.
   mjpResourceProvider http_provider;
-  mjp_defaultResourceProvider(&http_provider);
+  mjp_defaultProvider(&http_provider);
 
   http_provider.open = [](mjResource* resource) {
     int size = FetchCache::Instance().Fetch(resource->name);
@@ -330,15 +347,15 @@ void Init(const std::string& title, bool dark_theme) {
   };
 
   http_provider.prefix = "http";
-  mjp_registerResourceProvider(&http_provider);
+  mjp_registerProvider(&http_provider);
   http_provider.prefix = "https";
-  mjp_registerResourceProvider(&http_provider);
+  mjp_registerProvider(&http_provider);
 
   // Register a "github:" resource provider that resolves
   // github:org/repo/branch/path/to/file.xml to
   // https://raw.githubusercontent.com/org/repo/branch/path/to/file.xml
   mjpResourceProvider github_provider;
-  mjp_defaultResourceProvider(&github_provider);
+  mjp_defaultProvider(&github_provider);
 
   github_provider.open = [](mjResource* resource) {
     std::string name(resource->name);
@@ -387,7 +404,7 @@ void Init(const std::string& title, bool dark_theme) {
   };
 
   github_provider.prefix = "github";
-  mjp_registerResourceProvider(&github_provider);
+  mjp_registerProvider(&github_provider);
 
   mujoco::studio::App::Config config;
   config.width = width;
@@ -437,6 +454,14 @@ void LoadUrl(const std::string& url) {
   g_app->LoadModelFromFile(url);
 }
 
+// Javascript-facing function to select and load a keyframe by name or index.
+void LoadKeyframe(const std::string& keyframe) {
+  if (!g_app) {
+    return;
+  }
+  g_app->LoadKeyframe(keyframe);
+}
+
 // Javascript-facing function to render a single frame.
 void RenderFrame() {
   if (g_app) {
@@ -462,6 +487,7 @@ EMSCRIPTEN_BINDINGS(studio_bindings) {
   emscripten::function("init", &Init);
   emscripten::function("loadFile", &LoadFile);
   emscripten::function("loadUrl", &LoadUrl);
+  emscripten::function("loadKeyframe", &LoadKeyframe);
   emscripten::function("renderFrame", &RenderFrame);
   emscripten::function("deinit", &Deinit);
 }

@@ -28,8 +28,7 @@ extern "C" {
 MJAPI extern mjfCollision mjCOLLISIONFUNC[mjNGEOMTYPES][mjNGEOMTYPES];
 
 // return the maximum number of contacts that can be generated between two geoms
-// if has_margin is -1, then the margin is pulled from the model, otherwise if has_margin > 0
-// indicates that the geoms have a positive margin
+// has_margin is ignored
 MJAPI int mj_maxContact(const mjModel* m, int g1, int g2, int has_margin);
 
 // collision detection entry point
@@ -43,19 +42,6 @@ MJAPI int mj_collideOBB(const mjtNum aabb1[6], const mjtNum aabb2[6],
 
 // is element active (for collisions)
 MJAPI int mj_isElemActive(const mjModel* m, int f, int e);
-
-// test active element self-collisions with SAP
-void mj_collideFlexSAP(const mjModel* m, mjData* d, int f);
-
-// test a geom and an elem for collision, add to contact list
-void mj_collideGeomElem(const mjModel* m, mjData* d, int g, int f, int e);
-
-// test two elems for collision, add to contact list
-void mj_collideElems(const mjModel* m, mjData* d, int f1, int e1, int f2, int e2);
-
-// test element and vertex for collision, add to contact list
-void mj_collideElemVert(const mjModel* m, mjData* d, int f, int e, int v);
-
 
 #ifdef __cplusplus
 }

@@ -14,223 +14,92 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <filesystem>  // NOLINT(build/c++17)
 #include <memory>
 #include <string>
-#include <string_view>
 #include <vector>
 
-#include <fstream>
-#include <imgui.h>
-#include <implot.h>
 #include <mujoco/mujoco.h>
-#include <mujoco/experimental/studio/hal/filament_renderer.h>
 #include <mujoco/experimental/studio/hal/graphics_mode.h>
-#include <mujoco/experimental/studio/hal/window.h>
-#include <mujoco/experimental/studio/io/resources.h>
+#include <mujoco/experimental/studio/render/model_scene.h>
+#include <mujoco/experimental/studio/ux/imgui_widgets.h>
+#include <mujoco/render/filament/support/imgui_bridge.h>
+#include "render_filament.h"
 #include "structs.h"
 #include <pybind11/eval.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/pytypes.h>
 #include <pybind11/stl.h>
 
-static bool IsCuda() {
-#ifdef CUDA
-  return true;
-#else
-  return false;
-#endif
+using namespace mujoco;          // NOLINT(build/namespaces)
+using namespace mujoco::python;  // NOLINT(build/namespaces)
+using namespace mujoco::studio;  // NOLINT(build/namespaces)
+
+std::unique_ptr<ImguiBridge> MakeImguiBridge(mujoco::python::PyContext& ctx,
+                                             PyScene& scene) {
+  return std::make_unique<ImguiBridge>(ctx.get(), scene.get());
 }
 
-static bool IsCrd() {
-  const char* display = getenv("DISPLAY");
-  return display ? strcmp(display, ":20") == 0 : false;
+std::unique_ptr<ModelScene> MakeModelScene(mujoco::python::PyContext& ctx,
+                                           PyScene& scene,
+                                           MjModelWrapper& model) {
+  return std::make_unique<ModelScene>(ctx.get(), scene.get(), model.get(),
+                                      DrawTextAt);
 }
 
-static std::vector<std::byte> LoadAsset(std::string_view path) {
-  std::string_view subpath = path.substr(path.find(':') + 1);
-  static const std::string asset_dir = []() {
-    std::string module_dir =
-        mujoco::studio::GetModuleDir((void*)&LoadAsset);
-    return module_dir.empty()
-               ? "assets"
-               : (std::filesystem::path(module_dir) / "assets").string();
-  }();
-  std::string file_path = asset_dir + "/" + std::string(subpath);
-
-  std::ifstream file(file_path, std::ios::binary | std::ios::ate);
-  if (!file.is_open()) {
-    return {};
-  }
-  auto file_size = file.tellg();
-  file.seekg(0, std::ios::beg);
-  std::vector<std::byte> buffer(file_size);
-  if (!file.read(reinterpret_cast<char*>(buffer.data()), file_size)) {
-    return {};
-  }
-  return buffer;
+intptr_t UploadImage(ImguiBridge& imgui_bridge, intptr_t tex_id,
+                     const std::string img, int width, int height, int bpp) {
+  py::gil_scoped_release no_gil;
+  auto bytes = reinterpret_cast<const std::byte*>(img.data());
+  const size_t num_bytes = img.size();
+  return imgui_bridge.UploadImage(tex_id, {bytes, num_bytes}, width, height);
 }
 
-// Holds loaded resource data for the MuJoCo resource provider.
-struct ResourceData {
-  std::vector<std::byte> bytes;
-};
-
-class Viewer {
- public:
-  Viewer(const std::string& title, int width, int height,
-         std::string graphics_mode_str) {
-    py::gil_scoped_release no_gil;
-    // Register resource providers for font and filament assets.
-    mjpResourceProvider resource_provider;
-    mjp_defaultResourceProvider(&resource_provider);
-
-    resource_provider.open = [](mjResource* resource) {
-      auto* data = new ResourceData();
-      data->bytes = LoadAsset(resource->name);
-      if (data->bytes.empty()) {
-        delete data;
-        return 0;
-      }
-      resource->data = data;
-      return static_cast<int>(data->bytes.size());
-    };
-    resource_provider.read = [](mjResource* resource, const void** buffer) {
-      auto* data = static_cast<ResourceData*>(resource->data);
-      *buffer = data->bytes.data();
-      return static_cast<int>(data->bytes.size());
-    };
-    resource_provider.close = [](mjResource* resource) {
-      delete static_cast<ResourceData*>(resource->data);
-      resource->data = nullptr;
-    };
-    resource_provider.prefix = "font";
-    mjp_registerResourceProvider(&resource_provider);
-    resource_provider.prefix = "filament";
-    mjp_registerResourceProvider(&resource_provider);
-
-    mujoco::studio::Window::Config config;
-    using GraphicsMode = mujoco::studio::GraphicsMode;
-    config.gfx_mode = mujoco::studio::GraphicsModeFromString(
-        graphics_mode_str, GraphicsMode::FilamentOpenGl);
-    window_ = std::make_unique<mujoco::studio::Window>("PyStudio " + title,
-                                                         width, height, config);
-    ImPlot::CreateContext();
-
-    renderer_ = std::make_unique<mujoco::studio::FilamentRenderer>(
-        window_->GetNativeWindowHandle(), config.gfx_mode);
-  }
-
-  void InitRenderer(const mujoco::python::MjModelWrapper& model) {
-    py::gil_scoped_release no_gil;
-    renderer_->Init(model.get());
-  }
-
-  bool NewFrame() {
-    py::gil_scoped_release no_gil;
-    const mujoco::studio::Window::Status status = window_->NewFrame();
-    return status == mujoco::studio::Window::Status::kRunning;
-  }
-
-  intptr_t UploadImage(intptr_t tex_id, const std::string img, int width,
-                       int height, int bpp) {
-    py::gil_scoped_release no_gil;
-    return renderer_->UploadImage(tex_id, (const std::byte*)img.data(), width,
-                                  height, bpp);
-  }
-
-  int RenderToTexture(const mujoco::python::MjModelWrapper& model,
-                      mujoco::python::MjDataWrapper& data,
-                      mujoco::python::MjvCameraWrapper& cam, int width,
-                      int height, int tex_id) {
-    py::gil_scoped_release no_gil;
-    const int bytes_per_pixel = 3;
-    std::vector<std::byte> bytes(width * height * bytes_per_pixel);
-    renderer_->RenderToTexture(model.get(), data.get(), cam.get(), width,
-                               height, bytes.data());
-    return renderer_->UploadImage(tex_id, bytes.data(), width, height,
-                                  bytes_per_pixel);
-  }
-
-  std::string GetDropFile() { return window_->GetDropFile(); }
-
-  void Present(
-      const mujoco::python::MjModelWrapper& model,
-      mujoco::python::MjDataWrapper& data,
-      mujoco::python::MjvPerturbWrapper& perturb,
-      mujoco::python::MjvCameraWrapper& camera,
-      mujoco::python::MjvOptionWrapper& vis_options,
-      const std::vector<uint8_t>& render_flags,
-      const std::vector<mujoco::python::MjvGeomWrapper>& extra_geoms = {}) {
-    std::vector<mjvGeom> geoms;
-    geoms.reserve(extra_geoms.size());
-    for (const auto& geom_wrapper : extra_geoms) {
-      if (geom_wrapper.get()) {
-        geoms.push_back(*geom_wrapper.get());
-      }
+void SyncModelScene(
+    ModelScene& model_scene, int width, int height,
+    const mujoco::python::MjModelWrapper& model,
+    mujoco::python::MjDataWrapper& data,
+    mujoco::python::MjvPerturbWrapper& perturb,
+    mujoco::python::MjvCameraWrapper& camera,
+    mujoco::python::MjvOptionWrapper& vis_options,
+    const std::vector<mujoco::python::MjvGeomWrapper>& extra_geoms) {
+  std::vector<mjvGeom> geoms;
+  geoms.reserve(extra_geoms.size());
+  for (const auto& geom_wrapper : extra_geoms) {
+    if (geom_wrapper.get()) {
+      geoms.push_back(*geom_wrapper.get());
     }
-
-    py::gil_scoped_release no_gil;
-
-    const float width = window_->GetWidth();
-    const float height = window_->GetHeight();
-    const float scale = window_->GetScale();
-
-    if (mujoco::studio::IsHeadless(window_->GetGraphicsMode())) {
-      pixels_.resize(width * height * 3);
-    } else {
-      pixels_.clear();
-    }
-
-    // Update render flags before rendering.
-    mjtByte* flags = renderer_->GetRenderFlags();
-    for (size_t i = 0; i < mjNRNDFLAG && i < render_flags.size(); ++i) {
-      flags[i] = render_flags[i];
-    }
-
-    renderer_->Render(model.get(), data.get(), perturb.get(), camera.get(),
-                      vis_options.get(), width * scale, height * scale, pixels_,
-                      geoms);
-
-    window_->EndFrame();
-    window_->Present(pixels_);
   }
 
-  intptr_t GetImGuiContext() {
-    return reinterpret_cast<intptr_t>(ImGui::GetCurrentContext());
-  }
+  py::gil_scoped_release no_gil;
+  model_scene.Sync(model.get(), data.get(), {0, 0, width, height},
+                   vis_options.get(), perturb.get(), camera.get(), geoms);
+}
 
-  // See ux.set_implot_context: extension modules each hold their own copy of
-  // the ImPlot globals, so the context pointer must be shared explicitly.
-  intptr_t GetImPlotContext() {
-    return reinterpret_cast<intptr_t>(ImPlot::GetCurrentContext());
-  }
 
- private:
-  std::unique_ptr<mujoco::studio::Window> window_;
-  std::unique_ptr<mujoco::studio::Renderer> renderer_;
-  std::vector<std::byte> pixels_;
-};
+bool RenderToPixels(int gfx_mode) {
+  return IsHeadless(
+    static_cast<mujoco::studio::GraphicsMode>(gfx_mode));
+}
 
 PYBIND11_MODULE(native_viewer_cc, m, pybind11::mod_gil_not_used()) {
   pybind11::module_::import("mujoco._structs");
-  pybind11::class_<Viewer>(m, "Viewer")
-      .def(pybind11::init<const std::string&, int, int, const std::string&>())
-      .def("InitRenderer", &Viewer::InitRenderer)
-      .def("NewFrame", &Viewer::NewFrame)
-      .def("Present", &Viewer::Present, pybind11::arg("model"),
-           pybind11::arg("data"), pybind11::arg("perturb"),
-           pybind11::arg("camera"), pybind11::arg("vis_options"),
-           pybind11::arg("render_flags"),
-           pybind11::arg("extra_geoms") =
-               std::vector<mujoco::python::MjvGeomWrapper>())
-      .def("UploadImage", &Viewer::UploadImage)
-      .def("RenderToTexture", &Viewer::RenderToTexture)
-      .def("GetDropFile", &Viewer::GetDropFile)
-      .def("GetImGuiContext", &Viewer::GetImGuiContext)
-      .def("GetImPlotContext", &Viewer::GetImPlotContext);
-  m.def("IsCrd", &IsCrd);
-  m.def("IsCuda", &IsCuda);
+  {
+    py::class_<ImguiBridge> cls(m, "ImguiBridge", py::module_local());
+    cls.def(py::init(&MakeImguiBridge), py::arg("ctx"), py::arg("scene"),
+            py::keep_alive<1, 2>(), py::keep_alive<1, 3>());
+    cls.def("update", &ImguiBridge::Update);
+    cls.def("upload_image", &UploadImage, py::arg("tex_id"), py::arg("img"),
+            py::arg("width"), py::arg("height"), py::arg("bpp"));
+  }
+  {
+    py::class_<ModelScene> cls(m, "ModelScene", py::module_local());
+    cls.def(py::init(&MakeModelScene), py::arg("ctx"), py::arg("scene"),
+            py::arg("model"), py::keep_alive<1, 2>(), py::keep_alive<1, 3>(),
+            py::keep_alive<1, 4>());
+    cls.def("sync", &SyncModelScene, py::arg("width"), py::arg("height"),
+            py::arg("model"), py::arg("data"), py::arg("perturb"),
+            py::arg("camera"), py::arg("vis_options"), py::arg("extra_geoms"));
+    cls.def("get_headlight_intensity", &ModelScene::GetHeadlightIntensity);
+  }
+  m.def("render_to_pixels", &RenderToPixels);
 }

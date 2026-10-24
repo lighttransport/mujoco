@@ -14,12 +14,101 @@
 # ==============================================================================
 """Class for coordinating the rendering of scenes to render targets."""
 
+from collections.abc import Buffer
 import dataclasses
-from typing import Any
+from typing import Any, Protocol
 
 import mujoco
-from mujoco import _render_filament as mjrf
+from mujoco import mjrf
 import numpy as np
+
+
+class SupportsDLPack(Protocol):
+  """Protocol for objects supporting the DLPack tensor exchange protocol."""
+
+  def __dlpack__(self, /, *, stream: Any = None) -> Any:
+    ...
+
+  def __dlpack_device__(self, /) -> tuple[int, int]:
+    ...
+
+
+BufferType = Buffer | SupportsDLPack
+
+
+def _extract_buffer(buffer: BufferType) -> Buffer:
+  """Extracts a writable CPU buffer from a Buffer or DLPack object."""
+  if isinstance(buffer, Buffer):
+    return buffer
+  return np.from_dlpack(buffer, copy=False)
+
+
+def _format_info(pixel_format: mjrf.PixelFormat) -> tuple[int, np.dtype]:
+  match pixel_format:
+    case mjrf.PixelFormat.PIXEL_FORMAT_R8:
+      return 1, np.dtype(np.uint8)
+    case mjrf.PixelFormat.PIXEL_FORMAT_RGB8:
+      return 3, np.dtype(np.uint8)
+    case mjrf.PixelFormat.PIXEL_FORMAT_RGBA8:
+      return 4, np.dtype(np.uint8)
+    case mjrf.PixelFormat.PIXEL_FORMAT_R32F:
+      return 1, np.dtype(np.float32)
+    case mjrf.PixelFormat.PIXEL_FORMAT_DEPTH32F:
+      return 1, np.dtype(np.float32)
+    case _:
+      raise ValueError(f"Unsupported pixel format: {pixel_format}")
+
+
+def _validate_buffer(
+    raw_buffer: Buffer,
+    pixel_format: mjrf.PixelFormat,
+    name: str,
+) -> tuple[int, int]:
+  """Validates raw_buffer shape and dtype, returning (width, height)."""
+  channels, expected_dtype = _format_info(pixel_format)
+  mv = memoryview(raw_buffer)
+  shape = mv.shape
+  if channels == 1:
+    valid_shape = shape is not None and (
+        len(shape) == 2 or (len(shape) == 3 and shape[2] == 1)
+    )
+    expected_shape = "(H, W) or (H, W, 1)"
+  else:
+    valid_shape = shape is not None and len(shape) == 3 and shape[2] == channels
+    expected_shape = f"(H, W, {channels})"
+  if shape is None or not valid_shape:
+    raise ValueError(
+        f"Buffer shape {shape} does not match expected shape"
+        f" {expected_shape} for target '{name}'"
+    )
+  height, width = shape[0], shape[1]
+  if width <= 0 or height <= 0:
+    raise ValueError(
+        f"Buffer dimensions must be positive, got shape {shape} for target"
+        f" '{name}'"
+    )
+  if np.dtype(mv.format) != expected_dtype:
+    raise ValueError(
+        f"Buffer dtype {np.dtype(mv.format)} does not match expected dtype"
+        f" {expected_dtype} for target '{name}'"
+    )
+  return width, height
+
+
+@dataclasses.dataclass
+class View:
+  """A representation of an mjrf.RenderRequest that works with the Renderer."""
+  scene: str
+  target: str
+  viewport: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
+  camera: mjrf.Camera | mujoco.MjvGLCamera | None = None
+  draw_mode: mjrf.DrawMode = mjrf.DrawMode.DRAW_MODE_DEFAULT
+  post_processing: bool = True
+  reflections: bool = True
+  shadows: bool = True
+  headlight: bool = False
+  headlight_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
+  headlight_intensity: float = 0.0
 
 
 class Renderer:
@@ -47,10 +136,13 @@ class Renderer:
   def __init__(self, ctx: mjrf.Context):
     self._ctx = ctx
     self._scenes: dict[str, mjrf.Scene] = {}
-    self._targets: dict[str, mjrf.RenderTarget] = {}
-    self._views: dict[str, Renderer._View] = {}
     self._reads: dict[str, Renderer._Read] = {}
     self._ctx.set_clear_color([0.0, 0.0, 0.0])
+
+  @property
+  def context(self) -> mjrf.Context:
+    """Returns the underlying mjrf.Context."""
+    return self._ctx
 
   def scene(self, name: str) -> mjrf.Scene:
     """Returns the scene with the given name, creating it if needed."""
@@ -61,196 +153,82 @@ class Renderer:
   def target(
       self,
       name: str,
-      size: tuple[int, int],
+      buffer: BufferType,
       pixel_format=mjrf.PixelFormat.PIXEL_FORMAT_RGB8,
   ):
-    """Defines a render target with the given name and size/dimensions."""
-    match pixel_format:
-      case mjrf.PixelFormat.PIXEL_FORMAT_R8:
-        pixel_size = 1
-      case mjrf.PixelFormat.PIXEL_FORMAT_RGB8:
-        pixel_size = 3
-      case mjrf.PixelFormat.PIXEL_FORMAT_RGBA8:
-        pixel_size = 4
-      case mjrf.PixelFormat.PIXEL_FORMAT_R32F:
-        pixel_size = 4
-      case mjrf.PixelFormat.PIXEL_FORMAT_DEPTH32F:
-        pixel_size = 4
-      case _:
-        raise ValueError(f"Unsupported pixel format: {pixel_format}")
-    num_bytes = size[0] * size[1] * pixel_size
+    """Defines a render target with the given name and destination buffer."""
+    raw_buffer = _extract_buffer(buffer)
+    size = _validate_buffer(raw_buffer, pixel_format, name)
 
-    # Each target has a 1:1 association with a _Read object.
-    if name not in self._targets:
+    if name not in self._reads:
       target = self._ctx.create_render_target(
           mjrf.RenderTargetConfig(
               color_format=pixel_format,
           )
       )
-      self._targets[name] = target
-
-      r = self._Read(
+      read = self._Read(
           size=size,
+          target=target,
           format=pixel_format,
-          request=mjrf.ReadPixelsRequest(),
+          request=mjrf.ReadRequest(target=target),
+          buffer=(buffer, raw_buffer),
       )
-      r.request.target = target
-      r.request.alloc(num_bytes)
-      self._reads[name] = r
+      read.request.set_buffer(raw_buffer)
+      self._reads[name] = read
     else:
-      r = self._reads[name]
-      if r.format != pixel_format:
+      read = self._reads[name]
+      if read.format != pixel_format:
         raise ValueError(
             f"Target {name} already exists with a different pixel format."
         )
+      read.request.set_buffer(raw_buffer)
+      read.buffer = (buffer, raw_buffer)
 
-    target = self._targets[name]
-    if size[0] != 0 and size[1] != 0:
-      target.resize(size[0], size[1])
-      r.size = size
-      r.request.alloc(num_bytes)
-    return target
+    read.size = size
+    read.target.resize(size[0], size[1])
+    return read.target
 
-  def view(
-      self,
-      name: str,
-      *,
-      scene: str,
-      target: str,
-      camera: mjrf.Camera | mujoco.MjvGLCamera = mjrf.Camera(),
-      viewport: tuple[float, float, float, float] | None = None,
-      draw_mode: mjrf.DrawMode = mjrf.DrawMode.DRAW_MODE_DEFAULT,
-  ):
-    """Associates a scene, camera, viewport, and target as a rendering operation."""
-    self._views[name] = self._View(
-        scene=scene,
-        target=target,
-        viewport=viewport or (0.0, 0.0, 1.0, 1.0),
-        request=mjrf.RenderRequest(
-            camera=self._to_mjrf_camera(camera),
-            draw_mode=draw_mode,
-        ),
-    )
-
-  def update_camera(
-      self,
-      name: str,
-      camera: mjrf.Camera | mujoco.MjvGLCamera,
-  ):
-    """Updates the camera for the given view."""
-    if name not in self._views:
-      raise ValueError(f"View not found: {name}")
-    self._views[name].request.camera = self._to_mjrf_camera(camera)
-
-  def render(self):
+  def render(self, views: list[View]):
     """Renders all active views."""
     requests: list[mjrf.RenderRequest] = []
-    for view in self._views.values():
+    reads: dict[str, mjrf.ReadRequest] = {}
+    for view in views:
       read = self._reads.get(view.target, None)
       if read is None:
         raise ValueError(f"Target not found: {view.target}")
+      reads[view.target] = read.request
 
       scene = self._scenes.get(view.scene, None)
       if scene is None:
         raise ValueError(f"Scene not found: {view.scene}")
 
-      view.request.scene = scene
-      view.request.target = read.request.target
-      view.request.viewport.left = int(view.viewport[0] * read.size[0])
-      view.request.viewport.bottom = int(view.viewport[1] * read.size[1])
-      view.request.viewport.width = int(view.viewport[2] * read.size[0])
-      view.request.viewport.height = int(view.viewport[3] * read.size[1])
-      requests.append(view.request)
+      req = mjrf.RenderRequest()
+      req.scene = scene
+      req.target = read.request.target
+      req.camera = self._to_mjrf_camera(view.camera)
+      req.viewport.left = int(view.viewport[0] * read.size[0])
+      req.viewport.bottom = int(view.viewport[1] * read.size[1])
+      req.viewport.width = int(view.viewport[2] * read.size[0])
+      req.viewport.height = int(view.viewport[3] * read.size[1])
+      req.draw_mode = view.draw_mode
+      req.post_processing = view.post_processing
+      req.reflections = view.reflections
+      req.shadows = view.shadows
+      req.headlight = view.headlight
+      req.headlight_color = view.headlight_color
+      req.headlight_intensity = view.headlight_intensity
+      requests.append(req)
 
-    reads = [read.request for read in self._reads.values()]
-    frame = self._ctx.render(requests, reads)
+    frame = self._ctx.render(requests, reads.values())
     self._ctx.wait_for_frame(frame)
-
-  @dataclasses.dataclass
-  class ImageResult:
-    """A rendered image."""
-
-    width: int
-    height: int
-    format: mjrf.PixelFormat
-    pixels: bytes
-
-    def __array_interface__(self) -> dict[str, Any]:
-      return {
-          "version": 3,
-          "data": self.pixels,
-          "shape": self.shape,
-          "typestr": np.dtype(self.dtype).str,
-      }
-
-    def __array__(self, dtype=None, copy=None) -> np.ndarray:
-      """Returns the image as a NumPy array."""
-      req_dtype = np.dtype(dtype) if dtype is not None else self.dtype
-      if req_dtype != self.dtype:
-        raise ValueError(
-            f"Unsupported dtype: {req_dtype}. Must be {self.dtype}."
-        )
-
-      return np.frombuffer(
-          self.pixels,
-          dtype=self.dtype,
-      ).reshape(self.shape)
-
-    @property
-    def channels(self) -> int:
-      """Returns the number of channels in the image."""
-      match self.format:
-        case mjrf.PixelFormat.PIXEL_FORMAT_R8:
-          return 1
-        case mjrf.PixelFormat.PIXEL_FORMAT_RGB8:
-          return 3
-        case mjrf.PixelFormat.PIXEL_FORMAT_RGBA8:
-          return 4
-        case mjrf.PixelFormat.PIXEL_FORMAT_R32F:
-          return 1
-        case mjrf.PixelFormat.PIXEL_FORMAT_DEPTH32F:
-          return 1
-        case _:
-          raise ValueError(f"Unsupported pixel format: {self.format}")
-
-    @property
-    def dtype(self) -> np.dtype:
-      """Returns the NumPy dtype of the image."""
-      match self.format:
-        case mjrf.PixelFormat.PIXEL_FORMAT_R8:
-          return np.dtype(np.uint8)
-        case mjrf.PixelFormat.PIXEL_FORMAT_RGB8:
-          return np.dtype(np.uint8)
-        case mjrf.PixelFormat.PIXEL_FORMAT_RGBA8:
-          return np.dtype(np.uint8)
-        case mjrf.PixelFormat.PIXEL_FORMAT_R32F:
-          return np.dtype(np.float32)
-        case mjrf.PixelFormat.PIXEL_FORMAT_DEPTH32F:
-          return np.dtype(np.float32)
-        case _:
-          raise ValueError(f"Unsupported pixel format: {self.format}")
-
-    @property
-    def shape(self) -> tuple[int, int, int]:
-      """Returns the shape of the image."""
-      return (self.height, self.width, self.channels)
-
-  def get_image(self, name: str) -> ImageResult:
-    """Returns the most recently rendered pixels for the given render target."""
-    read = self._reads[name]
-    pixels = read.request.buffer()
-    return self.ImageResult(
-        width=read.size[0],
-        height=read.size[1],
-        format=read.format,
-        pixels=pixels,
-    )
 
   def _to_mjrf_camera(
       self,
-      camera: mjrf.Camera | mujoco.MjvGLCamera,
+      camera: mjrf.Camera | mujoco.MjvGLCamera | None,
   ) -> mjrf.Camera:
     """Converts a MjvGLCamera to an mjrf.Camera."""
+    if camera is None:
+      return mjrf.Camera()
     if isinstance(camera, mujoco.MjvGLCamera):
       # In C, mjrCamera is a type alias for mjvGLCamera. However, they are
       # bound as distinct types in Python, so we convert from MjvGLCamera to
@@ -267,16 +245,10 @@ class Renderer:
     return camera
 
   @dataclasses.dataclass
-  class _View:
-    """Internal wrapper around mjrf.RenderRequest."""
-    scene: str
-    target: str
-    viewport: tuple[float, float, float, float]
-    request: mjrf.RenderRequest
-
-  @dataclasses.dataclass
   class _Read:
-    """Internal wrapper around mjrf.ReadPixelsRequest."""
+    """Internal wrapper around mjrf.ReadRequest."""
     size: tuple[int, int]
+    target: mjrf.RenderTarget
     format: mjrf.PixelFormat
-    request: mjrf.ReadPixelsRequest
+    request: mjrf.ReadRequest
+    buffer: tuple[BufferType, Buffer]

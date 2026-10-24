@@ -86,6 +86,7 @@ class mjXReader : public mjXBase {
   void OneFlex(tinyxml2::XMLElement* elem, mjsFlex* pflex);
   void OneMesh(tinyxml2::XMLElement* elem, mjsMesh* pmesh, const mjVFS* vfs);
   void OneSkin(tinyxml2::XMLElement* elem, mjsSkin* pskin, const mjVFS* vfs);
+  void OneTexture(tinyxml2::XMLElement* elem, mjsTexture* ptexture, const mjVFS* vfs);
   void OneMaterial(tinyxml2::XMLElement* elem, mjsMaterial* pmaterial);
   void OneJoint(tinyxml2::XMLElement* elem, mjsJoint* pjoint);
   void OneGeom(tinyxml2::XMLElement* elem, mjsGeom* pgeom);
@@ -95,7 +96,7 @@ class mjXReader : public mjXBase {
   void OnePair(tinyxml2::XMLElement* elem, mjsPair* ppair);
   void OneEquality(tinyxml2::XMLElement* elem, mjsEquality* pequality);
   void OneTendon(tinyxml2::XMLElement* elem, mjsTendon* ptendon);
-  void OneActuator(tinyxml2::XMLElement* elem, mjsActuator* pactuator);
+  void OneActuator(tinyxml2::XMLElement* elem, mjsActuator* pactuator, const mjsDefault* def);
   void OneComposite(tinyxml2::XMLElement* elem,
                     mjsBody*              pbody,
                     mjsFrame*             pframe,

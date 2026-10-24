@@ -16,6 +16,7 @@
 
 #include <Python.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <ios>
@@ -73,6 +74,26 @@ constexpr auto XArrayShapeImpl(const std::string_view dim1_str) {
   }
 }
 
+// Wraps an arena array, or returns an array of the same shape filled with
+// `fill` if it is not allocated (e.g. efm_* arrays when the discrete integrator
+// is not used).
+template <typename T>
+py::array_t<T> InitArenaArray(const std::vector<mjtSize>& shape, T* buf,
+                              py::handle owner, T fill) {
+  if (!buf) {
+    py::array_t<T> arr(shape);
+    std::fill_n(arr.mutable_data(), arr.size(), fill);
+    return arr;
+  }
+  return InitPyArray(shape, buf, owner);
+}
+
+// arena fields where -1 means "none"
+constexpr bool IsNoneIndex(std::string_view name) {
+  return name == "tendon_efcadr" || name == "tree_island" ||
+         name == "dof_island";
+}
+
 py::tuple RecompileSpec(raw::MjSpec* spec, const MjModelWrapper& old_m,
                         const MjDataWrapper& old_d) {
   raw::MjModel* m = static_cast<raw::MjModel*>(mju_malloc(sizeof(mjModel)));
@@ -97,6 +118,30 @@ py::tuple RecompileSpec(raw::MjSpec* spec, const MjModelWrapper& old_m,
   py::object d_pyobj =
       py::cast((MjDataWrapper(py::cast<MjModelWrapper*>(m_pyobj), d)));
   return py::make_tuple(m_pyobj, d_pyobj);
+}
+
+// properties of a group of named views that are not views of a field
+template <typename GroupedViews>
+void DefineComputedViews(py::class_<GroupedViews>&) {}
+
+// an actuator's rows of the sparse actuator_moment, as a dense read-only copy:
+// (nv,) for an actuator with one force output, else (outnum, nv)
+template <>
+void DefineComputedViews(py::class_<MjDataActuatorViews>& views) {
+  views.def_property_readonly("moment", [](MjDataActuatorViews& v) {
+    const raw::MjModel* m = v.model();
+    const raw::MjData* d = v.ptr();
+    int adr = m->actuator_outadr[v.index()];
+    int num = m->actuator_outnum[v.index()];
+    std::vector<py::ssize_t> shape = {num, static_cast<py::ssize_t>(m->nv)};
+    if (num == 1) shape.erase(shape.begin());
+    py::array_t<mjtNum> out(shape);
+    mju_sparse2dense(out.mutable_data(), d->actuator_moment, num, m->nv,
+                     d->moment_rownnz + adr, d->moment_rowadr + adr,
+                     d->moment_colind);
+    out.attr("flags").attr("writeable") = false;
+    return out;
+  });
 }
 
 }  // namespace
@@ -295,19 +340,25 @@ PYBIND11_MODULE(_structs, m, pybind11::mod_gil_not_used()) {
   MJVISUAL_RGBA_FIELDS
 #undef XVEC
 
-#define X(var)                    \
-  mjVisual.def_property_readonly( \
-      #var, [](const MjVisualWrapper& c) -> auto& { return c.get()->var; });
+#define X(var)                                                              \
+  mjVisual.def_property(                                                    \
+      #var, [](const MjVisualWrapper& c) -> auto& { return c.get()->var; }, \
+      [](MjVisualWrapper& c, const decltype(raw::MjVisual::var)& rhs) {     \
+        c.get()->var = rhs;                                                 \
+      });
   // mjVisual.global is exposed as "global_" to avoid clash with the Python
   // keyword.
-  mjVisual.def_property_readonly(
+  mjVisual.def_property(
       "global_",
-      [](const MjVisualWrapper& c) -> auto& { return c.get()->global; });
+      [](const MjVisualWrapper& c) -> auto& { return c.get()->global; },
+      [](MjVisualWrapper& c, const raw::MjVisualGlobal& rhs) {
+        c.get()->global = rhs;
+      });
   X(quality);
-  mjVisual.def_readonly("headlight", &MjVisualWrapper::headlight);
+  DefinePyStruct(mjVisual, "headlight", &MjVisualWrapper::headlight);
   X(map);
   X(scale);
-  mjVisual.def_readonly("rgba", &MjVisualWrapper::rgba);
+  DefinePyStruct(mjVisual, "rgba", &MjVisualWrapper::rgba);
 #undef X
 
   // ==================== MJMODEL ==============================================
@@ -353,9 +404,9 @@ This is useful for example when the MJB is not available as a file on disk.)"));
         return MjModelWrapper::Deserialize(input);
       }));
 
-  mjModel.def_readonly("opt", &MjModelWrapper::opt);
-  mjModel.def_readonly("vis", &MjModelWrapper::vis);
-  mjModel.def_readonly("stat", &MjModelWrapper::stat);
+  DefinePyStruct(mjModel, "opt", &MjModelWrapper::opt);
+  DefinePyStruct(mjModel, "vis", &MjModelWrapper::vis);
+  DefinePyStruct(mjModel, "stat", &MjModelWrapper::stat);
 
   mjModel.def_property(
       "flg_gravcomp",
@@ -420,6 +471,57 @@ This is useful for example when the MJB is not available as a file on disk.)"));
     MJMODEL_POINTERS
 #undef X
     return py::tuple(py::cast(fields));
+  });
+
+  // arrays which mj_setConst uses, with how each group of its computations
+  // (fixed, kin0, inert0, spring) uses them: 0, mjSC_IN, mjSC_OUT or mjSC_INOUT
+  mjModel.def_property_readonly_static("_setconst_fields", [](py::object) {
+    py::dict fields;
+#define X(name, fixed, kin0, inert0, spring) \
+    fields[#name] = py::make_tuple(fixed, kin0, inert0, spring);
+    MJSETCONST_ARRAYS
+#undef X
+    return fields;
+  });
+
+  // the groups of mj_setConst computations, in the order of the columns
+  mjModel.def_property_readonly_static("_setconst_groups", [](py::object) {
+    return py::make_tuple("fixed", "kin0", "inert0", "spring");
+  });
+
+  // arrays which are inputs of mj_setConst: the first group which uses them
+  // reads them before writing them
+  mjModel.def_property_readonly_static("_setconst_inputs", [](py::object) {
+    std::vector<std::string> inputs;
+#define X(name, fixed, kin0, inert0, spring)                    \
+    for (int access : {fixed, kin0, inert0, spring}) {          \
+      if (access) {                                             \
+        if (access & mjSC_IN) inputs.push_back(#name);          \
+        break;                                                  \
+      }                                                         \
+    }
+    MJSETCONST_ARRAYS
+#undef X
+    return py::tuple(py::cast(inputs));
+  });
+
+  // arrays which mj_setConst writes
+  mjModel.def_property_readonly_static("_setconst_outputs", [](py::object) {
+    std::vector<std::string> outputs;
+#define X(name, fixed, kin0, inert0, spring) \
+    if ((fixed | kin0 | inert0 | spring) & mjSC_OUT) outputs.push_back(#name);
+    MJSETCONST_ARRAYS
+#undef X
+    return py::tuple(py::cast(outputs));
+  });
+
+  // scalars which mj_setConst writes
+  mjModel.def_property_readonly_static("_setconst_scalars", [](py::object) {
+    std::vector<std::string> scalars;
+#define X(name) scalars.push_back(#name);
+    MJSETCONST_SCALARS
+#undef X
+    return py::tuple(py::cast(scalars));
   });
 
 #define X(dtype, var, dim0, dim1)                        \
@@ -916,9 +1018,11 @@ This is useful for example when the MJB is not available as a file on disk.)"));
 #define MJ_M(x) d.model().get()->x
 #undef MJ_D
 #define MJ_D(x) d.get()->x
-#define X(dtype, var, dim0, dim1)                                           \
-  mjData.def_property_readonly(#var, [](const MjDataWrapper& d) {           \
-    return InitPyArray(X_ARRAY_SHAPE(dim0, dim1), d.get()->var, d.owner()); \
+#define X(dtype, var, dim0, dim1)                                         \
+  mjData.def_property_readonly(#var, [](const MjDataWrapper& d) {         \
+    return InitArenaArray(X_ARRAY_SHAPE(dim0, dim1), d.get()->var,        \
+                          d.owner(),                                      \
+                          static_cast<dtype>(IsNoneIndex(#var) ? -1 : 0)); \
   });
 
   MJDATA_ARENA_POINTERS_SOLVER
@@ -990,6 +1094,7 @@ This is useful for example when the MJB is not available as a file on disk.)"));
     using GroupedViews = MjDataGroupedViews;                                 \
     py::class_<MjDataGroupedViews> groupedViews(m, "_" #MjDataGroupedViews); \
     FIELD_XMACROS                                                            \
+    DefineComputedViews(groupedViews);                                       \
     groupedViews.def("__repr__", MjDataStructRepr<GroupedViews>);            \
     groupedViews.def_property_readonly(                                      \
         "id", [](GroupedViews& views) { return views.index(); });            \

@@ -614,7 +614,7 @@ Gyroscopic derivatives for free bodies
    with the faster Cholesky decomposition. However integrating gyroscopic forces explicitly can lead to
    energy gain and divergence of fast-spinning free bodies with asymmetric inertia.
 
-   Therefore for *standalone free bodies* (free joints whose body has no children), these derivatives are reinstated.
+   Therefore for *standalone free bodies* (free bodies with no jointed descendants), these derivatives are reinstated.
    The rows of :math:`\widehat M` corresponding to such a body form a :math:`6\times 6` block which is decoupled from
    the rest of the system. After the global Cholesky solve, this block is re-assembled with the exact derivative of the
    body's bias force and re-solved with an optimized :math:`6\times 6` LU routine. For standalone free bodies,
@@ -728,8 +728,10 @@ Discrete-time (``discrete``)
 
       - Models with flex elasticity or passive flex contact under the ``PGS`` :ref:`solver<option-solver>` or with
         :ref:`noslip<option-noslip_iterations>` post-processing.
+      - Flex :ref:`edge stiffness<flex-edge-stiffness>` or :ref:`damping<flex-edge-damping>` (use
+        :ref:`elasticity<flex-elasticity>` or :ref:`edge equality<flexcomp-edge-equality>` instead).
       - :ref:`Sleep<option-flag-sleep>` without :ref:`islands<option-flag-island>` (island grouping is required
-        to keep metric-coupled trees awake or asleep together), and sleep combined with flex.
+        to keep metric-coupled trees awake or asleep together).
       - Interpolated flexes (e.g. flexcomp ``dof="trilinear"``) whose nodes are attached to arbitrary moving bodies
         under the ``Newton`` solver (these models require the ``CG`` solver).
 
@@ -738,7 +740,6 @@ Discrete-time (``discrete``)
       - Under ``PGS``, tendon and actuator metric terms are excluded and their forces integrate explicitly.
       - Under primal solvers (``CG``, ``Newton``), ``noslip`` post-processing approximates the Delassus operator
         from the backbone metric factor alone, omitting tendon and actuator couplings.
-      - Models with flex currently fall back to a monolithic solve across islands.
 
 4th-order Runge-Kutta (``RK4``)
    One advantage of our continuous-time formulation is that we can use higher order integrators such as Runge-Kutta or
@@ -1860,14 +1861,13 @@ multi-run pipeline (legacy)
   Multiple contact points are found by rotating the two geoms by ±1e-3 radians around the tangential axes and
   re-running the collision routine. If a new contact is detected it is added, allowing for up to 4 additional contact
   points. This method is effective, but increases the cost of each collision call by a factor of 5.  This method is
-  used when the :ref:`nativeccd<option-flag-nativeccd>` flag is disabled, and for geom collisions involving capsules
-  or with :ref:`positive contact margins<body-geom-margin>`.
+  used when the :ref:`nativeccd<option-flag-nativeccd>` flag is disabled.
 
 single-shot pipeline
   The single-shot pipeline is used in conjunction with the native CCD pipeline, i.e., when the
   :ref:`nativeccd<option-flag-nativeccd>` flag is enabled. As this pipeline is one-shot and most of the geom analysis
-  is done at compilation time, there is very little performance overhead. Supported geoms are boxes, cylinders, and meshes
-  without :ref:`positive contact margins<body-geom-margin>`.
+  is done at compilation time, there is very little performance overhead. Supported geoms are capsules, cylinders,
+  boxes, and meshes.
 
 .. _coDistance:
 
@@ -1913,8 +1913,7 @@ Pair-wise colliders
 
 The table below provides information about the colliders used for different geom pairs. These values can be computed
 dynamically by the :ref:`mj_maxContact` function. Use the toggles to see the max number of contacts returned with the
-parameters :ref:`nativeccd<option-flag-nativeccd>`, :ref:`multiccd<option-flag-multiccd>`, and
-:ref:`margin<body-geom-margin>`.
+parameters :ref:`nativeccd<option-flag-nativeccd>` and :ref:`multiccd<option-flag-multiccd>`.
 
 .. raw:: html
 
@@ -1932,13 +1931,6 @@ parameters :ref:`nativeccd<option-flag-nativeccd>`, :ref:`multiccd<option-flag-m
          <span class="pairwise-slider"></span>
        </label>
        <span>multiccd</span>
-     </div>
-     <div class="pairwise-toggle-item">
-       <label class="pairwise-switch">
-         <input type="checkbox" id="margin-checkbox">
-         <span class="pairwise-slider"></span>
-       </label>
-       <span>with margin</span>
      </div>
    </div>
 
@@ -2013,7 +2005,7 @@ parameters :ref:`nativeccd<option-flag-nativeccd>`, :ref:`multiccd<option-flag-m
          <div class="line">CCD</div>
          <div class="line">
            <div class="multiccd-off"><strong>1</strong></div>
-           <div class="multiccd-native"><strong>5</strong></div>
+           <div class="multiccd-native"><strong>2</strong></div>
            <div class="multiccd-legacy"><strong>5</strong></div>
          </div>
 
@@ -2025,7 +2017,7 @@ parameters :ref:`nativeccd<option-flag-nativeccd>`, :ref:`multiccd<option-flag-m
          <div class="line">CCD</div>
          <div class="line">
            <div class="multiccd-off"><strong>1</strong></div>
-           <div class="multiccd-native"><strong>5</strong></div>
+           <div class="multiccd-native"><strong>2</strong></div>
            <div class="multiccd-legacy"><strong>5</strong></div>
          </div>
 
@@ -2134,8 +2126,7 @@ parameters :ref:`nativeccd<option-flag-nativeccd>`, :ref:`multiccd<option-flag-m
        const table = document.querySelector('.table-pairwise');
        const toggles = [
          {id: 'nativeccd-checkbox', cls: 'nativeccd-enabled'},
-         {id: 'multiccd-checkbox', cls: 'multiccd-enabled'},
-         {id: 'margin-checkbox', cls: 'margin-enabled'}
+         {id: 'multiccd-checkbox', cls: 'multiccd-enabled'}
        ];
 
        toggles.forEach(toggle => {

@@ -25,12 +25,13 @@ namespace mujoco::studio {
 
 using Seconds = std::chrono::duration<double>;
 using Clock = std::chrono::steady_clock;
+using ClockFn = std::function<Clock::time_point()>;
 using StepFn = std::function<void(mjModel*, mjData*)>;
 
 // State and logic for physics synchronization and stepping.
 class StepControl {
  public:
-  StepControl();
+  explicit StepControl(ClockFn clock_fn = Clock::now);
 
   enum class Status {
     kOk,
@@ -82,6 +83,12 @@ class StepControl {
   // Advance() call.
   void RequestSingleStep() { single_step_ = true; }
 
+  // Returns whether a single step is pending, clearing the request.
+  // This function is useful for clients that do not step themselves but rather
+  // forward the request to whoever does (e.g., a viewer thread may drive the
+  // step control UI but the actual stepping occurs in the sim thread).
+  bool ConsumeSingleStepRequest();
+
  private:
   std::string AdvanceOneStep(const mjModel* m, mjData* d);
 
@@ -125,6 +132,8 @@ class StepControl {
   // Callbacks that can be invoked before/after physics is stepped.
   StepFn pre_step_ = nullptr;
   StepFn post_step_ = nullptr;
+
+  ClockFn clock_fn_;
 };
 
 }  // namespace mujoco::studio

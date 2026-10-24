@@ -17,10 +17,13 @@
 import contextlib
 import copy
 from etils import epath
+import gc
 import os
 import pickle
 import sys
+import weakref
 
+from absl import flags
 from absl.testing import absltest
 from absl.testing import parameterized
 import mujoco
@@ -110,6 +113,18 @@ TEST_XML_TEXTURE = r"""
 </mujoco>
 """
 
+# a 3x2 RGB PNG
+_TINY_PNG = bytes([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02,
+    0x08, 0x02, 0x00, 0x00, 0x00, 0x12, 0x16, 0xf1, 0x4d, 0x00, 0x00, 0x00,
+    0x1c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0x78, 0xc1, 0xc0, 0xc0,
+    0xc0, 0xf0, 0xbf, 0xb8, 0xb8, 0x98, 0x81, 0xe1, 0x3f, 0xc3, 0xff, 0xff,
+    0xff, 0xc5, 0xc4, 0xc4, 0x00, 0x46, 0xd7, 0x07, 0x7f, 0xd2, 0x52, 0xa1,
+    0x41, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60,
+    0x82,
+])
+
 
 @contextlib.contextmanager
 def temporary_callback(setter, callback):
@@ -124,6 +139,9 @@ class MuJoCoBindingsTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Mark flags as parsed to avoid pytest errors about unparsed flags.
+    # This is needed for `create_tempdir()` calls below.
+    flags.FLAGS.mark_as_parsed()
     self.model: mujoco.MjModel = mujoco.MjModel.from_xml_string(TEST_XML)
     self.data = mujoco.MjData(self.model)
 
@@ -363,6 +381,116 @@ class MuJoCoBindingsTest(parameterized.TestCase):
         self.data.cdof[dof_idx : dof_idx + 6], [[42] * 6] * 6
     )
 
+  def test_named_indexing_ragged2d_after_first_joint(self):
+    # rows of a joint which is not the first: the address counts rows
+    self.data.cdof[:] = np.arange(self.data.cdof.size).reshape(-1, 6)
+    self.model.dof_dampingpoly[:] = np.arange(
+        self.model.dof_dampingpoly.size
+    ).reshape(self.model.nv, -1)
+    for name in ('myhinge', 'myball'):
+      adr = self.model.joint(name).dofadr[0]
+      dofs = slice(adr, adr + self.data.joint(name).qvel.size)
+      np.testing.assert_array_equal(
+          self.data.joint(name).cdof, self.data.cdof[dofs], name
+      )
+      np.testing.assert_array_equal(
+          self.model.joint(name).dampingpoly,
+          self.model.dof_dampingpoly[dofs],
+          name,
+      )
+
+  def test_named_indexing_mimo_actuators(self):
+    model = mujoco.MjModel.from_xml_string("""
+    <mujoco>
+      <worldbody>
+        <body>
+          <joint name="slide" type="slide"/>
+          <geom size=".1"/>
+          <body>
+            <joint name="ball" type="ball"/>
+            <geom size=".1" pos=".2 0 0"/>
+          </body>
+        </body>
+      </worldbody>
+      <actuator>
+        <motor name="before" joint="slide" gear="2" ctrlrange="-1 1"/>
+        <orientation name="orient" joint="ball" kp="1" input="quat"/>
+        <motor name="after" joint="slide" gear="3" ctrlrange="-2 2"/>
+      </actuator>
+    </mujoco>
+    """)
+    data = mujoco.MjData(model)
+    data.ctrl[:] = np.arange(model.nu)
+    mujoco.mj_forward(model, data)
+    np.testing.assert_array_equal(model.actuator_ctrlnum, [1, 4, 1])
+    np.testing.assert_array_equal(model.actuator_outnum, [1, 3, 1])
+    # a single control or output keeps the shape of one row
+    one = lambda rows: rows[0] if len(rows) == 1 else rows
+    for i in range(model.nactuator):
+      ctrladr, outadr = model.actuator_ctrladr[i], model.actuator_outadr[i]
+      ctrls = slice(ctrladr, ctrladr + model.actuator_ctrlnum[i])
+      outs = slice(outadr, outadr + model.actuator_outnum[i])
+      name = model.actuator(i).name
+      for got, expected in (
+          (data.actuator(i).ctrl, data.ctrl[ctrls]),
+          (data.actuator(i).force, data.actuator_force[outs]),
+          (data.actuator(i).length, data.actuator_length[outs]),
+          (model.actuator(i).ctrlrange, one(model.actuator_ctrlrange[ctrls])),
+          (model.actuator(i).gear, one(model.actuator_gear[outs])),
+          (model.actuator(i).lengthrange,
+           one(model.actuator_lengthrange[outs])),
+      ):
+        np.testing.assert_array_equal(got, expected, name)
+    self.assertEqual(model.actuator('before').gear.shape, (6,))
+    self.assertEqual(model.actuator('orient').gear.shape, (3, 6))
+    self.assertEqual(model.actuator('orient').ctrlrange.shape, (4, 2))
+    self.assertEqual(data.actuator('orient').ctrl.shape, (4,))
+    self.assertEqual(data.actuator('after').ctrl.shape, (1,))
+    # views are views: a write reaches mjData
+    data.actuator('after').ctrl = 7
+    self.assertEqual(data.ctrl[model.actuator_ctrladr[2]], 7)
+
+  def test_named_indexing_actuator_moment(self):
+    model = mujoco.MjModel.from_xml_string("""
+    <mujoco>
+      <worldbody>
+        <body>
+          <joint name="slide" type="slide"/>
+          <geom size=".1"/>
+          <body>
+            <joint name="ball" type="ball"/>
+            <geom size=".1" pos=".2 0 0"/>
+          </body>
+        </body>
+      </worldbody>
+      <actuator>
+        <motor joint="slide" gear="2"/>
+        <orientation joint="ball" kp="1"/>
+        <motor joint="slide" gear="3"/>
+      </actuator>
+    </mujoco>
+    """)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    # actuator_moment is sparse: fewer values than a dense (nout, nv) matrix
+    self.assertLess(model.nJmom, model.nout * model.nv)
+    dense = np.zeros((model.nout, model.nv), dtype=DTYPE)
+    mujoco.mju_sparse2dense(
+        dense,
+        data.actuator_moment,
+        data.moment_rownnz,
+        data.moment_rowadr,
+        data.moment_colind,
+    )
+    for i in range(model.nactuator):
+      adr = model.actuator_outadr[i]
+      rows = dense[adr : adr + model.actuator_outnum[i]]
+      moment = data.actuator(i).moment
+      np.testing.assert_array_equal(moment, rows[0] if len(rows) == 1 else rows)
+      self.assertFalse(moment.flags.writeable)  # a copy, not a view
+    np.testing.assert_array_equal(data.actuator(0).moment, [2, 0, 0, 0])
+    self.assertEqual(data.actuator(1).moment.shape, (3, model.nv))
+
   def test_named_indexing_repr_in_data(self):
     view_repr = repr(self.data.geom('mybox'))
     self.assertStartsWith(view_repr, '<_MjDataGeomViews')
@@ -474,6 +602,60 @@ class MuJoCoBindingsTest(parameterized.TestCase):
     opt1.gravity = 5
     np.testing.assert_allclose(opt2.timestep, 0.001)
     np.testing.assert_allclose(opt2.gravity, [2, 2, 2])
+
+  def test_mjmodel_and_mjvisual_substruct_assignment(self):
+    # Assigning to model.opt copies into the model and updates existing views.
+    gravity_view = self.model.opt.gravity
+    opt = mujoco.MjOption()
+    opt.timestep = 0.001
+    opt.gravity = (0, 0, -1)
+    self.model.opt = opt
+    self.assertEqual(self.model.opt, opt)
+    np.testing.assert_allclose(self.model.opt.timestep, 0.001)
+    np.testing.assert_array_equal(gravity_view, [0, 0, -1])
+    # The model holds a copy: later edits to opt do not propagate.
+    opt.timestep = 0.5
+    opt.gravity = (1, 2, 3)
+    np.testing.assert_allclose(self.model.opt.timestep, 0.001)
+    np.testing.assert_array_equal(self.model.opt.gravity, [0, 0, -1])
+
+    # Same for model.stat: in-place copy, existing array views stay valid.
+    stat = mujoco.MjStatistic()
+    stat.extent = 42.0
+    stat.center = (1, 2, 3)
+    center_view = self.model.stat.center
+    self.model.stat = stat
+    self.assertEqual(self.model.stat, stat)
+    np.testing.assert_array_equal(center_view, [1, 2, 3])
+
+    # Assigning a whole MjVisual updates views into its nested sub-structs.
+    vis = copy.copy(self.model.vis)
+    vis.global_.fovy = 75
+    vis.quality.shadowsize = 2048
+    vis.headlight.ambient = (0.2, 0.3, 0.4)
+    vis.map.stiffness = 200.0
+    vis.scale.framelength = 2.5
+    vis.rgba.fog = (0.1, 0.2, 0.3, 0.4)
+    ambient_view = self.model.vis.headlight.ambient
+    fog_view = self.model.vis.rgba.fog
+    self.model.vis = vis
+    self.assertEqual(self.model.vis, vis)
+    np.testing.assert_allclose(ambient_view, [0.2, 0.3, 0.4])
+    np.testing.assert_allclose(fog_view, [0.1, 0.2, 0.3, 0.4])
+
+    # Sub-structs with array fields (headlight) are assignable directly.
+    headlight = copy.copy(self.model.vis.headlight)
+    headlight.diffuse = (0.5, 0.6, 0.7)
+    self.model.vis.headlight = headlight
+    np.testing.assert_allclose(
+        self.model.vis.headlight.diffuse, [0.5, 0.6, 0.7]
+    )
+
+    # Sub-structs with only scalar fields (global_) are assignable too.
+    global_vis = copy.copy(self.model.vis.global_)
+    global_vis.fovy = 60
+    self.model.vis.global_ = global_vis
+    self.assertEqual(self.model.vis.global_.fovy, 60)
 
   def test_mjmodel_can_copy(self):
     model_copy = copy.copy(self.model)
@@ -720,6 +902,49 @@ class MuJoCoBindingsTest(parameterized.TestCase):
     self.assertEmpty(self.data.contact)
     self.assertEmpty(self.data.efc_id)
 
+  def test_realloc_con_efc_failure_clears_counts(self):
+    xml = r"""
+<mujoco>
+  <option solver="PGS" integrator="discrete"/>
+  <worldbody>
+    <geom type="plane" size="1 1 .1"/>
+    <body pos="0 0 .099">
+      <joint name="hinge" range="0 1" margin=".01" frictionloss="1"/>
+      <geom size=".1"/>
+    </body>
+  </worldbody>
+  <equality>
+    <joint joint1="hinge"/>
+  </equality>
+</mujoco>
+"""
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    # counts that size or index the rows and their arena arrays
+    counts = (
+        'ncon',
+        'ne',
+        'nf',
+        'nl',
+        'nefc',
+        'nJ',
+        'nY',
+        'nA',
+        'nisland',
+        'nidof',
+        'efm_active',
+    )
+    for count in counts:
+      self.assertGreater(getattr(data, count), 0, count)
+
+    # the failed reallocation discards all rows: no count may outlive them
+    with self.assertRaises(mujoco.FatalError):
+      mujoco._functions._realloc_con_efc(data, 100000000, 100000000)
+    for count in counts:
+      self.assertEqual(getattr(data, count), 0, count)
+
   def test_realloc_island(self):
     # Test allocation on fresh data (on its own)
     nisland = 2
@@ -762,6 +987,108 @@ class MuJoCoBindingsTest(parameterized.TestCase):
       mujoco._functions._realloc_island(self.data, 100000000, 100000000)
     self.assertEqual(self.data.nisland, 0)
     self.assertEqual(self.data.nidof, 0)
+
+  def test_realloc_island_keeps_dual_and_metric_arrays(self):
+    # a forward pass allocates the dual (PGS) and effective-metric (discrete)
+    # arrays after the island arrays; the margin activates the joint limit
+    xml = """
+<mujoco>
+  <option solver="PGS" integrator="discrete"/>
+  <worldbody>
+    <body>
+      <joint range="0 1" margin=".01"/>
+      <geom size=".1"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    for count in ('nisland', 'nY', 'nA', 'efm_active'):
+      self.assertGreater(getattr(data, count), 0, count)
+
+    def span(name):
+      array = getattr(data, name)
+      start = array.__array_interface__['data'][0]
+      return start, start + array.nbytes
+
+    later = {
+        name: span(name)
+        for name in dir(data)
+        if name.startswith(('efc_Y', 'efc_AR', 'efm_')) and name != 'efm_active'
+        and not getattr(data, name).flags.owndata
+    }
+
+    # grow the islands: the new island arrays must not overlap the later ones
+    mujoco._functions._realloc_island(
+        data, nisland=data.nisland + 1, nidof=data.nidof
+    )
+    island = (
+        'tree_island island_ntree island_itreeadr map_itree2tree dof_island '
+        'island_nv island_idofadr island_dofadr map_dof2idof map_idof2dof '
+        'ifrc_smooth iacc_smooth iacc efc_island island_ne island_nf '
+        'island_nefc island_iefcadr map_efc2iefc map_iefc2efc iefc_type '
+        'iefc_id iefc_frictionloss iefc_D iefc_R iefc_aref iefc_state '
+        'iefc_force ifrc_constraint'
+    ).split()
+    for name in island:
+      start, end = span(name)
+      for other, (other_start, other_end) in later.items():
+        overlap = start < other_end and other_start < end
+        self.assertFalse(overlap, f'{name} overlaps {other}')
+
+  def test_unallocated_arena_arrays_are_filled(self):
+    model = mujoco.MjModel.from_xml_string("""
+<mujoco>
+  <option>
+    <flag island="disable"/>
+  </option>
+  <worldbody>
+    <site name="a"/>
+    <body>
+      <joint name="hinge" axis="0 1 0" range="-1 1"/>
+      <geom size=".1" pos="0 0 -.5"/>
+      <site name="b" pos="0 0 -1"/>
+    </body>
+  </worldbody>
+  <tendon>
+    <spatial range="0 2">
+      <site site="a"/>
+      <site site="b"/>
+    </spatial>
+  </tendon>
+  <actuator>
+    <motor joint="hinge"/>
+  </actuator>
+</mujoco>
+""")
+    none_index = ('tendon_efcadr', 'tree_island', 'dof_island')
+
+    # unallocated arrays own their data, allocated ones are views of mjData
+    def assert_unallocated_are_filled(data):
+      unallocated = [
+          name for name in dir(data)
+          if isinstance(arr := getattr(data, name), np.ndarray)
+          and arr.flags.owndata and arr.size > 0
+      ]
+      self.assertNotEmpty(unallocated)
+      for name in unallocated:
+        fill = -1 if name in none_index else 0
+        np.testing.assert_array_equal(getattr(data, name), fill, err_msg=name)
+      return unallocated
+
+    data = mujoco.MjData(model)
+    self.assertIn('tendon_efcadr', assert_unallocated_are_filled(data))
+
+    # joint limit violated, islands disabled: nefc-sized island arrays are NULL
+    data.qpos[0] = 2
+    mujoco.mj_forward(model, data)
+    self.assertGreater(data.nefc, 0)
+    self.assertIn('efc_island', assert_unallocated_are_filled(data))
+
+    # allocated arena arrays are views of mjData
+    self.assertFalse(data.tendon_efcadr.flags.owndata)
 
   def test_mj_struct_list_equality(self):
     model2 = mujoco.MjModel.from_xml_string(TEST_XML)
@@ -1725,6 +2052,55 @@ Euler integrator, semi-implicit in velocity.
     attr_to_compare = ('time', 'qpos', 'qvel', 'mocap_pos')
     self._assert_attributes_equal(data2, self.data, attr_to_compare)
 
+  def test_pickle_mjdata_releases_owned_model(self):
+    data2 = pickle.loads(pickle.dumps(self.data))
+    # A leaked native wrapper keeps this array alive.
+    model_array_ref = weakref.ref(data2.model.body_mass)
+    del data2
+    gc.collect()
+    self.assertIsNone(model_array_ref())
+
+  def test_pickle_mjdata_retains_external_model_reference(self):
+    data2 = pickle.loads(pickle.dumps(self.data))
+    model2 = data2.model
+    model_array_ref = weakref.ref(model2.body_mass)
+    del data2
+    gc.collect()
+    self.assertIsNotNone(model_array_ref())
+    data3 = mujoco.MjData(model2)
+    mujoco.mj_step(model2, data3)
+    del data3, model2
+    gc.collect()
+    self.assertIsNone(model_array_ref())
+
+  @parameterized.parameters('model', 'data')
+  def test_pickle_mjdata_retains_array_views(self, owner):
+    data2 = pickle.loads(pickle.dumps(self.data))
+    view = data2.model.body_mass if owner == 'model' else data2.qpos
+    reference = view.copy()
+    array_ref = weakref.ref(view)
+    del data2
+    gc.collect()
+    np.testing.assert_array_equal(view, reference)
+    view[:] = reference + 1
+    np.testing.assert_array_equal(view, reference + 1)
+    del view
+    gc.collect()
+    self.assertIsNone(array_ref())
+
+  @parameterized.parameters(copy.copy, copy.deepcopy)
+  def test_copy_unpickled_mjdata_retains_model(self, copier):
+    data2 = pickle.loads(pickle.dumps(self.data))
+    data3 = copier(data2)
+    model_array_ref = weakref.ref(data3.model.body_mass)
+    del data2
+    gc.collect()
+    self.assertIsNotNone(model_array_ref())
+    mujoco.mj_step(data3.model, data3)
+    del data3
+    gc.collect()
+    self.assertIsNone(model_array_ref())
+
   def test_pickle_mjdata(self):
     mujoco.mj_step(self.model, self.data)
     data2 = pickle.loads(pickle.dumps(self.data))
@@ -1851,6 +2227,92 @@ Euler integrator, semi-implicit in velocity.
   def test_texture_size(self):
     model = mujoco.MjModel.from_xml_string(TEST_XML_TEXTURE)
     self.assertEqual(model.tex('tex').data.shape, (512, 512, 3))
+    self.assertEqual(model.tex('tex').adr.dtype, np.int64)
+    self.assertTrue(np.shares_memory(model.tex('tex').adr, model.tex_adr))
+
+  def test_mj_loadTexture(self):  # pylint: disable=invalid-name
+    # an embedded texture: a copy of its pixels and its colorspace
+    model = mujoco.MjModel.from_xml_string(TEST_XML_TEXTURE)
+    pixels, colorspace = mujoco.mj_loadTexture(model, 0)
+    self.assertEqual(pixels.dtype, np.uint8)
+    np.testing.assert_array_equal(pixels, model.tex('tex').data)
+    self.assertFalse(np.shares_memory(pixels, model.tex_data))
+    self.assertEqual(colorspace, model.tex_colorspace[0])
+
+    # a by-reference texture: the decoded file, with the colorspace resolved;
+    # the array outlives the model
+    png = os.path.join(self.create_tempdir().full_path, 'load_texture.png')
+    with open(png, 'wb') as f:
+      f.write(_TINY_PNG)
+    xml = f"""
+    <mujoco>
+      <compiler passthrough="textures"/>
+      <asset>
+        <texture name="byref" type="2d" file="{png}"/>
+        <texture name="eager" type="2d" file="{png}" embed="true"/>
+      </asset>
+    </mujoco>
+    """
+    model = mujoco.MjModel.from_xml_string(xml)
+    self.assertEqual(model.tex('byref').adr[0], -1)
+    pixels, colorspace = mujoco.mj_loadTexture(model, model.tex('byref').id)
+    self.assertEqual(pixels.shape, (2, 3, 3))
+    np.testing.assert_array_equal(pixels, model.tex('eager').data)
+    self.assertEqual(colorspace, model.tex_colorspace[model.tex('eager').id])
+    self.assertEqual(colorspace, mujoco.mjtColorSpace.mjCOLORSPACE_LINEAR)
+    expected = pixels.copy()
+    del model
+    gc.collect()
+    np.testing.assert_array_equal(pixels, expected)
+
+    # errors
+    model = mujoco.MjModel.from_xml_string(xml)
+    with self.assertRaisesRegex(ValueError, 'out of range'):
+      mujoco.mj_loadTexture(model, 2)
+    os.remove(png)
+    with self.assertRaisesRegex(ValueError, 'load_texture.png'):
+      mujoco.mj_loadTexture(model, model.tex('byref').id)
+
+  def test_mj_embedAssets(self):  # pylint: disable=invalid-name
+    png = os.path.join(self.create_tempdir().full_path, 'embed_assets.png')
+    with open(png, 'wb') as f:
+      f.write(_TINY_PNG)
+    xml = f"""
+    <mujoco>
+      <compiler passthrough="textures"/>
+      <asset>
+        <texture name="tiny" type="2d" file="{png}"/>
+        <texture name="checker" type="2d" builtin="checker" width="4"
+          height="4"/>
+      </asset>
+    </mujoco>
+    """
+    byref = mujoco.MjModel.from_xml_string(xml)
+    eager = mujoco.MjModel.from_xml_string(
+        xml.replace(' passthrough="textures"', '')
+    )
+    self.assertEqual(byref.tex('tiny').adr[0], -1)
+
+    # the embedded model is the eager compile, and lives on its own
+    embedded = mujoco.mj_embedAssets(byref)
+    self.assertIsInstance(embedded, mujoco.MjModel)
+    self.assertEqual(embedded.ntexdata, eager.ntexdata)
+    self.assertEqual(mujoco.mj_sizeModel(embedded), mujoco.mj_sizeModel(eager))
+    np.testing.assert_array_equal(embedded.tex_data, eager.tex_data)
+    np.testing.assert_array_equal(embedded.tex_adr, eager.tex_adr)
+    np.testing.assert_array_equal(embedded.tex_width, eager.tex_width)
+    np.testing.assert_array_equal(
+        embedded.tex_colorspace, eager.tex_colorspace
+    )
+    del byref
+    gc.collect()
+    self.assertEqual(embedded.tex('tiny').data.shape, (2, 3, 3))
+
+    # a file that does not resolve
+    byref = mujoco.MjModel.from_xml_string(xml)
+    os.remove(png)
+    with self.assertRaisesRegex(ValueError, 'texture 0: .*embed_assets.png'):
+      mujoco.mj_embedAssets(byref)
 
   def test_xml_dependencies(self):
     model_path = str(epath.resource_path("mujoco") / "testdata" / "msh.xml")
@@ -1893,23 +2355,64 @@ Euler integrator, semi-implicit in velocity.
     # delay = 0.01, so:
     #   read_time=0.02 -> lookup at 0.01 -> value 2.0
     #   read_time=0.03 -> lookup at 0.02 -> value 3.0
-    result = mujoco.mj_readCtrl(model, data, 0, 0.02, interp=0)
-    self.assertEqual(result, 2.0)  # ZOH returns value at t=0.01
+    result = np.zeros(1, DTYPE)
+    mujoco.mj_readCtrl(model, data, 0, 0.02, result, interp=0)
+    self.assertEqual(result[0], 2.0)  # ZOH returns value at t=0.01
 
     # Test with times=None (uses existing timestamps)
     new_values = np.array([5.0, 6.0, 7.0, 8.0])
     mujoco.mj_initCtrlHistory(model, data, 0, None, new_values)
     # read_time=0.02 -> lookup at 0.01 -> value 6.0
-    result = mujoco.mj_readCtrl(model, data, 0, 0.02, interp=0)
-    self.assertEqual(result, 6.0)
+    mujoco.mj_readCtrl(model, data, 0, 0.02, result, interp=0)
+    self.assertEqual(result[0], 6.0)
 
-    # Test dimension validation errors
+    # Test dimension and id validation errors
+    with self.assertRaises(IndexError):
+      mujoco.mj_readCtrl(model, data, -1, 0.02, result, interp=0)
+    with self.assertRaises(IndexError):
+      mujoco.mj_readCtrl(model, data, 1, 0.02, result, interp=0)
+    with self.assertRaises(IndexError):
+      mujoco.mj_initCtrlHistory(model, data, -1, times, values)
+    with self.assertRaises(IndexError):
+      mujoco.mj_initCtrlHistory(model, data, 1, times, values)
+    with self.assertRaises(TypeError):
+      # wrong result size
+      mujoco.mj_readCtrl(model, data, 0, 0.02, np.zeros(2), interp=0)
     with self.assertRaises(TypeError):
       # wrong times
       mujoco.mj_initCtrlHistory(model, data, 0, np.zeros(3), values)
     with self.assertRaises(TypeError):
       # wrong values
       mujoco.mj_initCtrlHistory(model, data, 0, times, np.zeros(5))
+
+    # Multi-input actuator (PID with pos, vel, ff -> ctrlnum=3)
+    mimo_xml = r"""
+<mujoco>
+  <worldbody>
+    <body>
+      <geom type="sphere" size="0.1"/>
+      <joint name="hinge" type="hinge"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <pid name="pid" joint="hinge" kp="10" kv="2" input="pos vel ff"
+         delay="0.01" nsample="3"/>
+  </actuator>
+</mujoco>
+"""
+    mimo_model = mujoco.MjModel.from_xml_string(mimo_xml)
+    mimo_data = mujoco.MjData(mimo_model)
+    self.assertEqual(mimo_model.actuator_ctrlnum[0], 3)
+    mimo_times = np.array([0.0, 0.01, 0.02])
+    mimo_values = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=DTYPE)
+    mujoco.mj_initCtrlHistory(mimo_model, mimo_data, 0, mimo_times, mimo_values)
+    mimo_result = np.zeros(3, DTYPE)
+    mujoco.mj_readCtrl(mimo_model, mimo_data, 0, 0.02, mimo_result, interp=0)
+    np.testing.assert_array_equal(mimo_result, [4, 5, 6])
+
+    # Linear interpolation (interp=1) writes directly into mimo_result (ptr == NULL)
+    mujoco.mj_readCtrl(mimo_model, mimo_data, 0, 0.025, mimo_result, interp=1)
+    np.testing.assert_allclose(mimo_result, [5.5, 6.5, 7.5])
 
   def test_mj_read_sensor_and_init_sensor_delay(self):
     xml = r"""

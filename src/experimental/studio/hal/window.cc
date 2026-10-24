@@ -44,6 +44,23 @@
 extern void* GetNativeWindowOsx(void* window);
 #endif
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/em_js.h>
+
+EM_JS(bool, PlatformIsApple, (), {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+  const platform = (navigator.userAgentData && navigator.userAgentData.platform) ||
+                   navigator.platform ||
+                   "";
+  if (/Mac|iPhone|iPod|iPad/i.test(platform)) {
+    return true;
+  }
+  return /Macintosh|Mac OS X/i.test(navigator.userAgent || "");
+});
+#endif
+
 namespace mujoco::studio {
 
 static void InitImGui(SDL_Window* window, float content_scale,
@@ -56,6 +73,16 @@ static void InitImGui(SDL_Window* window, float content_scale,
   io.IniFilename = nullptr;
   io.ConfigDpiScaleFonts = true;
   io.ConfigDpiScaleViewports = true;
+  // Match SDL2's double-click thresholds so trackpad double-taps register;
+  // MouseSingleClickDelay (0.50s default) must exceed MouseDoubleClickTime.
+  io.MouseDoubleClickTime = 0.50f;
+  io.MouseDoubleClickMaxDist = 32.0f * content_scale;
+  io.MouseSingleClickDelay = 0.60f;
+#if defined(__EMSCRIPTEN__)
+  if (PlatformIsApple()) {
+    io.ConfigMacOSXBehaviors = true;
+  }
+#endif
   ImGui::StyleColorsDark();
   ImGui_ImplSDL2_InitForOther(window);
 
@@ -94,9 +121,13 @@ Window::Window(std::string_view title, int width, int height, Config config)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
   } else if (IsOpenGl(config_.gfx_mode)) {
+    // On Windows, SDL_WINDOW_OPENGL makes SDL call SetPixelFormat on the HWND,
+    // which can only be set once and would block Filament's PlatformWGL.
+#if !defined(__WIN32__)
     window_flags |= SDL_WINDOW_OPENGL;
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#endif
   } else {
     mju_error("Unsupported window config: %d", config_.gfx_mode);
   }
@@ -116,8 +147,7 @@ Window::Window(std::string_view title, int width, int height, Config config)
 
   // Filament (except WebGL) manages its own swap chain including when to swap.
   // In all other cases, we'll use SDL to manage the swap chain.
-  if (config_.gfx_mode == GraphicsMode::FilamentWebGl ||
-      config_.gfx_mode == GraphicsMode::ClassicOpenGl) {
+  if (config_.gfx_mode == GraphicsMode::FilamentWebGl) {
     SDL_GLContext gl_context = SDL_GL_CreateContext(sdl_window_);
     SDL_GL_MakeCurrent(sdl_window_, gl_context);
   }

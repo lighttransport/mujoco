@@ -23,6 +23,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -169,7 +170,8 @@ double mjuu_updateFrame(double       quat[4],
                         int          first);
 
 // eigenvalue decomposition of symmetric 3x3 matrix
-int mjuu_eig3(double eigval[3], double eigvec[9], double quat[4], const double mat[9]);
+MJAPI int mjuu_eig3(
+    double eigval[3], double eigvec[9], double quat[4], const double mat[9], double reltol = 4e-15);
 
 // Jacobi eigenvalue decomposition of symmetric n×n matrix
 // eigval[n]: output eigenvalues, eigvec[n*n]: output eigenvectors (columns)
@@ -184,6 +186,14 @@ void mjuu_trnVecPose(double res[3], const double pos[3], const double quat[4], c
 const char* mjuu_fullInertia(double quat[4], double inertia[3], const double fullinertia[6]);
 
 namespace mujoco::user {
+
+// hash function for std::pair
+struct PairHash {
+  template <class T1, class T2>
+  std::size_t operator()(const std::pair<T1, T2>& pair) const {
+    return std::hash<T1>()(pair.first) ^ std::hash<T2>()(pair.second);
+  }
+};
 
 // utility class for handling file paths
 class MJAPI FilePath {
@@ -313,6 +323,19 @@ std::optional<std::string_view> mjuu_parseContentTypeAttrSubtype(std::string_vie
 
 // convert filename extension to content type; return empty string if not found
 std::string mjuu_extToContentType(std::string_view filename);
+
+// append the bytes of a value to a key
+template <class T>
+inline void mjuu_addkey(std::string& key, const T& value) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  key.append(reinterpret_cast<const char*>(&value), sizeof(T));
+}
+
+// append a string to a key, terminated so that consecutive strings cannot run together
+inline void mjuu_addkey(std::string& key, const std::string& value) {
+  key += value;
+  key += '\0';
+}
 
 // get the length of the dirname portion of a given path
 int mjuu_dirnamelen(const char* path);

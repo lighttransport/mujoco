@@ -14,20 +14,20 @@
 
 #include "experimental/studio/ux/picture_gui.h"
 
-#include <cstddef>
+#include <algorithm>
+#include <string>
 #include <vector>
 
 #include <imgui.h>
 #include <mujoco/mujoco.h>
-#include "experimental/studio/hal/renderer.h"
 #include "experimental/studio/ux/imgui_widgets.h"
 
 namespace mujoco::studio {
 
 // Returns false if the user requests that this picture-in-picture widget be
 // removed from the GUI.
-static bool PipGuiImpl(const mjModel* model, mjData* data, float aspect_ratio,
-                       Renderer* renderer, PipState* pip) {
+static bool PipGuiImpl(const mjModel* model, float aspect_ratio,
+                       const PipRenderCallback& render_cb, PipState* pip) {
   bool result = true;
 
   auto get_camera_name = [model](int i) -> const char* {
@@ -40,8 +40,6 @@ static bool PipGuiImpl(const mjModel* model, mjData* data, float aspect_ratio,
 
   const int width = ImGui::GetContentRegionAvail().x;
   const int height = aspect_ratio != 0.f ? width / aspect_ratio : width;
-  std::vector<std::byte> output(width * height * 3);
-
   const int combo_width = (width - 30) / 2;
 
   ImGui::PushID(pip);
@@ -54,11 +52,6 @@ static bool PipGuiImpl(const mjModel* model, mjData* data, float aspect_ratio,
     }
     ImGui::EndCombo();
   }
-
-  mjvCamera camera;
-  mjv_defaultCamera(&camera);
-  camera.type = mjCAMERA_FIXED;
-  camera.fixedcamid = pip->camera;
 
   const char* mode_names[] = {"Color", "Depth", "Segmentation"};
   ImGui::SameLine();
@@ -77,26 +70,15 @@ static bool PipGuiImpl(const mjModel* model, mjData* data, float aspect_ratio,
     result = false;
   }
 
-  mjtByte* flags = renderer->GetRenderFlags();
-  const int prev_depth = flags[mjRND_DEPTH];
-  const int prev_segment = flags[mjRND_SEGMENT];
-  flags[mjRND_DEPTH] = (pip->mode == PipState::Depth) ? 1 : 0;
-  flags[mjRND_SEGMENT] = (pip->mode == PipState::Segmentation) ? 1 : 0;
-  renderer->RenderToTexture(model, data, &camera, width, height, output.data());
-  pip->texture =
-      renderer->UploadImage(pip->texture, output.data(), width, height, 3);
-
-  // Restore previous render flags.
-  flags[mjRND_DEPTH] = prev_depth;
-  flags[mjRND_SEGMENT] = prev_segment;
+  pip->texture = render_cb(*pip, width, height);
 
   ImGui::Image(pip->texture, {(float)width, (float)height});
   ImGui::PopID();
   return result;
 }
 
-void PipGui(const mjModel* model, mjData* data, float aspect_ratio,
-            Renderer* renderer, std::vector<PipState>* pips) {
+void PipGui(const mjModel* model, float aspect_ratio,
+            const PipRenderCallback& render_cb, std::vector<PipState>* pips) {
   if (pips->empty()) {
     pips->emplace_back();
   }
@@ -104,7 +86,7 @@ void PipGui(const mjModel* model, mjData* data, float aspect_ratio,
   std::vector<int> to_delete;
   for (int i = 0; i < pips->size(); ++i) {
     PipState& pip = pips->at(i);
-    if (PipGuiImpl(model, data, aspect_ratio, renderer, &pip) == false) {
+    if (PipGuiImpl(model, aspect_ratio, render_cb, &pip) == false) {
       to_delete.push_back(i);
     };
     ImGui::Separator();
@@ -115,6 +97,56 @@ void PipGui(const mjModel* model, mjData* data, float aspect_ratio,
   if (ImGui::Button("+")) {
     pips->emplace_back();
   };
+}
+
+void PipGui(const std::vector<PipSource>& sources,
+            std::vector<PipState>* pips) {
+  if (pips == nullptr || sources.empty()) {
+    return;
+  }
+  const int n = static_cast<int>(sources.size());
+  if (pips->empty()) {
+    pips->emplace_back();
+  }
+
+  std::vector<int> to_delete;
+  for (int idx = 0; idx < static_cast<int>(pips->size()); ++idx) {
+    PipState& pip = (*pips)[idx];
+    pip.camera = std::clamp(pip.camera, 0, n - 1);
+    const PipSource& src = sources[pip.camera];
+
+    const float width = ImGui::GetContentRegionAvail().x;
+    ImGui::PushID(&pip);
+    ImGui::SetNextItemWidth(width - 30);
+    if (ImGui::BeginCombo("##PipCamera", src.name.c_str())) {
+      for (int i = 0; i < n; ++i) {
+        if (ImGui::Selectable(sources[i].name.c_str(), pip.camera == i)) {
+          pip.camera = i;
+        }
+      }
+      ImGui::EndCombo();
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_TRASH_CAN)) {
+      to_delete.push_back(idx);
+    }
+
+    pip.texture = src.texture;
+    if (pip.texture != ImTextureID_Invalid) {
+      const float height =
+          src.aspect_ratio > 0.0f ? width / src.aspect_ratio : width;
+      ImGui::Image(pip.texture, {width, height});
+    }
+    ImGui::PopID();
+    ImGui::Separator();
+  }
+  for (int i = static_cast<int>(to_delete.size()) - 1; i >= 0; --i) {
+    pips->erase(pips->begin() + to_delete[i]);
+  }
+  if (ImGui::Button("+")) {
+    pips->emplace_back();
+  }
 }
 
 }  // namespace mujoco::studio

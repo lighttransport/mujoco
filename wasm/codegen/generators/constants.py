@@ -52,22 +52,25 @@ _SKIPPED_PLUGIN_FUNCTIONS: tuple[str, ...] = (
     "mjc_distance",
     "mjc_getSDF",
     "mjc_gradient",
+    "mjp_archiveProviderCount",
     "mjp_defaultDecoder",
     "mjp_defaultEncoder",
     "mjp_defaultPlugin",
-    "mjp_defaultResourceProvider",
+    "mjp_defaultProvider",
+    "mjp_findArchiveProvider",
     "mjp_findDecoder",
     "mjp_findEncoder",
+    "mjp_findProvider",
     "mjp_getPlugin",
     "mjp_getPluginAtSlot",
-    "mjp_getResourceProvider",
-    "mjp_getResourceProviderAtSlot",
+    "mjp_getProviderAtSlot",
     "mjp_pluginCount",
+    "mjp_providerCount",
+    "mjp_registerArchiveProvider",
     "mjp_registerDecoder",
     "mjp_registerEncoder",
     "mjp_registerPlugin",
-    "mjp_registerResourceProvider",
-    "mjp_resourceProviderCount",
+    "mjp_registerProvider",
     # go/keep-sorted end
 )
 
@@ -144,6 +147,7 @@ _SKIPPED_MEMORY_FUNCTIONS: tuple[str, ...] = (
     "mj_freeLastXML",
     "mj_freeStack",
     "mj_loadModelBuffer",
+    "mj_loadTexture",  # returns an mju_malloc'ed buffer through mjtByte**
     "mj_markStack",
     "mj_stackAllocByte",
     "mj_stackAllocInt",
@@ -185,6 +189,7 @@ _SKIPPED_GETTERS_AND_SETTERS: tuple[str, ...] = (
 
 _SKIPPED_UTILITY_FUNCTIONS: tuple[str, ...] = (
     # go/keep-sorted start
+    "mj_readCtrl",
     "mj_readSensor",
     "mju_closeResource",
     "mju_decodeResource",
@@ -235,6 +240,7 @@ SKIPPED_STRUCTS: tuple[str, ...] = (
 MANUAL_WRAPPER_FUNCTIONS: tuple[str, ...] = (
     # go/keep-sorted start
     "mj_compile",
+    "mj_embedAssets",
     "mj_saveLastXML",
     "mj_saveModel",
     "mj_setLengthRange",

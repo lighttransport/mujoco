@@ -18,51 +18,39 @@
 #include <cstring>
 #include <memory>
 #include <span>  // NOLINT
+#include <string>
 #include <string_view>
 
 #include <mujoco/mujoco.h>
-#include "user/user_resource.h"
 
 namespace mujoco::studio {
 
-struct BufferProvider : public mjpResourceProvider {
-  BufferProvider(std::span<const std::byte> buffer) : buffer(buffer) {
-    mjp_defaultResourceProvider(this);
-    open = [](mjResource* resource) {
-      return 1;
-    };
-    read = [](mjResource* resource, const void** buffer) {
-      BufferProvider* self = (BufferProvider*)resource->provider;
-      *buffer = self->buffer.data();
-      return static_cast<int>(self->buffer.size());
-    };
-    close = [](mjResource* resource) {};
-  }
-  std::span<const std::byte> buffer;
-};
-
-std::unique_ptr<ModelHolder> ModelHolder::FromSpec(mjSpec* spec) {
-  auto mh = std::unique_ptr<ModelHolder>(new ModelHolder());
+std::unique_ptr<ModelHolder> ModelHolder::FromSpec(mjSpec* spec, mjVFS* vfs) {
+  auto mh = std::unique_ptr<ModelHolder>(new ModelHolder(vfs));
   mh->InitFromSpec(spec);
   return mh;
 }
 
-std::unique_ptr<ModelHolder> ModelHolder::FromFile(std::string_view filepath) {
-  auto mh = std::unique_ptr<ModelHolder>(new ModelHolder());
+std::unique_ptr<ModelHolder> ModelHolder::FromFile(std::string_view filepath,
+                                                   mjVFS* vfs) {
+  auto mh = std::unique_ptr<ModelHolder>(new ModelHolder(vfs));
   mh->InitFromFile(filepath);
   return mh;
 }
 
 std::unique_ptr<ModelHolder> ModelHolder::FromBuffer(
     std::span<const std::byte> buffer, std::string_view content_type,
-    std::string_view filename) {
-  auto mh = std::unique_ptr<ModelHolder>(new ModelHolder());
+    std::string_view filename, mjVFS* vfs) {
+  auto mh = std::unique_ptr<ModelHolder>(new ModelHolder(vfs));
   mh->InitFromBuffer(buffer, content_type, filename);
   return mh;
 }
 
-ModelHolder::ModelHolder() {
-  mj_defaultVFS(&vfs_);
+ModelHolder::ModelHolder(mjVFS* vfs) : vfs_(vfs) {
+  if (vfs_ == nullptr) {
+    mj_defaultVFS(&local_vfs_);
+    vfs_ = &local_vfs_;
+  }
 }
 
 ModelHolder::~ModelHolder() {
@@ -75,7 +63,9 @@ ModelHolder::~ModelHolder() {
   if (spec_) {
     mj_deleteSpec(spec_);
   }
-  mj_deleteVFS(&vfs_);
+  if (vfs_ == &local_vfs_) {
+    mj_deleteVFS(&local_vfs_);
+  }
 }
 
 void ModelHolder::PostInit() {
@@ -83,8 +73,11 @@ void ModelHolder::PostInit() {
 #ifdef __EMSCRIPTEN__
     // Disable threaded compilation on WASM since pthreads are not available.
     spec_->compiler.usethread = 0;
+    // Leave file-backed textures by reference so the renderer loads and decodes
+    // them on demand rather than duplicating pixels in WASM memory.
+    spec_->compiler.passthrough = mjPASSTHROUGH_TEXTURES;
 #endif
-    model_ = mj_compile(spec_, &vfs_);
+    model_ = mj_compile(spec_, vfs_);
     if (!model_) {
       SetLoadError(mjs_getError(spec_));
       return;
@@ -108,9 +101,9 @@ void ModelHolder::InitFromSpec(mjSpec* spec) {
 
 void ModelHolder::InitFromFile(std::string_view filepath) {
   if (filepath.ends_with(".mjb")) {
-    model_ = mj_loadModel(filepath.data(), &vfs_);
+    model_ = mj_loadModel(filepath.data(), vfs_);
   } else {
-    spec_ = mj_parse(filepath.data(), nullptr, &vfs_, error_, sizeof(error_));
+    spec_ = mj_parse(filepath.data(), nullptr, vfs_, error_, sizeof(error_));
   }
   if (error_[0] == 0) {
     PostInit();
@@ -122,19 +115,17 @@ void ModelHolder::InitFromBuffer(std::span<const std::byte> buffer,
                                  std::string_view filename) {
   if (content_type == "text/xml") {
     const char* ptr = reinterpret_cast<const char*>(buffer.data());
-    // Pass &vfs_ so any archive mounts created when parsing attached
-    // sub-models persist in the model holder's VFS for compilation.
-    spec_ = mj_parseXMLString(ptr, &vfs_, error_, sizeof(error_));
+    // Pass vfs so any archive mounts created when parsing attached
+    // sub-models persist in the VFS for compilation.
+    spec_ = mj_parseXMLString(ptr, vfs_, error_, sizeof(error_));
   } else if (content_type == "application/mjb") {
     model_ = mj_loadModelBuffer(buffer.data(), buffer.size());
   } else if (content_type == "application/zip") {
-    BufferProvider provider(buffer);
-    mjResource resource;
-    std::memset(&resource, 0, sizeof(mjResource));
-    resource.vfs = &vfs_;
-    resource.provider = &provider;
-    resource.name = const_cast<char*>(filename.data());
-    spec_ = mju_decodeResource(&resource, content_type.data(), &vfs_);
+    std::string name(filename);
+    mj_addBufferVFS(vfs_, name.c_str(), buffer.data(),
+                    static_cast<int>(buffer.size()));
+    spec_ = mj_parse(name.c_str(), content_type.data(), vfs_, error_,
+                     sizeof(error_));
   } else {
     SetLoadError(
         "Unknown content type; expected text/xml or application/mjb");
@@ -149,10 +140,10 @@ void ModelHolder::Recompile() {
     return;
   }
 
-  if (mj_recompile(spec(), vfs(), model(), data()) != 0) {
+  if (mj_recompile(spec_, vfs_, model_, data_) != 0) {
     model_ = nullptr;
     data_ = nullptr;
-    SetLoadError(mjs_getError(spec()));
+    SetLoadError(mjs_getError(spec_));
   }
 }
 

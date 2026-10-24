@@ -633,6 +633,118 @@ the center) can be used to warm-start all the other samples. In this setting it 
 different results between nearby samples reflect genuine differences between the samples, and not different warm-start
 or termination of the iterative solver.
 
+.. _siBatch:
+
+Batched simulation
+^^^^^^^^^^^^^^^^^^
+
+The :ref:`batch API<Batchedsimulation>` in ``mujoco/mjbatch.h`` packages this multi-threading scheme. An :ref:`mjBatch`
+holds ``nsim`` simulations of one model and runs them on a thread pool of its own. Results are bit-identical to a serial
+loop over one mjData per simulation, at any thread count. The paragraphs below introduce the concepts the API is built
+on; the :ref:`function reference<Batchedsimulation>` has the details.
+
+**State rows.** A simulation is its :ref:`integration state<siIntegrationState>`: the inputs to the forward dynamics,
+of which every other mjData field is a function. The batch keeps these states in a table returned by :ref:`mjb_state`,
+an ``nsim x nstate`` array whose row ``i`` is simulation ``i``'s state, where ``nstate`` is :ref:`mjb_nstate`. The rows
+are the only input storage. Writing to ``ctrl``, ``qpos``, ``mocap_pos`` or the applied forces means writing to the
+corresponding part of a row, whose address :ref:`mjb_stateComponent` gives, and the write becomes that simulation's
+state at its next call. Each simulation also has warning counters, returned by :ref:`mjb_warning`, which are saved and
+restored with its row.
+
+**Calls.** A call such as :ref:`mjb_step` runs on the simulations selected by ``ids``, or on all of them. For each
+simulation, it loads the row into an mjData, runs the requested computation, and saves the row back. If MuJoCo raises an
+error in a simulation, that simulation keeps its previous state and the others run to completion; :ref:`mjb_status` and
+:ref:`mjb_error` report what happened.
+
+**Outputs.** Derived quantities such as ``xpos`` or ``sensordata`` are not part of the state, so they would be lost when
+the mjData moves on to the next simulation. :ref:`mjb_output` registers an mjData field as an *output*: after every
+call, the batch copies it out of each simulation's mjData into an ``nsim x size`` array that the batch owns.
+
+**Shared and persistent mjData.** By default, a batch keeps one mjData per thread, which each thread reuses for the
+simulations it runs, so memory scales with threads rather than simulations. Anything outside the state is then shared.
+A field the call does not compute, such as ``qfrc_inverse`` after :ref:`mj_step`, holds another simulation's value, and
+:ref:`engine plugins<exPlugin>` that keep state outside ``plugin_state`` share it among the simulations a thread runs. A
+batch :ref:`configured<mjBatchConfig>` to be *persistent* keeps one mjData per simulation instead, at the cost of
+``nsim`` mjData of memory. Every field and plugin instance is then the simulation's own, and :ref:`mjb_getData` copies
+the whole mjData. Models with :ref:`sleep<option-flag-sleep>` or :ref:`IPC<option-flag-ipc>` enabled require a
+persistent batch, because their bookkeeping lives in the mjData rather than in the state.
+
+**Stages.** After :ref:`mj_step`, derived fields describe the state *before* the last substep, because a step computes
+them first and then integrates; see :ref:`Consistency in mjData<piConsistency>`. To observe the new state, the calls
+that step or reset take a ``stage`` argument (an :ref:`mjtStage`): when the call is done, the batch runs the stages of
+:ref:`mj_forward` up to ``stage`` at the new state. ``mjSTAGE_VEL`` computes positions, velocities and the sensors that
+depend on them, as :ref:`mj_step1` does, which is what a policy typically observes. ``mjSTAGE_ACC`` runs all of
+:ref:`mj_forward`. See :ref:`mjb_step` for the details.
+
+**Continuation.** :ref:`mj_step` is :ref:`mj_step1` followed by :ref:`mj_step2`: the first computes the position and
+velocity stages, and the second completes the step. Observing the new state with ``mjSTAGE_VEL`` is therefore the same
+work as the first half of the next step. In a persistent batch, the simulation's mjData still holds those stages at the
+next call, so the next step skips them and *continues* with :ref:`mj_step2`, and fresh observations cost nothing extra.
+The batch continues a step only when the result is the same as that of a full step: when nothing the stages depend on
+has changed since they were computed, other than ``ctrl``, ``qfrc_applied`` and ``xfrc_applied``, which only
+:ref:`mj_step2` reads. A batch that is not persistent cannot continue, since its mjData have served other simulations
+in between. See :ref:`mjb_step` for the exact conditions.
+
+**Per-simulation models.** All simulations share the batch's copy of the model, made by :ref:`mjb_makeBatch`. To give
+simulations different model or option values, for example to randomize masses, friction or gravity, :ref:`mjb_expand`
+*expands* a field. It returns an ``nsim x size`` array, owned by the batch and initialized with the model's values,
+whose row ``i`` is copied into the model before each call on simulation ``i``. :ref:`Option<mjOption>` fields are named
+``"opt.<name>"``, and asset fields such as meshes and textures cannot be expanded. Writes to expanded fields do not
+update the constants that :ref:`mj_setConst` derives from them, such as the bodies' inverse weights; :ref:`mjb_setConst`
+runs :ref:`mj_setConst` for each simulation and expands every field it changes. Alternatively, :ref:`mjb_setModels` runs
+each simulation on a model the caller compiled, for example from one spec with different parameters, as long as it
+gives mjData the same layout as the batch's model. Either way, :ref:`mjb_getModel` writes one simulation's complete
+model into an mjModel the caller allocates, for rendering or to pass to any function.
+
+**Trajectories and queries.** :ref:`mjb_rollout` records open-loop trajectories: it applies a given control sequence and
+records chosen states or fields after every substep. :ref:`mjb_apply` runs any function on each simulation's model and
+data, for queries such as Jacobians or derivatives; see its reference for examples.
+
+.. code-block:: C
+
+   const int nsim = 1024;  // number of simulations
+   const int nstep = 500;  // number of control steps
+
+   // allocate batch
+   char error[1000];
+   mjBatchConfig config;
+   mjb_defaultConfig(&config);
+   config.nthread = 8;  // default 0: all logical CPUs, at most nsim
+   mjBatch* b = mjb_makeBatch(m, nsim, &config, error, sizeof(error));
+   if (!b) {
+     mju_error("could not make batch: %s", error);
+   }
+
+   // pointers into storage that the batch owns, valid until mjb_deleteBatch
+   int nstate = mjb_nstate(b);                                // length of a state row
+   mjtNum* ctrl = mjb_stateComponent(b, mjSTATE_CTRL, NULL);  // ctrl in row 0; row i is nstate*i further
+   mjtNum* xpos = mjb_output(b, "xpos", NULL, NULL);          // nsim x 3*nbody, copied after every call
+
+   // reset all simulations to the model's defaults, then compute every stage so that xpos is current
+   mjb_reset(b, /*ids=*/NULL, 0, /*key=*/NULL, mjSTAGE_ACC);
+
+   for (int k=0; k < nstep; k++) {
+     // write each simulation's controls into its row, from observations of its current state
+     for (int i=0; i < nsim; i++) {
+       policy(xpos + 3*m->nbody*i, ctrl + nstate*i);
+     }
+
+     // step every simulation once, then compute positions at the new state for the next observations
+     if (mjb_step(b, /*ids=*/NULL, 0, 1, mjSTAGE_VEL)) {
+       // simulations that raised an error kept their previous state; see mjb_status and mjb_error
+     }
+   }
+
+   // delete memory and threadpool
+   mjb_deleteBatch(b);
+
+**Threads and callbacks.** The batch's threads run across simulations, while those of :ref:`mju_threadpool` run within
+one simulation. The two are not combined, and the batch never installs an engine thread pool. Global callbacks such as
+:ref:`mjcb_control` run on the batch's threads, concurrently, and are not told which simulation they serve;
+per-simulation work belongs in :ref:`mjb_apply`.
+
+See :ref:`mujoco.batch<PyBatch>` for the Python module.
+
 .. _siChange:
 
 mjModel changes
@@ -690,7 +802,12 @@ Exceptions to the general rule that **integer** types are **not safe to change**
 
 When considering exceptions to the rule that real-valued parameters are safe to change, we need to note the function
 :ref:`mj_setConst`, which constitutes the last step of the compilation process. This function propagates changes from
-some fields to other fields, allowing changes that would otherwise be unsafe.
+some fields to other fields, allowing changes that would otherwise be unsafe. It does not redo what the compiler
+derives once from the conventions of the specification: the damping of actuators given a
+:ref:`dampratio<actuator-position-dampratio>`, the stiffness and damping of joints given a
+:ref:`springdamper<body-joint-springdamper>`, the spring length of tendons which have none, and the model statistics.
+These keep the values computed for the model as compiled; to change them, recompile the spec or set the derived values
+directly.
 
 Exceptions to the general rule that **real-valued** types **are safe to change**:
 
@@ -704,7 +821,7 @@ Exceptions to the general rule that **real-valued** types **are safe to change**
      - Notes
    * - ``qpos0`` |br| ``qpos_spring``
      - Safe with :ref:`mj_setConst`.
-     -
+     - The spring length of tendons which have none keeps its compiled value.
    * - ``body_mass`` |br| ``body_inertia`` |br| ``body_ipos`` |br| ``body_iquat``
      - Safe with :ref:`mj_setConst`.
      - Note that mass and inertia are usually scaled together, since inertia is :math:`\sum m r^2`. Scaling them
@@ -721,9 +838,18 @@ Exceptions to the general rule that **real-valued** types **are safe to change**
    * - ``dof_armature``
      - Safe with :ref:`mj_setConst`.
      -
-   * - ``geom_pos`` |br| ``geom_quat`` |br| ``geom_size`` |br| ``geom_rbound`` |br| ``geom_aabb``
-     - Unsafe.
+   * - ``geom_pos`` |br| ``geom_quat`` |br| ``geom_size``
+     - Safe with :ref:`mj_setConst`.
+     - The bounding volumes of geoms and bodies follow, and so does the added mass of geoms in the ellipsoid
+       :ref:`fluid model<flEllipsoid>`; masses and inertias inferred from geoms do not. The bounds of mesh and SDF geoms
+       follow from their mesh, not their size.
+   * - ``geom_margin`` |br| ``geom_gap``
+     - Safe with :ref:`mj_setConst`.
      -
+   * - ``geom_contype`` |br| ``geom_conaffinity``
+     - Safe with :ref:`mj_setConst`.
+     - A geom which did not collide when the model was compiled, in a body whose other geoms did, cannot be made to
+       collide.
    * - ``geom_surfacevel``
      - Safe.
      - If passing from a state where all geoms have zero surface velocity to a state where some geoms have
@@ -736,11 +862,14 @@ Exceptions to the general rule that **real-valued** types **are safe to change**
      - Mostly safe.
      - Affects whether kinematic trees are allowed to sleep. If changing from/to zero, :ref:`mj_setConst` is required.
    * - ``actuator_gainprm`` |br| ``actuator_biasprm``
-     - Mostly safe.
-     - For position-like actuators using :ref:`dampratio<actuator-position-dampratio>`, :ref:`mj_setConst` is required.
+     - Safe.
+     - The damping of position-like actuators given a :ref:`dampratio<actuator-position-dampratio>` is computed by the
+       compiler and keeps its value.
    * - ``eq_data``
      - Safe with :ref:`mj_setConst`.
-     - For connect and weld constraints, offsets are computed if not provided.
+     - For connect constraints between bodies, :ref:`mj_setConst` computes the anchor in the second body. For weld
+       constraints between bodies marked by a nonzero ``eq_data[11]``, which the compiler sets for those without a
+       relative pose, it computes the relative pose.
    * - ``hfield_size``
      - Safe with :ref:`mj_setConst`.
      -
@@ -759,8 +888,9 @@ Exceptions to the general rule that **real-valued** types **are safe to change**
      -
 
 Finally, if changes are made to mjModel at runtime, it may be desirable to save them back to the XML. The functions
-:ref:`mj_saveLastXML` and :ref:`mj_copyBack` do that in a limited sense: they copy all real-valued parameters from
-:ref:`mjModel` back to the :ref:`mjSpec` (the global internal spec in the former case, the user's copy in the latter).
+:ref:`mj_saveLastXML` and :ref:`mj_copyBack` do that in a limited sense: they copy the real-valued parameters which
+were changed in :ref:`mjModel` back to the :ref:`mjSpec` (the global internal spec in the former case, the user's copy
+in the latter), where they are saved and compiled again; see :ref:`mj_copyBack` for what is copied and how.
 This does not cover all possible changes that the user could have made. The only way to guarantee that all changes are
 saved is to save the model as a binary MJB file with the function :ref:`mj_saveModel`, or even better, make the changes
 directly in XML or :ref:`mjSpec`. So in summary, we have reasonable but not perfect mechanisms for saving model changes.
@@ -1279,8 +1409,10 @@ Sleeping can happen in one of two ways:
   Since trees which share contacts or are otherwise in the same island must sleep together, if some trees in an island
   are initialized as sleeping, all of them must be marked as such. `This model
   <https://github.com/google-deepmind/mujoco/blob/main/test/engine/testdata/sleep/init_island_fail.xml>`__ contains an
-  example XML that will produce a compilation error because this condition is not met. Finally, note that the
-  initialized-asleep feature is only available for the default configuration (and not keyframes, see discussion below).
+  example XML which does not meet this condition. When trees cannot be slept, during compilation or later in
+  :ref:`mj_resetData` (e.g., because a control callback applies force to them), a warning is issued and those trees
+  start awake. Finally, note that the initialized-asleep feature is only available for the default configuration (and
+  not keyframes, see discussion below).
 
 .. _siSleepWaking:
 
@@ -1400,9 +1532,12 @@ Notes
   for keyframes. Note that saving and loading the state using the :ref:`standard tools<geState>` remains a valid
   operation, merely that sleeping islands will be implicitly woken up.
 
-
 **RK4 integrator**
   The RK4 integrator is not currently supported, due to the subtleties of waking inside the sub-steps.
+
+**Finite-differenced derivatives**
+  :ref:`mjd_transitionFD` and :ref:`mjd_inverseFD` are not supported, since their repeated evaluations change the
+  sleep state.
 
 
 .. _siCoordinate:

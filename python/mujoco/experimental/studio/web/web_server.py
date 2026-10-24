@@ -39,6 +39,7 @@ _WS_CLOSE_SESSION_FULL.
 import asyncio
 import datetime
 import enum
+import functools
 import json
 import logging
 import os
@@ -47,8 +48,8 @@ import socket
 import struct
 import sys
 import threading
-import urllib.parse
 from typing import Any, Awaitable, Callable, cast
+import urllib.parse
 
 from websockets.asyncio.server import serve
 from websockets.asyncio.server import ServerConnection
@@ -65,6 +66,10 @@ _WS_CLOSE_CONTROLLER_TAKEN = 4001  # /ui:    another browser is controlling.
 _WS_CLOSE_SESSION_FULL = 4002  # /state: the spectator limit is reached.
 _WS_CLOSE_INACTIVE = 4003  # /state: hidden tab kicked to free a slot.
 _WS_CLOSE_NOT_CONTROLLER = 4004  # /drop: only the controller may load models.
+_WS_CLOSE_VIEWER_ERROR = 4005  # /state: the viewer stopped with an error.
+
+# A WebSocket close frame carries at most 123 bytes of reason text.
+_WS_CLOSE_REASON_MAX_BYTES = 123
 
 # Upper bound on the runtime-editable spectator limit.
 _MAX_SPECTATOR_HARD_CAP = 32
@@ -302,10 +307,11 @@ def bind_loopback_socket(port: int = 0) -> socket.socket:
     port: A specific port, or 0 to take the first free port.
 
   Returns:
-    The bound socket.
+    The bound, listening socket.
   """
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   sock.bind(("127.0.0.1", port))
+  sock.listen()
   return sock
 
 
@@ -318,6 +324,10 @@ def _session_id(ws: ServerConnection) -> str:
       return part[4:]
   return f"anon-{id(ws)}"
 
+
+def _close_reason(text: str) -> str:
+  """Fits text into a close frame's reason, cutting at a character boundary."""
+  return text.encode()[:_WS_CLOSE_REASON_MAX_BYTES].decode(errors="ignore")
 
 
 def _find_static_files_dir() -> str | None:
@@ -353,11 +363,11 @@ def _run_cancellable(main_loop_func: Callable[[], Awaitable[None]]) -> None:
     pass
   except Exception as e:  # pylint: disable=broad-exception-caught
     func_name = getattr(main_loop_func, "__name__", "main_loop_func")
-    logger.error("[%s] Unexpected error: %s", func_name, e)
+    logger.error("[%s] Unexpected error: %s", func_name, e, exc_info=True)
 
 
 def _run_server(
-    server: 'WebServer',
+    server: "WebServer",
     stop_event: threading.Event,
 ) -> None:
   """The server thread: HTTP + /ui + /state on one port, one event loop."""
@@ -385,7 +395,7 @@ def _run_server(
   def _serve_http(path: str) -> Response:
     """Builds the HTTP response for a non-WebSocket GET request."""
     if path == "/model":
-      mjb_data = server.mjb_data  # Snapshot to prevent race with update_model().
+      mjb_data = server.mjb_data  # Snapshot to prevent race with update_model()
       if not mjb_data:
         return Response(404, "Not Found", Headers(), b"no model\n")
       # The model changes on hot-swap; never serve a cached copy.
@@ -436,6 +446,21 @@ def _run_server(
     active_ui_ws = None
     controller_sid: str | None = None
     state_clients: dict[str, ServerConnection] = {}
+
+    # Wakes every /state stream when the viewer thread publishes a payload (see
+    # WebServer.update_state), so a payload goes out the moment it exists. A
+    # 60Hz poll instead would free-run against the viewer's 60Hz frame clock
+    # and periodically cost a whole tick. One event per stream: each stream
+    # clears its own, so a shared one would lose wakeups for the others.
+    state_waiters: set[asyncio.Event] = set()
+
+    def wake_state_streams() -> None:
+      for event in state_waiters:
+        event.set()
+
+    server._wake_state_streams = functools.partial(
+        asyncio.get_running_loop().call_soon_threadsafe, wake_state_streams
+    )
 
     # Control handoff: spectators queue for the controller slot; when it frees,
     # the head of the queue is granted a short exclusive claim window.
@@ -781,23 +806,27 @@ def _run_server(
       # input latency).
       payload_acked = asyncio.Event()
       payload_acked.set()
+      # Set initially so a browser that connects between payloads gets the
+      # current one right away.
+      state_ready = asyncio.Event()
+      state_ready.set()
+      state_waiters.add(state_ready)
 
       async def send_payloads() -> None:
         last_gen = 0
         while True:
-          await asyncio.sleep(1.0 / 60.0)
-          # _state_generation is bumped by WebServer.update_state() on the
-          # viewer thread.
-          if server._state_generation == last_gen:
-            continue
+          await state_ready.wait()
           try:
             await asyncio.wait_for(
                 payload_acked.wait(), timeout=_STATE_ACK_TIMEOUT_SEC
             )
           except asyncio.TimeoutError:
             pass  # Lost ack; send anyway rather than stalling forever.
+          # Cleared before the read: an update racing with it sets the event
+          # again and is picked up on the next pass instead of being lost.
+          state_ready.clear()
           result = read_state()
-          if result is None:
+          if result is None or result[0] == last_gen:
             continue
           last_gen, data = result
           payload_acked.clear()
@@ -830,6 +859,7 @@ def _run_server(
       except (ConnectionClosed, ConnectionError):
         pass
       finally:
+        state_waiters.discard(state_ready)
         # Only tear down if this socket is still the one registered for sid: a
         # reconnect may have already replaced it, and that newer connection now
         # owns the queue and heartbeat entries.
@@ -884,7 +914,7 @@ def _run_server(
       # Full model endpoint: the client fetches /model in a single request
       #
       #   GET /model  -> full model bytes
-      mjb_data = server.mjb_data  # Snapshot to prevent race with update_model().
+      mjb_data = server.mjb_data  # Snapshot to prevent race with update_model()
       if path == "/model" and mjb_data and query_string:
         params = urllib.parse.parse_qs(query_string)
         if "total_bytes" in params or query_string == "total_bytes":
@@ -1059,7 +1089,26 @@ def _run_server(
     try:
       await watch_stop()
     finally:
+      server._wake_state_streams = None
       enforcer.cancel()
+      if server.stop_reason:
+        # Tell the browsers why the viewer stopped, so the page can show it;
+        # ws_server.close() below only says "going away". Bounded: a browser
+        # that never answers the close handshake must not hold up teardown.
+        reason = _close_reason(server.stop_reason)
+        try:
+          await asyncio.wait_for(
+              asyncio.gather(
+                  *(
+                      ws.close(_WS_CLOSE_VIEWER_ERROR, reason)
+                      for ws in list(state_clients.values())
+                  ),
+                  return_exceptions=True,
+              ),
+              timeout=1.0,
+          )
+        except asyncio.TimeoutError:
+          pass
       # Close listeners explicitly to prevent hanging on open client sockets.
       ws_server.close()
       tcp_server.close()
@@ -1115,15 +1164,27 @@ class WebServer:
     self._state_lock = threading.Lock()
     self._state_payload: bytes | None = None
     self._state_generation: int = 0
+    self._wake_state_streams: Callable[[], Any] | None = None
 
     self._stop_event = threading.Event()
     self._thread: threading.Thread | None = None
+    # Why the viewer stopped, when not normally (see stop()); read by the
+    # server thread as it shuts down.
+    self.stop_reason = ""
 
   def update_state(self, payload: bytes) -> None:
     """Publishes the latest state payload. Called from the viewer thread."""
     with self._state_lock:
       self._state_payload = payload
       self._state_generation += 1
+    # Hop to the server thread's event loop to wake the /state streams; unset
+    # while the server thread is not running.
+    wake = self._wake_state_streams
+    if wake is not None:
+      try:
+        wake()
+      except RuntimeError:
+        pass  # The server's event loop has just closed.
 
   def update_model(self, mjb_data: bytes) -> None:
     """Swaps the model bytes served at /model. No server restart needed."""
@@ -1145,8 +1206,15 @@ class WebServer:
     )
     self._thread.start()
 
-  def stop(self) -> None:
-    """Stops the server thread."""
+  def stop(self, reason: str = "") -> None:
+    """Stops the server thread.
+
+    Args:
+      reason: Why the viewer stopped, when this is not a normal exit: a one-line
+        summary of the exception that ended it. Sent to the connected browsers,
+        which show it on the page.
+    """
+    self.stop_reason = reason
     self._stop_event.set()
     if self._thread is not None:
       self._thread.join(timeout=5.0)

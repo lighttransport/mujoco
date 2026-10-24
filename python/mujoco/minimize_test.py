@@ -45,6 +45,17 @@ class MinimizeTest(absltest.TestCase):
     self.assertIn('norm(gradient) < tol', out.getvalue())
     self.assertIn('exact minimum found', out.getvalue())
 
+  def test_start_at_minimum_silent(self) -> None:
+    def residual(x):
+      return np.stack([1 - x[0, :], 10 * (x[1, :] - x[0, :] ** 2)])
+
+    out = io.StringIO()
+    x0 = np.array((1.0, 1.0))
+    minimize.least_squares(
+        x0, residual, output=out, verbose=minimize.Verbosity.SILENT
+    )
+    self.assertEqual(out.getvalue(), '')
+
   def test_xtol_returns_accepted_candidate(self) -> None:
     def residual(x):
       return x - 1.0
@@ -55,6 +66,49 @@ class MinimizeTest(absltest.TestCase):
     )
     np.testing.assert_array_equal(x, np.array([1.0]))
     self.assertIn('norm(dx) < tol', out.getvalue())
+
+  def test_nonfinite_trial_recovers(self) -> None:
+    for analytic_jacobian in (False, True):
+      with self.subTest(analytic_jacobian=analytic_jacobian):
+        evaluated = []
+
+        def residual(x):
+          evaluated.append(x.copy())
+          with np.errstate(invalid='ignore'):
+            return np.log(x)
+
+        def jacobian(x, r):
+          del r
+          return 1 / x
+
+        x, trace = minimize.least_squares(
+            np.array([10.0]),
+            residual,
+            jacobian=jacobian if analytic_jacobian else None,
+            output=io.StringIO(),
+        )
+
+        self.assertTrue(any(np.any(point < 0) for point in evaluated))
+        np.testing.assert_allclose(x, [1.0], atol=1e-7)
+        self.assertTrue(all(np.isfinite(log.objective) for log in trace))
+        self.assertTrue(all(np.all(log.candidate > 0) for log in trace))
+
+  def test_nonfinite_trials_keep_last_candidate(self) -> None:
+    for invalid_value in (np.nan, np.inf, -np.inf):
+      with self.subTest(invalid_value=invalid_value):
+
+        def residual(x):
+          return np.where(x >= 0, x + 1, invalid_value)
+
+        out = io.StringIO()
+        x, trace = minimize.least_squares(
+            np.array([0.0]), residual, mu_max=1e-3, output=out
+        )
+
+        np.testing.assert_array_equal(x, [0.0])
+        self.assertLen(trace, 1)
+        self.assertEqual(trace[0].objective, 0.5)
+        self.assertIn('insufficient reduction', out.getvalue())
 
   def test_jac_callback(self) -> None:
     def residual(x):
@@ -87,6 +141,60 @@ class MinimizeTest(absltest.TestCase):
           output=out,
           check_derivatives=True,
       )
+
+  def test_check_derivatives_rejects_nonfinite(self) -> None:
+    for value in (np.nan, np.inf, -np.inf):
+      with self.subTest(value=value):
+        # Nonfinite user-provided Jacobian.
+        def jacobian(x, r):
+          del x, r  # Unused.
+          return np.array([[value]])
+
+        out = io.StringIO()
+        with np.errstate(all='ignore'):
+          with self.assertRaisesRegex(ValueError, 'User-provided Jacobian'):
+            minimize.least_squares(
+                np.array([1.0]),
+                lambda x: x - 3.0,
+                jacobian=jacobian,
+                check_derivatives=True,
+                output=out,
+            )
+        self.assertNotIn('matches', out.getvalue())
+
+        # Nonfinite finite-difference Jacobian.
+        def residual(x):
+          r = x.copy()
+          r[1] = value
+          return r
+
+        out = io.StringIO()
+        with np.errstate(all='ignore'):
+          with self.assertRaisesRegex(ValueError, 'Finite-difference Jacobian'):
+            minimize.check_jacobian(
+                residual,
+                np.array([[1.0], [2.0]]),
+                np.array([[1.0], [2.0]]),
+                np.eye(2),
+                np.float64(1e-6),
+                0,
+                output=out,
+            )
+        self.assertNotIn('matches', out.getvalue())
+
+        # Nonfinite norm Hessian.
+        class NonfiniteHess(minimize.Norm):
+
+          def value(self, r):
+            return (r.T @ r).item() / 2
+
+          def grad_hess(self, r, proj):
+            return proj.T @ r, np.full((r.size, r.size), value)
+
+        with self.assertRaisesRegex(ValueError, 'norm Hessian must contain'):
+          minimize.check_norm(
+              np.array([[1.0], [2.0]]), NonfiniteHess(), np.float64(1e-6)
+          )
 
   def test_max_iter(self) -> None:
     dim = 20  # High-D Rosenbrock
@@ -183,14 +291,66 @@ class MinimizeTest(absltest.TestCase):
         x = np.array([[x0]])
         evaluated = []
 
-        def residual(xx, _ev=evaluated):
-          _ev.append(np.asarray(xx, dtype=np.float64).copy())
-          return np.atleast_2d(np.sum(xx, axis=0))
+        def make_eval_residual(eval_list):
+          def residual(xx):
+            eval_list.append(np.asarray(xx, dtype=np.float64).copy())
+            return np.atleast_2d(np.sum(xx, axis=0))
+          return residual
+
+        residual = make_eval_residual(evaluated)
 
         minimize.jacobian_fd(residual, x, residual(x), eps, 0, bounds)
         pts = np.concatenate([e.ravel() for e in evaluated])
         self.assertGreaterEqual(pts.min(), lo)
         self.assertLessEqual(pts.max(), hi)
+
+  def test_jacobian_fd_narrow_bounds(self) -> None:
+    eps = np.float64(np.finfo(np.float64).eps ** 0.5)
+    one_up = np.nextafter(1.0, np.inf)
+    two_up = np.nextafter(one_up, np.inf)
+    cases = {
+        'mixed_scales': (
+            [1.0, -1.0, -1e-10, 1e8],
+            [1.0 + 1e-10, -1.0 + 1e-10, 1e-11, 1e8 + 1e-4],
+        ),
+        'midpoint_rounds_down': ([1.0], [one_up]),
+        'midpoint_rounds_up': ([one_up], [two_up]),
+    }
+    for name, (lower, upper) in cases.items():
+      bounds = [np.array(lower)[:, None], np.array(upper)[:, None]]
+      points = (bounds[0], 0.5 * bounds[0] + 0.5 * bounds[1], bounds[1])
+      for position, x in enumerate(points):
+        with self.subTest(case=name, position=position):
+
+          def make_bounded_residual(curr_bounds):
+            def residual(xx):
+              self.assertTrue(np.all(xx >= curr_bounds[0]))
+              self.assertTrue(np.all(xx <= curr_bounds[1]))
+              return xx.copy()
+            return residual
+
+          residual = make_bounded_residual(bounds)
+
+          jac, n_res = minimize.jacobian_fd(
+              residual, x, residual(x), eps, 3, bounds
+          )
+          np.testing.assert_array_equal(jac, np.eye(x.size))
+          self.assertEqual(n_res, 3 + x.size)
+
+  def test_least_squares_narrow_bounds(self) -> None:
+    lower = np.array([0.0])
+    upper = np.array([1e-10])
+    target = 0.75 * upper
+
+    def residual(x):
+      self.assertTrue(np.all(x >= lower[:, None]))
+      self.assertTrue(np.all(x <= upper[:, None]))
+      return (x - target[:, None]) / upper[:, None]
+
+    x, _ = minimize.least_squares(
+        lower, residual, bounds=[lower, upper], output=io.StringIO()
+    )
+    np.testing.assert_allclose(x, target, rtol=0, atol=1e-22)
 
   def test_iter_callback(self) -> None:
     def residual(x):

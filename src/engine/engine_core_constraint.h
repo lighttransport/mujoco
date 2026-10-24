@@ -27,9 +27,6 @@ extern "C" {
 
 //-------------------------- Jacobian-related ------------------------------------------------------
 
-// determine type of solver
-MJAPI int mj_isDual(const mjModel* m);
-
 // multiply Jacobian by vector
 MJAPI void mj_mulJacVec(const mjModel* m, const mjData* d, mjtNum* res, const mjtNum* vec);
 
@@ -53,6 +50,10 @@ void mj_assignFriction(const mjModel* m, mjtNum* target, const mjtNum* source);
 
 // assign/override geom margin
 mjtNum mj_assignMargin(const mjModel* m, mjtNum source);
+
+// compute contact condim, solref, solimp, friction, adhesion
+void mj_contactParam(const mjModel* m, int* condim, mjtNum* solref, mjtNum* solimp,
+                     mjtNum* friction, mjtNum* adhesion, int g1, int g2, int f1, int f2);
 
 // add contact to d->contact list; return 0 if success; 1 if buffer full
 MJAPI int mj_addContact(const mjModel* m, mjData* d, const mjContact* con);
@@ -81,7 +82,7 @@ void mj_instantiateContact(const mjModel* m, mjData* d);
 //   chain:   list of DOF indices affecting contact [NV], unused if dense
 //
 // Returns:
-//   number of DOFs affected (NV for sparse, nv for dense)
+//   number of DOFs affected (NV for sparse, nv for dense), 0 if contact affects no DOFs
 MJAPI int mj_contactJacobian(const mjModel* m, mjData* d, const mjContact* con, int dim,
                              mjtNum* jacdifp, mjtNum* jacdifr,
                              mjtNum* jac1p, mjtNum* jac2p,

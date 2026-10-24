@@ -211,6 +211,26 @@
     </xs:restriction>
   </xs:simpleType>
 
+  <xs:simpleType name="kw_actuatortype">
+    <xs:annotation>
+      <xs:documentation>the element an actuator is written with</xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="general"/>
+      <xs:enumeration value="motor"/>
+      <xs:enumeration value="position"/>
+      <xs:enumeration value="velocity"/>
+      <xs:enumeration value="intvelocity"/>
+      <xs:enumeration value="damper"/>
+      <xs:enumeration value="cylinder"/>
+      <xs:enumeration value="muscle"/>
+      <xs:enumeration value="adhesion"/>
+      <xs:enumeration value="pid"/>
+      <xs:enumeration value="orientation"/>
+      <xs:enumeration value="dcmotor"/>
+    </xs:restriction>
+  </xs:simpleType>
+
   <xs:simpleType name="kw_dyn">
     <xs:restriction base="xs:string">
       <xs:enumeration value="none"/>
@@ -261,6 +281,7 @@
       <xs:enumeration value="vel"/>
       <xs:enumeration value="ff"/>
       <xs:enumeration value="voltage"/>
+      <xs:enumeration value="pressure"/>
     </xs:restriction>
   </xs:simpleType>
   <xs:simpleType name="kwlist_inputbit">
@@ -329,6 +350,8 @@
       <xs:enumeration value="pos"/>
       <xs:enumeration value="normal"/>
       <xs:enumeration value="tangent"/>
+      <xs:enumeration value="linvel"/>
+      <xs:enumeration value="angvel"/>
     </xs:restriction>
   </xs:simpleType>
   <xs:simpleType name="kwlist_condata">
@@ -385,6 +408,20 @@
     </xs:restriction>
   </xs:simpleType>
 
+  <xs:simpleType name="kw_passthrough">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="none"/>
+      <xs:enumeration value="textures"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="kw_scaling">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="similar"/>
+      <xs:enumeration value="geometry"/>
+    </xs:restriction>
+  </xs:simpleType>
+
   <xs:simpleType name="kw_lrmode">
     <xs:restriction base="xs:string">
       <xs:enumeration value="none"/>
@@ -411,6 +448,14 @@
     </xs:annotation>
     <xs:restriction base="xs:string">
       <xs:enumeration value="main"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="kw_initial">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="none"/>
+      <xs:enumeration value="free"/>
+      <xs:enumeration value="ball"/>
     </xs:restriction>
   </xs:simpleType>
 
@@ -442,6 +487,12 @@
       <xs:enumeration value="supersphere"/>
       <xs:enumeration value="wedge"/>
       <xs:enumeration value="plate"/>
+      <xs:enumeration value="grid"/>
+      <xs:enumeration value="box"/>
+      <xs:enumeration value="cylinder"/>
+      <xs:enumeration value="ellipsoid"/>
+      <xs:enumeration value="square"/>
+      <xs:enumeration value="disc"/>
     </xs:restriction>
   </xs:simpleType>
 
@@ -486,6 +537,13 @@
       <xs:enumeration value="bend"/>
       <xs:enumeration value="stretch"/>
       <xs:enumeration value="both"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="kw_flexsection">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="circle"/>
+      <xs:enumeration value="box"/>
     </xs:restriction>
   </xs:simpleType>
 
@@ -727,6 +785,8 @@
     <xs:attribute name="inertiafromgeom" type="kw_FalseTrueAuto" default="auto"/>
     <xs:attribute name="inertiagrouprange" type="int2" default="0 5"/>
     <xs:attribute name="saveinertial" type="kw_bool"/>
+    <xs:attribute name="savecompiled" type="kw_bool" default="true"/>
+    <xs:attribute name="savecanonical" type="kw_bool" default="true"/>
     <xs:attribute name="assetdir" type="xs:string">
       <xs:annotation>
         <xs:documentation>fans out to mesh/texturedir</xs:documentation>
@@ -734,6 +794,7 @@
     </xs:attribute>
     <xs:attribute name="alignfree" type="kw_bool"/>
     <xs:attribute name="conflict" type="kw_conflict"/>
+    <xs:attribute name="passthrough" type="kw_passthrough"/>
   </xs:complexType>
 
   <xs:complexType name="option">
@@ -908,11 +969,12 @@
 
   <xs:complexType name="default">
     <xs:annotation>
-      <xs:documentation>children, with cardinality the XSD cannot enforce (? at most one, ! exactly one, * any number, R recursive): default (R), mesh (?), material (?), joint (?), geom (?), site (?), camera (?), light (?), pair (?), default_equality (?), default_tendon (?), general (?), motor (?), position (?), velocity (?), intvelocity (?), orientation (?), pid (?), damper (?), cylinder (?), muscle (?), adhesion (?), dcmotor (?)</xs:documentation>
+      <xs:documentation>children, with cardinality the XSD cannot enforce (? at most one, ! exactly one, * any number, R recursive): default (R), mesh (?), texture (?), material (?), joint (?), geom (?), site (?), camera (?), light (?), pair (?), default_equality (?), default_tendon (?), general (?), motor (?), position (?), velocity (?), intvelocity (?), orientation (?), pid (?), damper (?), cylinder (?), muscle (?), adhesion (?), dcmotor (?)</xs:documentation>
     </xs:annotation>
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:element name="default" type="default"/>
       <xs:element name="mesh" type="default_mesh"/>
+      <xs:element name="texture" type="default_texture"/>
       <xs:element name="material" type="default_material"/>
       <xs:element name="joint" type="default_joint"/>
       <xs:element name="geom" type="default_geom"/>
@@ -1296,6 +1358,35 @@
     <xs:attribute name="inertia" type="kw_meshinertia" default="legacy"/>
   </xs:complexType>
 
+  <xs:complexType name="default_texture">
+    <xs:attribute name="type" type="kw_texture" default="cube"/>
+    <xs:attribute name="colorspace" type="kw_colorspace" default="auto"/>
+    <xs:attribute name="gridsize" type="int2" default="1 1"/>
+    <xs:attribute name="gridlayout">
+      <xs:annotation>
+        <xs:documentation>length must equal the gridsize product</xs:documentation>
+      </xs:annotation>
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:minLength value="1"/>
+          <xs:maxLength value="12"/>
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="builtin" type="kw_builtin"/>
+    <xs:attribute name="rgb1" type="double3" default="0.8 0.8 0.8"/>
+    <xs:attribute name="rgb2" type="double3" default="0.5 0.5 0.5"/>
+    <xs:attribute name="mark" type="kw_mark"/>
+    <xs:attribute name="markrgb" type="double3"/>
+    <xs:attribute name="random" type="xs:double" default="0.01"/>
+    <xs:attribute name="width" type="xs:int"/>
+    <xs:attribute name="height" type="xs:int"/>
+    <xs:attribute name="hflip" type="kw_bool"/>
+    <xs:attribute name="vflip" type="kw_bool"/>
+    <xs:attribute name="nchannel" type="xs:int" default="3"/>
+    <xs:attribute name="embed" type="kw_FalseTrueAuto" default="auto"/>
+  </xs:complexType>
+
   <xs:complexType name="default_material">
     <xs:annotation>
       <xs:documentation>children, with cardinality the XSD cannot enforce (? at most one, ! exactly one, * any number, R recursive): layer (*)</xs:documentation>
@@ -1577,13 +1668,18 @@
         <xs:documentation>saved default depends on dyntype</xs:documentation>
       </xs:annotation>
     </xs:attribute>
-    <xs:attribute name="input" type="kw_inputchart">
+    <xs:attribute name="input" type="xs:string">
       <xs:annotation>
-        <xs:documentation>so3 chart keyword, or servo token subset</xs:documentation>
+        <xs:documentation>so3 chart keyword, input tokens, or none</xs:documentation>
       </xs:annotation>
     </xs:attribute>
     <xs:attribute name="velrange" type="double2"/>
     <xs:attribute name="ffrange" type="double2"/>
+    <xs:attribute name="inheritrange" type="xs:double">
+      <xs:annotation>
+        <xs:documentation>compiled values have the range in its place</xs:documentation>
+      </xs:annotation>
+    </xs:attribute>
     <xs:attribute name="dyntype" type="kw_dyn" default="none"/>
     <xs:attribute name="gaintype" type="kw_gain" default="fixed">
       <xs:annotation>
@@ -1978,6 +2074,7 @@
 
   <xs:complexType name="texture">
     <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="class" type="xs:string"/>
     <xs:attribute name="type" type="kw_texture" default="cube"/>
     <xs:attribute name="colorspace" type="kw_colorspace" default="auto"/>
     <xs:attribute name="content_type" type="xs:string"/>
@@ -2011,6 +2108,7 @@
     <xs:attribute name="hflip" type="kw_bool"/>
     <xs:attribute name="vflip" type="kw_bool"/>
     <xs:attribute name="nchannel" type="xs:int" default="3"/>
+    <xs:attribute name="embed" type="kw_FalseTrueAuto" default="auto"/>
   </xs:complexType>
 
   <xs:complexType name="material">
@@ -2074,6 +2172,7 @@
     <xs:attribute name="gravcomp" type="xs:double"/>
     <xs:attribute name="sleep" type="kw_bodysleep"/>
     <xs:attribute name="simple" type="kw_FalseAuto" default="auto"/>
+    <xs:attribute name="fuse" type="kw_FalseAuto" default="auto"/>
     <xs:attribute name="user" type="doublelist"/>
   </xs:complexType>
 
@@ -2106,6 +2205,9 @@
     <xs:attribute name="xyaxes" type="double6"/>
     <xs:attribute name="zaxis" type="double3"/>
     <xs:attribute name="euler" type="double3"/>
+    <xs:attribute name="scale" type="double1to3" default="1 1 1"/>
+    <xs:attribute name="scaling" type="kw_scaling" default="similar"/>
+    <xs:attribute name="massscale" type="xs:double" default="0"/>
   </xs:complexType>
 
   <xs:complexType name="replicate">
@@ -2331,7 +2433,7 @@
     <xs:attribute name="count" type="int1to3"/>
     <xs:attribute name="offset" type="double3"/>
     <xs:attribute name="vertex" type="doublelist"/>
-    <xs:attribute name="initial" type="xs:string"/>
+    <xs:attribute name="initial" type="kw_initial" default="ball"/>
     <xs:attribute name="curve" type="xs:string"/>
     <xs:attribute name="size" type="double1to3"/>
     <xs:attribute name="quat" type="double4"/>
@@ -2363,6 +2465,7 @@
     <xs:attribute name="inertiabox" type="xs:double"/>
     <xs:attribute name="scale" type="double3"/>
     <xs:attribute name="file" type="xs:string"/>
+    <xs:attribute name="mesh" type="xs:string"/>
     <xs:attribute name="point" type="doublelist"/>
     <xs:attribute name="element" type="doublelist"/>
     <xs:attribute name="texcoord" type="doublelist"/>
@@ -2461,7 +2564,7 @@
     <xs:attribute name="class" type="xs:string"/>
     <xs:attribute name="group" type="xs:int"/>
     <xs:attribute name="limited" type="kw_FalseTrueAuto" default="auto"/>
-    <xs:attribute name="actuatorfrclimited" type="kw_FalseTrueAuto"/>
+    <xs:attribute name="actuatorfrclimited" type="kw_FalseTrueAuto" default="auto"/>
     <xs:attribute name="range" type="double2"/>
     <xs:attribute name="actuatorfrcrange" type="double2"/>
     <xs:attribute name="solreflimit" type="double1to2" default="0.02 1"/>
@@ -2504,7 +2607,7 @@
     <xs:attribute name="class" type="xs:string"/>
     <xs:attribute name="group" type="xs:int"/>
     <xs:attribute name="limited" type="kw_FalseTrueAuto" default="auto"/>
-    <xs:attribute name="actuatorfrclimited" type="kw_FalseTrueAuto"/>
+    <xs:attribute name="actuatorfrclimited" type="kw_FalseTrueAuto" default="auto"/>
     <xs:attribute name="range" type="double2"/>
     <xs:attribute name="actuatorfrcrange" type="double2"/>
     <xs:attribute name="solreflimit" type="double1to2" default="0.02 1"/>
@@ -2664,13 +2767,18 @@
         <xs:documentation>saved default depends on dyntype</xs:documentation>
       </xs:annotation>
     </xs:attribute>
-    <xs:attribute name="input" type="kw_inputchart">
+    <xs:attribute name="input" type="xs:string">
       <xs:annotation>
-        <xs:documentation>so3 chart keyword, or servo token subset</xs:documentation>
+        <xs:documentation>so3 chart keyword, input tokens, or none</xs:documentation>
       </xs:annotation>
     </xs:attribute>
     <xs:attribute name="velrange" type="double2"/>
     <xs:attribute name="ffrange" type="double2"/>
+    <xs:attribute name="inheritrange" type="xs:double">
+      <xs:annotation>
+        <xs:documentation>compiled values have the range in its place</xs:documentation>
+      </xs:annotation>
+    </xs:attribute>
     <xs:attribute name="dyntype" type="kw_dyn" default="none"/>
     <xs:attribute name="gaintype" type="kw_gain" default="fixed">
       <xs:annotation>
@@ -3651,6 +3759,7 @@
     <xs:attribute name="site" type="xs:string" use="required"/>
     <xs:attribute name="objtype" type="kw_frameobj" use="required"/>
     <xs:attribute name="objname" type="xs:string" use="required"/>
+    <xs:attribute name="enclosed" type="kw_bool" default="false"/>
   </xs:complexType>
 
   <xs:complexType name="distance">
@@ -4049,6 +4158,8 @@
     <xs:attribute name="damping" type="xs:double"/>
     <xs:attribute name="thickness" type="xs:double" default="-1"/>
     <xs:attribute name="elastic2d" type="kw_elastic2d"/>
+    <xs:attribute name="section" type="kw_flexsection"/>
+    <xs:attribute name="sectionsize" type="double2"/>
   </xs:complexType>
 
   <xs:complexType name="flexcomp_contact">
@@ -4062,7 +4173,6 @@
     <xs:attribute name="solimp" type="double1to5" default="0.9 0.95 0.001 0.5 2"/>
     <xs:attribute name="margin" type="xs:double"/>
     <xs:attribute name="gap" type="xs:double"/>
-    <xs:attribute name="internal" type="kw_bool"/>
     <xs:attribute name="selfcollide" type="kw_flexself" default="auto"/>
     <xs:attribute name="activelayers" type="xs:int" default="1"/>
     <xs:attribute name="passive" type="kw_bool"/>

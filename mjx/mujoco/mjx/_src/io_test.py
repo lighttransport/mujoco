@@ -28,7 +28,9 @@ from mujoco.mjx._src import io as mjx_io
 from mujoco.mjx._src import test_util
 # pylint: disable=g-importing-member
 from mujoco.mjx._src.types import ConeType
+from mujoco.mjx._src.types import EnableBit
 from mujoco.mjx._src.types import Impl
+from mujoco.mjx._src.types import IntegratorType
 from mujoco.mjx._src.types import JacobianType
 # pylint: enable=g-importing-member
 import mujoco.mjx.warp as mjxw
@@ -244,6 +246,25 @@ class ModelIOTest(parameterized.TestCase):
               '<mujoco><option integrator="implicit"/><worldbody/></mujoco>'
           )
       )
+
+  def test_discrete_integrator(self):
+    m = mujoco.MjModel.from_xml_string(
+        '<mujoco><option integrator="discrete"/><worldbody/></mujoco>'
+    )
+    mx = mjx.put_model(m)
+    self.assertEqual(mx.opt.integrator, IntegratorType.DISCRETE)
+
+  def test_ipc_enableflag(self):
+    m = mujoco.MjModel.from_xml_string("""
+      <mujoco>
+        <option integrator="discrete" solver="CG">
+          <flag ipc="enable"/>
+        </option>
+        <worldbody/>
+      </mujoco>
+    """)
+    mx = mjx.put_model(m)
+    self.assertTrue(mx.opt.enableflags & EnableBit.IPC)
 
   def test_pgs_not_implemented(self):
     with self.assertRaises(NotImplementedError):
@@ -1003,6 +1024,11 @@ class DataIOTest(parameterized.TestCase):
     addr0 = int(lo[0]) | (int(hi[0]) << 32)
     addr1 = int(lo[1]) | (int(hi[1]) << 32)
     self.assertNotEqual(addr0, addr1)
+
+    jit_vmjx_data = jax.jit(jax.vmap(put_data, in_axes=0, out_axes=0))(
+        jp.zeros(2, dtype=jp.uint32)
+    )
+    np.testing.assert_allclose(jit_vmjx_data.qpos[:, 0], [1.0, 1.0])
 
 
 # Test cases for `_resolve_impl_and_device` where the device is

@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -33,20 +34,9 @@
 #include <mujoco/mjtype.h>
 #include "user/user_objects.h"
 
-typedef std::map<std::string, int, std::less<>> mjKeyMap;
-typedef std::array<mjKeyMap, mjNOBJECT>         mjListKeyMap;
-
-typedef struct mjKeyInfo_ {
-  std::string name;
-
-  double time;
-  bool   qpos;
-  bool   qvel;
-  bool   act;
-  bool   ctrl;
-  bool   mpos;
-  bool   mquat;
-} mjKeyInfo;
+typedef std::map<std::string, int, std::less<>>                    mjKeyMap;
+typedef std::array<mjKeyMap, mjNOBJECT>                            mjListKeyMap;
+typedef std::array<std::unordered_set<std::string>, mjNOBJECT + 1> mjNameSet;
 
 class mjCModel_ : public mjsElement {
  public:
@@ -56,6 +46,10 @@ class mjCModel_ : public mjsElement {
 
  protected:
   bool compiled;  // already compiled flag
+
+  // the keyframes were stored in the elements since the last compilation, because the tree
+  // changed: a vector which a keyframe has now was given to it for the tree as it is now
+  bool keysstored = false;
 
   // sizes set from object list lengths
   mjtSize nbody;     // number of bodies
@@ -103,9 +97,9 @@ class mjCModel_ : public mjsElement {
   mjtSize nflexbending;    // number of bending parameters in all flexes
   mjtSize nefm0dof;        // number of dofs covered by the bending factor
   mjtSize nefm0L;          // number of non-zeros in the bending factor
+  mjtSize nefmCvert;       // number of sparse metric factor ordering slots
   mjtSize nflexelemedge;   // number of element edges in all flexes
   mjtSize nflexshelldata;  // number of shell fragment vertex ids in all flexes
-  mjtSize nflexevpair;     // number of element-vertex pairs in all flexes
   mjtSize nflextexcoord;   // number of vertex texture coordinates in all flexes
   mjtSize nJfe;            // number of non-zeros in sparse flex edge constraint Jacobian
   mjtSize nJfv;            // number of non-zeros in sparse flex vertex constraint Jacobian
@@ -199,6 +193,7 @@ class mjCModel : public mjCModel_, private mjSpec {
   mjCModel& operator=(const mjCModel& other);    // copy other into this, if they are not the same
   mjCModel& operator+=(const mjCModel& other);   // add other into this, even if they are the same
   mjCModel& operator-=(const mjCBody& subtree);  // remove subtree and all references from model
+  mjCModel& operator-=(const mjCFrame& frame);   // remove frame, its contents and all references
   mjCModel& operator+=(mjCDef& subtree);         // add default tree to this model
   mjCModel& operator-=(const mjCDef& subtree);   // remove default tree from this model
 
@@ -206,16 +201,22 @@ class mjCModel : public mjCModel_, private mjSpec {
   double timer[mjNCTIMER] = {0};  // compiler timers
 
   mjModel* Compile(const mjVFS* vfs = nullptr, mjModel** m = nullptr);  // construct mjModel
-  bool     CopyBack(const mjModel*);    // DECOMPILER: copy numeric back
-  void     FuseStatic();                // fuse static bodies with parent
-  void     FuseReindex(mjCBody* body);  // reindex elements during fuse
+
+  // compile the assets and the kinematic tree of the spec as it is now, without constructing an
+  // mjModel, so that what compilation derives from them can be read; if it fails, save the
+  // error and return false
+  bool Resolve(const mjVFS* vfs = nullptr, bool textures = true);
+  bool CopyBack(const mjModel*);         // DECOMPILER: copy numeric back
+  int  FuseStatic(const mjVFS* vfs);     // fuse static bodies with parent, return number fused
+  int  DiscardVisual(const mjVFS* vfs);  // discard visual elements, return number discarded
+  int  DedupAssets();                    // merge duplicate assets, return number merged
 
   // API for adding model elements
   mjCFlex*     AddFlex();
   mjCMesh*     AddMesh(mjCDef* def = nullptr);
   mjCSkin*     AddSkin();
   mjCHField*   AddHField();
-  mjCTexture*  AddTexture();
+  mjCTexture*  AddTexture(mjCDef* def = nullptr);
   mjCMaterial* AddMaterial(mjCDef* def = nullptr);
   mjCPair*     AddPair(mjCDef* def = nullptr);      // geom pair for inclusion
   mjCBodyPair* AddExclude();                        // body pair for exclusion
@@ -231,14 +232,6 @@ class mjCModel : public mjCModel_, private mjSpec {
 
   // append spec to this model, optionally map compiler options to the appended spec
   void AppendSpec(mjSpec* spec, const mjsCompiler* compiler = nullptr);
-
-  // delete elements marked as discard=true
-  template <class T>
-  void Delete(std::vector<T*>& elements, const std::vector<bool>& discard);
-
-  // delete all elements
-  template <class T>
-  void DeleteAll(std::vector<T*>& elements);
 
   // delete object from the corresponding list
   void operator-=(mjsElement* el);
@@ -281,9 +274,8 @@ class mjCModel : public mjCModel_, private mjSpec {
   mjSpec*  FindSpec(const mjsCompiler* compiler_) const;            // find spec given mjsCompiler
   void     ActivatePlugin(const mjpPlugin* plugin, int slot);       // activate plugin
 
-  // find asset given name checking both name and filename
-  template <class T>
-  mjCBase* FindAsset(std::string_view name, const std::vector<T*>& list) const;
+  // find object given type and name by searching the list, without the name maps
+  mjCBase* SearchObject(mjtObj type, std::string_view name) const;
 
   // accessors
   std::string get_meshdir() const { return meshdir_; }
@@ -296,10 +288,17 @@ class mjCModel : public mjCModel_, private mjSpec {
     return active_plugins_;
   };
 
-  const std::vector<mjCFlex*>&     Flexes() const { return flexes_; }
-  const std::vector<mjCMesh*>&     Meshes() const { return meshes_; }
-  const std::vector<mjCSkin*>&     Skins() const { return skins_; }
-  const std::vector<mjCHField*>&   HFields() const { return hfields_; }
+  const std::vector<mjCFlex*>&   Flexes() const { return flexes_; }
+  const std::vector<mjCMesh*>&   Meshes() const { return meshes_; }
+  const std::vector<mjCSkin*>&   Skins() const { return skins_; }
+  const std::vector<mjCHField*>& HFields() const { return hfields_; }
+
+  // the meshes and height fields as compiled: those of the spec, then the instances which the
+  // compilation made of those used at several scales
+  std::vector<mjCMesh*>   CompiledMeshes() const;
+  std::vector<mjCHField*> CompiledHFields() const;
+  int NumCompiledMeshes() const { return meshes_.size() + meshinstances_.size(); }
+
   const std::vector<mjCTexture*>&  Textures() const { return textures_; }
   const std::vector<mjCMaterial*>& Materials() const { return materials_; }
   const std::vector<mjCPair*>&     Pairs() const { return pairs_; }
@@ -325,9 +324,19 @@ class mjCModel : public mjCModel_, private mjSpec {
   // clear objects allocated by Compile
   void Clear();
 
-  // delete material from object
-  template <class T>
-  void DeleteMaterial(std::vector<T*>& list, std::string_view name = "");
+  // temporary state saved across mj_recompile
+  struct mjRecompileState {
+    mjtNum              time = 0;
+    std::vector<mjtNum> userdata;
+
+    std::unordered_map<mjCJoint*, std::vector<mjtNum>>    qfrc_applied;
+    std::unordered_map<mjCJoint*, std::vector<mjtNum>>    qacc_warmstart;
+    std::unordered_map<mjCBody*, std::array<mjtNum, 6>>   xfrc_applied;
+    std::unordered_map<mjCEquality*, mjtByte>             eq_active;
+    std::unordered_map<mjCActuator*, std::vector<mjtNum>> actuator_history;
+    std::unordered_map<mjCSensor*, std::vector<mjtNum>>   sensor_history;
+    std::unordered_map<mjCPlugin*, std::vector<mjtNum>>   plugin_state;
+  };
 
   // save the current state
   template <class T>
@@ -337,7 +346,12 @@ class mjCModel : public mjCModel_, private mjSpec {
                  const T*           act,
                  const T*           ctrl,
                  const T*           mpos,
-                 const T*           mquat);
+                 const T*           mquat,
+                 bool               partial = false);
+  void SaveState(const std::string& state_name,
+                 const mjModel*     m,
+                 const mjData*      d,
+                 mjRecompileState*  state);
 
   // restore the previously saved state
   template <class T>
@@ -351,11 +365,17 @@ class mjCModel : public mjCModel_, private mjSpec {
                     T*                 ctrl,
                     T*                 mpos,
                     T*                 mquat);
+  void RestoreState(const std::string&      state_name,
+                    const mjModel*          m,
+                    mjData*                 d,
+                    const mjRecompileState* state);
 
   // clear existing data
   void MakeData(const mjModel* m, mjData** dest);
 
-  // resolve keyframe references
+  // store the values of the keyframes in the elements they belong to, ahead of a change to the
+  // tree: a deletion (dest is this model, which has no namespace), the attachment of this model
+  // to dest, or the attachment of another model to this one (dest is null)
   void StoreKeyframes(mjCModel* dest);
 
   // map from default class name to default class pointer
@@ -364,14 +384,35 @@ class mjCModel : public mjCModel_, private mjSpec {
   // set deepcopy flag
   void SetDeepCopy(bool deepcopy) { deepcopy_ = deepcopy; }
 
+  // get deepcopy flag
+  bool GetDeepCopy() const { return deepcopy_; }
+
   // set attached flag
   void SetAttached(bool deepcopy) { attached_ |= !deepcopy; }
 
   // check if model is attached
   bool IsAttached() const { return attached_; }
 
+  // check if a keyframe awaits the next compilation, after a change to the tree
+  bool HasPendingKeys() const;
+
+  // forget the state saved under a name
+  void ForgetState(const std::string& state_name);
+
+  // copy the state saved under a name to another name
+  void CopyState(const std::string& state_name, const std::string& copy_name);
+
   // check for repeated names in list
   void CheckRepeat(mjtObj type);
+
+  // check that newname is not used by another element of the same type and update names_
+  void CheckNameChange(mjtObj type, const std::string& oldname, const std::string& newname);
+
+  // clear the compilation signature after a structural change
+  void InvalidateSignature() { spec.element->signature = 0; }
+
+  // the model was compiled and its structure changed since
+  bool StructureChanged() const { return compiled && spec.element->signature == 0; }
 
   // increment and decrement reference count
   void AddRef() { ++refcount; }
@@ -393,11 +434,13 @@ class mjCModel : public mjCModel_, private mjSpec {
   void MakeTreeLists(mjCBody* body = nullptr);
 
   // compile phases
-  void TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs);
-  void CompileMeshesAndTextures(const mjVFS* vfs);
+  mjModel* Compile(const mjVFS* vfs, mjModel** m, bool treeonly, bool textures);
+  void     TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs);
+  void     CompileTree(const mjVFS* vfs, bool textures, bool keyframes);  // assets, kinematic tree
+  void     CompileMeshesAndTextures(const mjVFS* vfs, bool textures = true);
 
   void SetNuser();                      // set nuser fields
-  void IndexAssets(bool discard);       // convert asset names into indices
+  void IndexAssets();                   // convert asset names into indices
   void CheckEmptyNames();               // check empty names
   void SetSizes();                      // compute sizes
   void ComputeSparseSizes();            // compute nM, nD, nB, nC
@@ -414,8 +457,20 @@ class mjCModel : public mjCModel_, private mjSpec {
   int  CountNJmom(const mjModel* m);  // compute number of non-zeros in actuator_moment matrix
   int  CountNJten(const mjModel* m);  // compute number of non-zeros in ten_J matrix
 
-  // remove plugins that are not referenced by any object
-  void RemovePlugins();
+  // return the plugin instances that elements or defaults reference by name or point to, including
+  // the elements in the subtree of body, which can be outside the tree
+  std::unordered_set<const mjsElement*> ReferencedPlugins(const mjCBody* body = nullptr);
+
+  // delete the referenced plugin instances that elements and defaults no longer reference
+  void RemovePlugins(const std::unordered_set<const mjsElement*>& referenced);
+
+  // give the geoms and sites which use a mesh or a height field the instance of the asset at the
+  // scale of their use, made again unless the assets are reused
+  void MakeInstances(bool reuse);
+
+  // instances which compilation makes of the meshes and height fields used at several scales
+  std::vector<mjCMesh*>   meshinstances_;
+  std::vector<mjCHField*> hfieldinstances_;
 
   // objects created here
   std::vector<mjCFlex*>     flexes_;      // list of flexes
@@ -457,9 +512,9 @@ class mjCModel : public mjCModel_, private mjSpec {
   template <class T>
   T* AddObjectDefault(std::vector<T*>& list, std::string type, mjCDef* def);
 
-  // copy vector of elements to this model
+  // copy vector of elements of another model to this model
   template <class T>
-  void CopyList(std::vector<T*>& dest, const std::vector<T*>& sources);
+  void CopyList(std::vector<T*>& dest, const std::vector<T*>& sources, const mjCModel& other);
 
   // copy plugins that are explicitly instantiated by the argument object to this model
   template <class T>
@@ -469,9 +524,33 @@ class mjCModel : public mjCModel_, private mjSpec {
   template <class T>
   void CopyPlugin(const std::vector<mjCPlugin*>& sources, const std::vector<T*>& list);
 
+  // give a copy of the model what the compilation of the original gave to it
+  void CopyCompiled(const mjCModel& other);
+
+  // give the copy of an element what the compilation gave to the original, which copying an
+  // element resets; for a body, also to the bodies and joints of its subtree
+  void CopyCompiled(mjCBase* dest, const mjCBase* source) {}
+  void CopyCompiled(mjCBody* dest, const mjCBody* source);
+  void CopyCompiled(mjCEquality* dest, const mjCEquality* source);
+  void CopyCompiled(mjCActuator* dest, const mjCActuator* source);
+  void CopyCompiled(mjCSensor* dest, const mjCSensor* source);
+  void CopyCompiled(mjCPlugin* dest, const mjCPlugin* source);
+
   // delete from list the elements that cause an error
   template <class T>
   void RemoveFromList(std::vector<T*>& list, const mjCModel& other);
+
+  // remove subtree from the tree, then remove all elements that reference it
+  template <class T>
+  mjCModel& RemoveSubtree(const T& subtree);
+
+  // remove body or frame from the tree, return the elements removed along with it that are not
+  // released with it: the elements inside a frame
+  std::vector<mjCBase*> RemoveFromTree(const mjCBody& subtree);
+  std::vector<mjCBase*> RemoveFromTree(const mjCFrame& frame);
+
+  // return the body that owns the frame, nullptr if the frame is not in the tree
+  mjCBody* FrameOwner(const mjCFrame& frame, mjCBody* body = nullptr);
 
   // create mjCBase lists from children lists
   void CreateObjectLists();
@@ -492,8 +571,15 @@ class mjCModel : public mjCModel_, private mjSpec {
   // convert pending keyframes info to actual keyframes
   void ResolveKeyframes(const mjModel* m);
 
+  // add a keyframe which awaits the next compilation, after all other keyframes
+  mjCKey* AddPendingKey(const std::string& name, const mjKeyInfo& info);
+
   // expand a keyframe, filling in missing values
   void ExpandKeyframe(mjCKey* key, const mjtNum* qpos0_, const mjtNum* bpos, const mjtNum* bquat);
+
+  // scale the vectors of a keyframe from the units of the spec to the compiled model, or back
+  template <class T>
+  void ScaleKeyframe(T* qpos, T* qvel, T* act, T* ctrl, T* mpos, bool inverse) const;
 
   // compute qpos0
   void ComputeReference();
@@ -501,10 +587,9 @@ class mjCModel : public mjCModel_, private mjSpec {
   // return true if body has valid mass and inertia
   bool CheckBodyMassInertia(mjCBody* body);
 
-  // Mark plugin instances mentioned in the list
-  template <class T>
-  void MarkPluginInstance(std::unordered_map<std::string, bool>& instances,
-                          const std::vector<T*>&                 list);
+  // copy to the elements the values of the model which differ from those they hold, and with
+  // `tospec` to the spec as well; without `write`, only report those which the spec cannot express
+  void BackValues(const mjModel* m, bool tospec, bool write);
 
   // print the tree of a body
   void PrintTree(std::stringstream& tree, const mjCBody* body, int depth = 0);
@@ -512,29 +597,31 @@ class mjCModel : public mjCModel_, private mjSpec {
   // generate a signature for the model
   uint64_t Signature();
 
-  // reassign children of a body to a new parent
-  template <class T>
-  void ReassignChild(std::vector<T*>& dest, std::vector<T*>& list, mjCBody* parent, mjCBody* body);
+  // true if fusing the body would break a reference to it
+  bool IsReferenced(mjCBody* body);
 
   // resolve references in a list of objects
   template <class T>
   void ResolveReferences(std::vector<T*>& list, mjCBody* body = nullptr);
 
-  // delete all plugins created by the subtree
-  void DeleteSubtreePlugin(mjCBody* subtree);
+  mjListKeyMap             ids;        // map from object names to ids
+  mjNameSet                names_;     // names in use per element type
+  mjCError                 errInfo;    // last error info
+  std::vector<std::string> warnings_;  // chronological list of non-fatal warnings
+  int  num_attach_warnings_ = 0;       // boundary: [0, n) are attach, [n, size) are compile
+  bool compiling_           = false;   // true during Compile()
 
-  // expand all keyframes in the model
-  void ExpandAllKeyframes();
-
-  mjListKeyMap             ids;              // map from object names to ids
-  mjCError                 errInfo;          // last error info
-  std::vector<std::string> warnings_;        // chronological list of non-fatal warnings
-  int  num_attach_warnings_ = 0;             // boundary: [0, n) are attach, [n, size) are compile
-  bool compiling_           = false;         // true during Compile()
-  std::vector<mjKeyInfo> key_pending_;       // attached keyframes
-  bool                   deepcopy_;          // copy objects when attaching
-  bool                   attached_ = false;  // true if model is attached to a parent model
+  // a compilation which applies operations to the spec compiles the assets once
+  bool                     reuse_assets_      = false;     // true during such a compilation
+  bool                     assets_compiled_   = false;     // the meshes were compiled in it
+  bool                     textures_compiled_ = false;     // and the textures
+  std::string              asset_warnings_;                // the warnings which this gave
+  double                   asset_timer_[mjNCTIMER] = {0};  // and the time it took
+  bool                     deepcopy_;                      // copy objects when attaching
+  bool                     copying_  = false;  // true while this model is copied from another
+  bool                     attached_ = false;  // true if model is attached to a parent model
+  bool                     baseline_ = false;  // the elements hold what compilation gave the model
+  std::vector<std::string> inplacekeys_;       // stored names of the keyframes which stay in place
   std::unordered_map<const mjsCompiler*, mjSpec*> compiler2spec_;  // map from compiler to spec
-  std::vector<mjCBase*>                           detached_;       // list of detached objects
 };
 #endif  // MUJOCO_SRC_USER_USER_MODEL_H_

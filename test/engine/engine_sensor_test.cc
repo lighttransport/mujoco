@@ -694,13 +694,16 @@ TEST_F(SensorTest, BadContact) {
 
   Case test_cases[] = {
       {"geom1='sphere1' geom2='sphere2' data='dist force normal'",
-       "must be in order: found, force, torque, dist, pos, normal, tangent"},
+       "must be in order: found, force, torque, dist, pos, normal, tangent, "
+       "linvel, angvel"},
       {"geom1='sphere1' geom2='sphere2' num='-3'",
        "'num' must be positive in sensor"},
       {"geom1='sphere1' geom2='sphere2' site='site'",
        "at most one of 'geom1', 'body1', 'subtree1', 'site' can be specified"},
       {"geom2='sphere1' body2='body'",
        "at most one of 'geom2', 'body2', 'subtree2' can be specified"},
+      {"geom1='sphere1' geom2='sphere2' reduce='netforce' data='linvel'",
+       "netforce reduction is incompatible with linvel or angvel"},
   };
 
   for (const auto& test : test_cases) {
@@ -954,6 +957,161 @@ TEST_F(SensorTest, ContactNet) {
 
   mj_deleteData(data);
   mj_deleteModel(model);
+}
+
+TEST_F(SensorTest, ContactNetEmpty) {
+  constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body name="b1" pos="0 0 1">
+        <freejoint/>
+        <geom type="sphere" size="0.1"/>
+      </body>
+      <body name="b2" pos="0 0 5">
+        <freejoint/>
+        <geom type="sphere" size="0.1"/>
+      </body>
+    </worldbody>
+    <sensor>
+      <contact body1="b1" body2="b2" reduce="netforce"
+               data="found force torque dist pos normal tangent"/>
+    </sensor>
+  </mujoco>
+  )";
+  MjModelPtr model = LoadModelFromString(xml);
+  ASSERT_THAT(model.get(), NotNull());
+  MjDataPtr data = MakeData(model);
+
+  mj_forward(model.get(), data.get());
+  ASSERT_EQ(data->ncon, 0);
+  EXPECT_THAT(GetSensor(model.get(), data.get(), 0),
+              ElementsAre(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+}
+
+TEST_F(SensorTest, ContactStage) {
+  constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <geom name="floor" type="plane" size="1 1 1"/>
+      <body name="b" pos="0 0 0.08">
+        <freejoint/>
+        <geom name="sphere" type="sphere" size="0.1"/>
+      </body>
+    </worldbody>
+    <sensor>
+      <contact name="pos_found" data="found dist pos normal tangent" reduce="mindist"/>
+      <contact name="vel_lin" data="found linvel angvel"/>
+      <contact name="acc_force" data="found force"/>
+      <contact name="acc_torque" data="torque"/>
+      <contact name="acc_force_vel" data="force linvel"/>
+      <contact name="acc_maxforce" data="found dist" reduce="maxforce"/>
+      <contact name="acc_netforce" data="found dist" reduce="netforce"/>
+    </sensor>
+  </mujoco>
+  )";
+  MjModelPtr model = LoadModelFromString(xml);
+  ASSERT_THAT(model.get(), NotNull());
+  MjDataPtr data = MakeData(model);
+  mju_zero(data->sensordata, model->nsensordata);
+
+  EXPECT_EQ(model->sensor_needstage[0], mjSTAGE_POS);
+  EXPECT_EQ(model->sensor_needstage[1], mjSTAGE_VEL);
+  EXPECT_EQ(model->sensor_needstage[2], mjSTAGE_ACC);
+  EXPECT_EQ(model->sensor_needstage[3], mjSTAGE_ACC);
+  EXPECT_EQ(model->sensor_needstage[4], mjSTAGE_ACC);
+  EXPECT_EQ(model->sensor_needstage[5], mjSTAGE_ACC);
+  EXPECT_EQ(model->sensor_needstage[6], mjSTAGE_ACC);
+
+  data->qvel[0] = 1.0;
+  data->qvel[1] = 2.0;
+  data->qvel[2] = -0.5;
+  data->qvel[3] = 0.3;
+  data->qvel[4] = -0.4;
+  data->qvel[5] = 0.7;
+
+  // mj_fwdPosition + mj_sensorPos should populate only the POS-stage sensor
+  mj_fwdPosition(model.get(), data.get());
+  mj_sensorPos(model.get(), data.get());
+  EXPECT_THAT(
+      GetSensor(model.get(), data.get(), "pos_found"),
+      Pointwise(MjNear(1e-6, 1e-5),
+                vector<mjtNum>{1, -0.02, 0, 0, -0.01, 0, 0, 1, 0, 1, 0}));
+  EXPECT_THAT(GetSensor(model.get(), data.get(), "vel_lin"),
+              ElementsAre(0, 0, 0, 0, 0, 0, 0));
+  EXPECT_THAT(GetSensor(model.get(), data.get(), "acc_force"),
+              ElementsAre(0, 0, 0, 0));
+
+  // mj_fwdVelocity + mj_sensorVel should populate the VEL-stage sensor
+  mj_fwdVelocity(model.get(), data.get());
+  mj_sensorVel(model.get(), data.get());
+  EXPECT_EQ(GetSensor(model.get(), data.get(), "vel_lin")[0], 1);
+  EXPECT_NE(GetSensor(model.get(), data.get(), "vel_lin")[1], 0);
+  EXPECT_THAT(GetSensor(model.get(), data.get(), "acc_force"),
+              ElementsAre(0, 0, 0, 0));
+}
+
+TEST_F(SensorTest, ContactVelocity) {
+  constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <geom name="floor" type="plane" size="1 1 1" condim="6"/>
+      <body name="b" pos="0 0 0.08">
+        <freejoint/>
+        <geom name="sphere" type="sphere" size="0.1" condim="6" friction="0.8 0.1 0.05"/>
+      </body>
+    </worldbody>
+    <sensor>
+      <contact name="vel12" geom1="floor" geom2="sphere" data="linvel angvel"/>
+      <contact name="vel21" geom1="sphere" geom2="floor" data="linvel angvel"/>
+    </sensor>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(m.get(), NotNull()) << error;
+  MjDataPtr d = MakeData(m);
+
+  const mjtNum qvel[6] = {1.2, -0.7, 0.4, 0.5, -1.1, 0.8};
+
+  // with elliptic cone, efc_vel is directly the 6D contact velocity
+  m->opt.cone = mjCONE_ELLIPTIC;
+  mj_resetData(m.get(), d.get());
+  mju_copy(d->qvel, qvel, 6);
+  mj_forward(m.get(), d.get());
+  ASSERT_EQ(d->ncon, 1);
+
+  const mjContact& con = d->contact[0];
+  const mjtNum* efc_vel6 = d->efc_vel + con.efc_address;
+
+  // vel12 (unflipped) should match efc_vel in all 6 components
+  vector vel12 = GetSensor(m.get(), d.get(), "vel12");
+  EXPECT_THAT(vel12, Pointwise(MjNear(1e-12, 1e-5),
+                               vector<mjtNum>(efc_vel6, efc_vel6 + 6)));
+
+  // vel21 (flipped) should negate the z-component (index 2 and 5)
+  vector vel21 = GetSensor(m.get(), d.get(), "vel21");
+  vector<mjtNum> expected_flipped = {vel12[0], vel12[1], -vel12[2],
+                                     vel12[3], vel12[4], -vel12[5]};
+  EXPECT_THAT(vel21, Pointwise(MjNear(1e-12, 1e-5), expected_flipped));
+
+  // pyramidal cone should report the exact same velocity
+  m->opt.cone = mjCONE_PYRAMIDAL;
+  mj_resetData(m.get(), d.get());
+  mju_copy(d->qvel, qvel, 6);
+  mj_forward(m.get(), d.get());
+  EXPECT_THAT(GetSensor(m.get(), d.get(), "vel12"),
+              Pointwise(MjNear(1e-12, 1e-5), vel12));
+
+  // even when condim = 1 (frictionless), sensor still reports full 6D velocity
+  vector vel_condim6 = GetSensor(m.get(), d.get(), "vel12");
+  m->geom_condim[0] = 1;
+  m->geom_condim[1] = 1;
+  mj_resetData(m.get(), d.get());
+  mju_copy(d->qvel, qvel, 6);
+  mj_forward(m.get(), d.get());
+  ASSERT_EQ(d->contact[0].dim, 1);
+  EXPECT_THAT(GetSensor(m.get(), d.get(), "vel12"),
+              Pointwise(MjNear(1e-12, 1e-5), vel_condim6));
 }
 
 TEST_F(SensorTest, CameraProjection) {
@@ -1234,6 +1392,112 @@ TEST_F(SensorTest, InsideSiteMesh) {
   data->qpos[0] = 2.0;
   mj_forward(model.get(), data.get());
   EXPECT_EQ(data->sensordata[0], 0.0);
+}
+
+TEST_F(SensorTest, InsideSiteEnclosed) {
+  constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <site name="box_site" type="box" size="1.0 1.0 1.0" pos="0 0 0"/>
+
+      <geom name="inner_sphere" type="sphere" size="0.4" pos="0.5 0 0"/>
+      <geom name="protrude_sphere" type="sphere" size="0.4" pos="0.7 0 0"/>
+
+      <site name="inner_site" type="sphere" size="0.5" pos="0 0 0"/>
+      <site name="protrude_site" type="sphere" size="0.5" pos="0.6 0 0"/>
+
+      <body name="body_enclosed" pos="0 0 0">
+        <geom name="bg1" type="sphere" size="0.2" pos="-0.5 0 0"/>
+        <geom name="bg2" type="sphere" size="0.3" pos="0.5 0 0"/>
+      </body>
+
+      <body name="body_protrude" pos="0 0 0">
+        <geom name="bg3" type="sphere" size="0.2" pos="-0.5 0 0"/>
+        <geom name="bg4" type="sphere" size="0.3" pos="0.8 0 0"/>
+      </body>
+
+      <body name="xbody_parent" pos="0 0 0">
+        <geom name="p_geom" type="sphere" size="0.2" pos="0 0 0"/>
+        <body name="xbody_child" pos="0.9 0 0">
+          <geom name="c_geom" type="sphere" size="0.3" pos="0 0 0"/>
+        </body>
+      </body>
+    </worldbody>
+
+    <sensor>
+      <insidesite name="s_inner_sphere"    site="box_site" objtype="geom"   objname="inner_sphere"    enclosed="true"/>
+      <insidesite name="s_protrude_sphere" site="box_site" objtype="geom"   objname="protrude_sphere" enclosed="true"/>
+      <insidesite name="s_inner_site"      site="box_site" objtype="site"   objname="inner_site"      enclosed="true"/>
+      <insidesite name="s_protrude_site"   site="box_site" objtype="site"   objname="protrude_site"   enclosed="true"/>
+      <insidesite name="s_body_enclosed"   site="box_site" objtype="body"   objname="body_enclosed"   enclosed="true"/>
+      <insidesite name="s_body_protrude"   site="box_site" objtype="body"   objname="body_protrude"   enclosed="true"/>
+      <insidesite name="s_xbody"           site="box_site" objtype="xbody"  objname="xbody_parent"    enclosed="true"/>
+    </sensor>
+  </mujoco>
+  )";
+
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  ASSERT_EQ(model->nsensordata, 7);
+  MjDataPtr data = MakeData(model);
+  mj_forward(model.get(), data.get());
+
+  // inner_sphere: x max = 0.5 + 0.4 = 0.9, box size = 1.0 -> dist = -0.1
+  EXPECT_NEAR(data->sensordata[0], -0.1, 1e-5);
+
+  // protrude_sphere: x max = 0.7 + 0.4 = 1.1, box size = 1.0 -> dist = 0.1
+  EXPECT_NEAR(data->sensordata[1], 0.1, 1e-5);
+
+  // inner_site: radius = 0.5, box size = 1.0 -> dist = -0.5
+  EXPECT_NEAR(data->sensordata[2], -0.5, 1e-5);
+
+  // protrude_site: x max = 0.6 + 0.5 = 1.1, box size = 1.0 -> dist = 0.1
+  EXPECT_NEAR(data->sensordata[3], 0.1, 1e-5);
+
+  // body_enclosed: max(bg1: -0.3, bg2: 0.5+0.3-1.0 = -0.2) = -0.2
+  EXPECT_NEAR(data->sensordata[4], -0.2, 1e-5);
+
+  // body_protrude: max(bg3: -0.3, bg4: 0.8+0.3-1.0 = 0.1) = 0.1
+  EXPECT_NEAR(data->sensordata[5], 0.1, 1e-5);
+
+  // xbody_parent: max(p_geom: -0.8, c_geom: 0.9+0.3-1.0 = 0.2) = 0.2
+  EXPECT_NEAR(data->sensordata[6], 0.2, 1e-5);
+
+  // non-convex geom on body should fail compilation
+  constexpr char bad_xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <site name="box_site" type="box" size="1 1 1"/>
+      <body name="b">
+        <geom name="plane_geom" type="plane" size="1 1 1"/>
+      </body>
+    </worldbody>
+    <sensor>
+      <insidesite site="box_site" objtype="body" objname="b" enclosed="true"/>
+    </sensor>
+  </mujoco>
+  )";
+  MjModelPtr bad_model = LoadModelFromString(bad_xml, error, sizeof(error));
+  EXPECT_THAT(bad_model.get(), IsNull());
+  EXPECT_THAT(error, HasSubstr("compact convex shape"));
+
+  // body with 0 geoms should fail compilation
+  constexpr char empty_body_xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <site name="box_site" type="box" size="1 1 1"/>
+      <body name="empty_b"/>
+    </worldbody>
+    <sensor>
+      <insidesite site="box_site" objtype="body" objname="empty_b" enclosed="true"/>
+    </sensor>
+  </mujoco>
+  )";
+  MjModelPtr empty_body_model =
+      LoadModelFromString(empty_body_xml, error, sizeof(error));
+  EXPECT_THAT(empty_body_model.get(), IsNull());
+  EXPECT_THAT(error, HasSubstr("must have at least one geom"));
 }
 
 TEST_F(SensorTest, RangefinderCamera) {
@@ -1810,10 +2074,13 @@ TEST_F(SensorTest, TactileSkipTangents) {
   MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
   ASSERT_THAT(model.get(), NotNull()) << error;
   ASSERT_GT(model->nsensordata, 0) << "No sensor data allocated";
+  EXPECT_EQ(model->sensor_needstage[0], mjSTAGE_VEL);
   MjDataPtr data = MakeData(model);
 
-  // Use mj_forward to compute collisions and sensors at t=0
-  mj_forward(model.get(), data.get());
+  // Compute position and velocity stages only (no mj_sensorAcc needed)
+  mj_fwdPosition(model.get(), data.get());
+  mj_fwdVelocity(model.get(), data.get());
+  mj_sensorVel(model.get(), data.get());
 
   // Verify initial state
   EXPECT_EQ(data->time, 0.0);
@@ -2146,6 +2413,7 @@ TEST_F(SensorTest, FlexContactSensors) {
     <sensor>
       <contact name="flex_contact_subtree" subtree1="parent"/>
       <contact name="flex_contact_body" body1="parent"/>
+      <contact name="flex_vel" geom1="floor" subtree2="parent" data="linvel angvel"/>
       <touch name="floor_touch" site="floor_site"/>
     </sensor>
   </mujoco>
@@ -2158,6 +2426,8 @@ TEST_F(SensorTest, FlexContactSensors) {
   ASSERT_THAT(m.get(), NotNull()) << error;
   MjDataPtr d = MakeData(m);
 
+  m->opt.cone = mjCONE_ELLIPTIC;
+  mj_step(m.get(), d.get());
   mj_forward(m.get(), d.get());
 
   // We expect at least one contact between the flex and the floor
@@ -2173,6 +2443,14 @@ TEST_F(SensorTest, FlexContactSensors) {
   vector flex_contact_body = GetSensor(m.get(), d.get(), "flex_contact_body");
   EXPECT_EQ(flex_contact_body[0], 0)
       << "Flex contact sensor (body) should not match contacts on child bodies";
+
+  // Check flex contact velocity against solver constraint velocity
+  const mjContact& con = d->contact[0];
+  const mjtNum* efc_vel = d->efc_vel + con.efc_address;
+  vector flex_vel = GetSensor(m.get(), d.get(), "flex_vel");
+  EXPECT_THAT(vector<mjtNum>(flex_vel.begin(), flex_vel.begin() + con.dim),
+              Pointwise(MjNear(1e-12, 1e-5),
+                        vector<mjtNum>(efc_vel, efc_vel + con.dim)));
 
   // Check the touch sensor "floor_touch"
   vector floor_touch = GetSensor(m.get(), d.get(), "floor_touch");

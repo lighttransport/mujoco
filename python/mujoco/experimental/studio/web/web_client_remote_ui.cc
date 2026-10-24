@@ -15,10 +15,20 @@
 #include "web_client_remote_ui.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
+#include <imgui.h>
+#include <NetImgui_CmdPackets.h>
+#include <NetImgui_Network.h>
 #include "google/logging.h"
+#include "google/network_status.h"
 
 namespace mujoco::studio {
 
@@ -46,6 +56,10 @@ void LogCmdReceived(CmdHeader::eCommands cmd_type, uint32_t cmd_size,
                     int draw_frames, int textures,
                     const PendingCom& pending_receive) {
   if (cmd_type == CmdHeader::eCommands::Version) {
+    if (cmd_size < sizeof(CmdVersion)) {
+      LOG(Warning, "Received truncated CmdVersion (size=%u)", cmd_size);
+      return;
+    }
     const CmdVersion* ver =
         reinterpret_cast<const CmdVersion*>(pending_receive.pCommand);
     LOG(Info,
@@ -102,7 +116,7 @@ void RemoteUi::ReceiveAndProcessCommands(int frame) {
        frame, Network::ReadyStateName(state),
        handshake_sent_ ? "sent" : "not_sent", total_cmds_received_,
        draw_frames_received_, textures_received_,
-       remote_draw_data_ != nullptr ? "yes" : "no");
+       remote_draw_data_.Valid ? "yes" : "no");
 
   if (state == ReadyState::kOpen) {
     if (!handshake_sent_) {
@@ -181,6 +195,7 @@ void RemoteUi::ReceiveAndProcessCommands(int frame) {
     if (pending_receive_.IsReady()) {
       cmd_pending_read_ = CmdPendingRead();
       pending_receive_.pCommand = &cmd_pending_read_;
+      pending_receive_.SizeMax = sizeof(cmd_pending_read_);
       pending_receive_.bAutoFree = false;
     }
 
@@ -188,8 +203,8 @@ void RemoteUi::ReceiveAndProcessCommands(int frame) {
 
     Network::DataReceive(socket_, pending_receive_);
 
-    if (pending_receive_.pCommand->mSize > sizeof(CmdPendingRead) &&
-        pending_receive_.pCommand == &cmd_pending_read_) {
+    // Received the header of a command bigger than the header: allocate it.
+    if (pending_receive_.IsBiggerBufferNeeded()) {
       VLOG(2, "Allocating %u bytes for incoming cmd type=%d",
            pending_receive_.pCommand->mSize,
            static_cast<int>(pending_receive_.pCommand->mType));
@@ -197,6 +212,7 @@ void RemoteUi::ReceiveAndProcessCommands(int frame) {
           netImguiSizedNew<uint8_t>(pending_receive_.pCommand->mSize));
       *cmd_header = cmd_pending_read_;
       pending_receive_.pCommand = cmd_header;
+      pending_receive_.SizeMax = cmd_header->mSize;
       pending_receive_.bAutoFree = true;
     }
 
@@ -261,8 +277,9 @@ void RemoteUi::UpdateTextures() {
 void RemoteUi::ProcessCmdTexture(CmdTexture* cmd_texture) {
   if (!cmd_texture) return;
 
-  if (!cmd_texture->mpTextureData.IsPointer()) {
-    cmd_texture->mpTextureData.ToPointer();
+  if (!cmd_texture->ToPointers()) {
+    LOG(Warning, "ProcessCmdTexture: dropping invalid texture command");
+    return;
   }
 
   ClientTextureID tex_id = cmd_texture->mTextureClientID;
@@ -386,14 +403,20 @@ void RemoteUi::ProcessCmdTexture(CmdTexture* cmd_texture) {
          static_cast<unsigned long>(tex_id));
   }
 }
-// Keep in sync with ProcessCmdDrawFrame in the vendored
-// netimgui/Code/ServerApp/Source/NetImguiServer_RemoteClient.cpp
+
+// Ported from ProcessCmdDrawFrame in the vendored
+// netimgui/Code/ServerApp/Source/NetImguiServer_RemoteClient.cpp, which merges
+// all windows into one draw list; this builds one list per window instead.
 void RemoteUi::ProcessCmdDrawFrame(CmdDrawFrame* cmd_draw_frame) {
   if (!cmd_draw_frame) return;
 
   // Take ownership to prevent pending_receive_ from deleting it prematurely.
   pending_receive_.bAutoFree = false;
-  cmd_draw_frame->ToPointers();
+  if (!cmd_draw_frame->ToPointers()) {
+    LOG(Warning, "ProcessCmdDrawFrame: dropping invalid draw frame");
+    netImguiDeleteSafe(cmd_draw_frame);
+    return;
+  }
 
   if (cmd_draw_frame->mCompressed) {
     if (last_uncompressed_frame_ != nullptr &&
@@ -403,6 +426,10 @@ void RemoteUi::ProcessCmdDrawFrame(CmdDrawFrame* cmd_draw_frame) {
           last_uncompressed_frame_.get(), cmd_draw_frame);
       netImguiDeleteSafe(cmd_draw_frame);
       cmd_draw_frame = uncompressed_frame;
+      if (!cmd_draw_frame) {  // Invalid compressed data, get a fresh keyframe.
+        request_keyframe_ = true;
+        return;
+      }
     } else {
       // Missing previous / reference frame data. Ignore this delta-encoded
       // drawframe and ask the client for a fresh uncompressed keyframe.
@@ -416,11 +443,12 @@ void RemoteUi::ProcessCmdDrawFrame(CmdDrawFrame* cmd_draw_frame) {
   // decompression.
   last_uncompressed_frame_.reset(cmd_draw_frame);
 
-  cmd_draw_frame->ToPointers();
-
-  RemoteDrawFrame* frame = netImguiNew<RemoteDrawFrame>();
-  frame->frame_index = cmd_draw_frame->mFrameIndex;
-  ImDrawData* draw_data = &frame->draw_data;
+  if (!remote_draw_data_.Valid) {
+    LOG(Info, "First remote draw frame applied (%u windows, %u draws, %u vtx)",
+        cmd_draw_frame->mDrawGroupCount, cmd_draw_frame->mTotalDrawCount,
+        cmd_draw_frame->mTotalVerticeCount);
+  }
+  ImDrawData* draw_data = &remote_draw_data_;
   draw_data->Valid = true;
   draw_data->TotalVtxCount =
       static_cast<int>(cmd_draw_frame->mTotalVerticeCount);
@@ -435,151 +463,138 @@ void RemoteUi::ProcessCmdDrawFrame(CmdDrawFrame* cmd_draw_frame) {
       cmd_draw_frame->mDisplayArea[3] - cmd_draw_frame->mDisplayArea[1];
   draw_data->FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
 
-  ImDrawList* cmd_list = draw_data->CmdLists[0];
-  cmd_list->IdxBuffer.resize(cmd_draw_frame->mTotalIndiceCount);
-  cmd_list->VtxBuffer.resize(cmd_draw_frame->mTotalVerticeCount);
-  cmd_list->CmdBuffer.resize(cmd_draw_frame->mTotalDrawCount);
-  // ImVector::resize() doesn't call constructors. Zero-init to ensure
-  // TexRef._TexData is NULL, not garbage.
-  memset(cmd_list->CmdBuffer.Data, 0,
-         cmd_list->CmdBuffer.Size * sizeof(ImDrawCmd));
-  cmd_list->Flags =
-      ImDrawListFlags_AllowVtxOffset | ImDrawListFlags_AntiAliasedLines |
-      ImDrawListFlags_AntiAliasedFill | ImDrawListFlags_AntiAliasedLinesUseTex;
+  // One ImDrawList per draw group (remote window), the way Dear ImGui produced
+  // them: each window keeps its own 0-based vertex indices, so they are copied
+  // as-is and no window shares the 16-bit index range with another. The lists
+  // only carry finished geometry, so they need no ImDrawListSharedData. They
+  // are reused from frame to frame, which keeps their buffers allocated, and
+  // freed as windows close.
+  const uint32_t group_count = cmd_draw_frame->mDrawGroupCount;
+  remote_draw_lists_.resize(group_count);
+  draw_data->CmdLists.resize(0);
 
   constexpr float kPosRangeMin = static_cast<float>(ImguiVert::kPosRange_Min);
   constexpr float kPosRangeMax = static_cast<float>(ImguiVert::kPosRange_Max);
   constexpr float kUVRangeMin = static_cast<float>(ImguiVert::kUvRange_Min);
   constexpr float kUVRangeMax = static_cast<float>(ImguiVert::kUvRange_Max);
 
-  if (cmd_draw_frame->mTotalDrawCount != 0) {
-    // WebGL 1.0/2.0 often uses uint16_t for ImDrawIdx. Check for potential
-    // overflow if the total vertex count exceeds the limit for 16-bit indices.
-    if (sizeof(ImDrawIdx) == 2 && cmd_draw_frame->mTotalVerticeCount > 65536) {
-      fprintf(stderr,
-              "WARNING: NetImgui WASM Viewer received a draw frame with %u "
-              "vertices. This exceeds the maximum of 65536 for 16-bit "
-              "ImDrawIdx, potentially causing rendering artifacts due to index "
-              "wrapping.\n",
-              cmd_draw_frame->mTotalVerticeCount);
-    }
-    uint32_t index_offset(0), vertex_offset(0);
-    ImDrawIdx* index_dst = &cmd_list->IdxBuffer[0];
-    ImDrawVert* vertex_dst = &cmd_list->VtxBuffer[0];
-    ImDrawCmd* command_dst = &cmd_list->CmdBuffer[0];
+  for (uint32_t i(0); i < group_count; ++i) {
+    const ImguiDrawGroup& draw_group = cmd_draw_frame->mpDrawGroups[i];
+    std::unique_ptr<ImDrawList>& list = remote_draw_lists_[i];
+    if (!list) list = std::make_unique<ImDrawList>(nullptr);
+    ImDrawList* cmd_list = list.get();
+    draw_data->CmdLists.push_back(cmd_list);
 
-    for (uint32_t i(0); i < cmd_draw_frame->mDrawGroupCount; ++i) {
-      const ImguiDrawGroup& draw_group = cmd_draw_frame->mpDrawGroups[i];
+    cmd_list->IdxBuffer.resize(draw_group.mIndiceCount);
+    cmd_list->VtxBuffer.resize(draw_group.mVerticeCount);
+    // Start from zeroed commands (ImVector::resize() doesn't construct), so
+    // the draws skipped below stay empty.
+    cmd_list->CmdBuffer.resize(0);
+    cmd_list->CmdBuffer.resize(draw_group.mDrawCount, ImDrawCmd());
+    cmd_list->Flags =
+        ImDrawListFlags_AllowVtxOffset | ImDrawListFlags_AntiAliasedLines |
+        ImDrawListFlags_AntiAliasedFill |
+        ImDrawListFlags_AntiAliasedLinesUseTex;
 
-      // Indices
-      const uint16_t* indices =
-          reinterpret_cast<const uint16_t*>(draw_group.mpIndices.Get());
+    // Indices
+    const uint16_t* indices =
+        reinterpret_cast<const uint16_t*>(draw_group.mpIndices.Get());
+    if (draw_group.mIndiceCount > 0) {
       if (draw_group.mBytePerIndex == sizeof(ImDrawIdx)) {
-        memcpy(index_dst, indices, draw_group.mIndiceCount * sizeof(ImDrawIdx));
+        memcpy(cmd_list->IdxBuffer.Data, indices,
+               draw_group.mIndiceCount * sizeof(ImDrawIdx));
       } else {
         for (uint32_t index_idx(0); index_idx < draw_group.mIndiceCount;
              ++index_idx) {
-          index_dst[index_idx] = static_cast<ImDrawIdx>(indices[index_idx]);
+          cmd_list->IdxBuffer[index_idx] =
+              static_cast<ImDrawIdx>(indices[index_idx]);
         }
       }
-
-      // Vertices — unpack quantized positions and UVs.
-      const ImguiVert* vertex_src = draw_group.mpVertices.Get();
-      for (uint32_t vtx_idx(0); vtx_idx < draw_group.mVerticeCount; ++vtx_idx) {
-        vertex_dst[vtx_idx].pos.x =
-            (static_cast<float>(vertex_src[vtx_idx].mPos[0]) *
-             (kPosRangeMax - kPosRangeMin)) /
-                static_cast<float>(0xFFFF) +
-            kPosRangeMin + draw_group.mReferenceCoord[0];
-        vertex_dst[vtx_idx].pos.y =
-            (static_cast<float>(vertex_src[vtx_idx].mPos[1]) *
-             (kPosRangeMax - kPosRangeMin)) /
-                static_cast<float>(0xFFFF) +
-            kPosRangeMin + draw_group.mReferenceCoord[1];
-        vertex_dst[vtx_idx].uv.x =
-            (static_cast<float>(vertex_src[vtx_idx].mUV[0]) *
-             (kUVRangeMax - kUVRangeMin)) /
-                static_cast<float>(0xFFFF) +
-            kUVRangeMin;
-        vertex_dst[vtx_idx].uv.y =
-            (static_cast<float>(vertex_src[vtx_idx].mUV[1]) *
-             (kUVRangeMax - kUVRangeMin)) /
-                static_cast<float>(0xFFFF) +
-            kUVRangeMin;
-        vertex_dst[vtx_idx].col = vertex_src[vtx_idx].mColor;
-      }
-
-      // Draw commands.
-      // NOTE: WebGL lacks glDrawElementsBaseVertex, so the backend's
-      // glDrawElements ignores VtxOffset. We bake the offset directly
-      // into the index values.
-      const ImguiDraw* draw_src = draw_group.mpDraws.Get();
-      for (uint32_t draw_idx(0); draw_idx < draw_group.mDrawCount; ++draw_idx) {
-        uint32_t vtx_off = draw_src[draw_idx].mVtxOffset + vertex_offset;
-        uint32_t idx_off = draw_src[draw_idx].mIdxOffset + index_offset;
-        uint32_t elem_count = draw_src[draw_idx].mIdxCount;
-
-        // Bake vertex offset into index values.
-        for (uint32_t ei = 0; ei < elem_count; ++ei) {
-          cmd_list->IdxBuffer[idx_off + ei] += static_cast<ImDrawIdx>(vtx_off);
-        }
-
-        float cx = std::max(
-            0.f, std::min(max_clip_[0], draw_src[draw_idx].mClipRect[0]));
-        float cy = std::max(
-            0.f, std::min(max_clip_[1], draw_src[draw_idx].mClipRect[1]));
-        float cz = std::max(
-            cx, std::min(max_clip_[0], draw_src[draw_idx].mClipRect[2]));
-        float cw = std::max(
-            cy, std::min(max_clip_[1], draw_src[draw_idx].mClipRect[3]));
-
-        command_dst[draw_idx].ClipRect.x = cx;
-        command_dst[draw_idx].ClipRect.y = cy;
-        command_dst[draw_idx].ClipRect.z = cz;
-        command_dst[draw_idx].ClipRect.w = cw;
-        command_dst[draw_idx].VtxOffset = 0;  // Baked into indices
-        command_dst[draw_idx].IdxOffset = idx_off;
-        command_dst[draw_idx].ElemCount = elem_count;
-        command_dst[draw_idx].UserCallback = nullptr;
-        command_dst[draw_idx].UserCallbackData = nullptr;
-
-        // Map remote ClientTextureID -> local GL handle.
-        ClientTextureID client_tex_id = draw_src[draw_idx].mClientTexId;
-        auto it = texture_map_.find(client_tex_id);
-        if (it != texture_map_.end() && it->second != 0) {
-          command_dst[draw_idx].TexRef._TexData = nullptr;
-          command_dst[draw_idx].TexRef._TexID =
-              static_cast<ImTextureID>(it->second);
-        } else {
-          LogUnmappedTexture(client_tex_id, texture_map_.size(), draw_idx,
-                             texture_map_);
-          // Skip draw commands with unmapped textures.
-          command_dst[draw_idx].ElemCount = 0;
-        }
-      }
-
-      index_dst += draw_group.mIndiceCount;
-      vertex_dst += draw_group.mVerticeCount;
-      command_dst += draw_group.mDrawCount;
-      index_offset += draw_group.mIndiceCount;
-      vertex_offset += draw_group.mVerticeCount;
     }
-  }
 
-  // Update internal write pointers to satisfy ImGui's draw list sanity checks.
-  // AddDrawListToDrawDataEx asserts that _VtxWritePtr/_IdxWritePtr point to the
-  // end of their respective buffers. Since we populated them via
-  // resize()+memcpy (bypassing ImGui's PrimReserve API), we must fix up these
-  // pointers manually.
-  cmd_list->_VtxWritePtr = cmd_list->VtxBuffer.Data + cmd_list->VtxBuffer.Size;
-  cmd_list->_IdxWritePtr = cmd_list->IdxBuffer.Data + cmd_list->IdxBuffer.Size;
-  cmd_list->_VtxCurrentIdx = cmd_list->VtxBuffer.Size;
+    // Vertices — unpack quantized positions and UVs.
+    const ImguiVert* vertex_src = draw_group.mpVertices.Get();
+    ImDrawVert* vertex_dst = cmd_list->VtxBuffer.Data;
+    for (uint32_t vtx_idx(0); vtx_idx < draw_group.mVerticeCount; ++vtx_idx) {
+      vertex_dst[vtx_idx].pos.x =
+          (static_cast<float>(vertex_src[vtx_idx].mPos[0]) *
+           (kPosRangeMax - kPosRangeMin)) /
+              static_cast<float>(0xFFFF) +
+          kPosRangeMin + draw_group.mReferenceCoord[0];
+      vertex_dst[vtx_idx].pos.y =
+          (static_cast<float>(vertex_src[vtx_idx].mPos[1]) *
+           (kPosRangeMax - kPosRangeMin)) /
+              static_cast<float>(0xFFFF) +
+          kPosRangeMin + draw_group.mReferenceCoord[1];
+      vertex_dst[vtx_idx].uv.x =
+          (static_cast<float>(vertex_src[vtx_idx].mUV[0]) *
+           (kUVRangeMax - kUVRangeMin)) /
+              static_cast<float>(0xFFFF) +
+          kUVRangeMin;
+      vertex_dst[vtx_idx].uv.y =
+          (static_cast<float>(vertex_src[vtx_idx].mUV[1]) *
+           (kUVRangeMax - kUVRangeMin)) /
+              static_cast<float>(0xFFFF) +
+          kUVRangeMin;
+      vertex_dst[vtx_idx].col = vertex_src[vtx_idx].mColor;
+    }
 
-  if (remote_draw_data_ == nullptr) {
-    LOG(Info, "First remote draw frame applied (%d cmds, %d vtx)",
-        draw_data->CmdLists[0]->CmdBuffer.Size, draw_data->TotalVtxCount);
+    // Draw commands.
+    const ImguiDraw* draw_src = draw_group.mpDraws.Get();
+    ImDrawCmd* command_dst = cmd_list->CmdBuffer.Data;
+    for (uint32_t draw_idx(0); draw_idx < draw_group.mDrawCount; ++draw_idx) {
+      uint32_t idx_off = draw_src[draw_idx].mIdxOffset;
+      uint32_t elem_count = draw_src[draw_idx].mIdxCount;
+
+      // The draw range comes off the wire: skip (leave empty) draws that
+      // would index past the buffer.
+      if (static_cast<uint64_t>(idx_off) + elem_count >
+          static_cast<uint64_t>(cmd_list->IdxBuffer.Size)) {
+        continue;
+      }
+
+      float cx = std::max(
+          0.f, std::min(max_clip_[0], draw_src[draw_idx].mClipRect[0]));
+      float cy = std::max(
+          0.f, std::min(max_clip_[1], draw_src[draw_idx].mClipRect[1]));
+      float cz =
+          std::max(cx, std::min(max_clip_[0], draw_src[draw_idx].mClipRect[2]));
+      float cw =
+          std::max(cy, std::min(max_clip_[1], draw_src[draw_idx].mClipRect[3]));
+
+      command_dst[draw_idx].ClipRect.x = cx;
+      command_dst[draw_idx].ClipRect.y = cy;
+      command_dst[draw_idx].ClipRect.z = cz;
+      command_dst[draw_idx].ClipRect.w = cw;
+      command_dst[draw_idx].VtxOffset = 0;
+      command_dst[draw_idx].IdxOffset = idx_off;
+      command_dst[draw_idx].ElemCount = elem_count;
+      command_dst[draw_idx].UserCallback = nullptr;
+      command_dst[draw_idx].UserCallbackData = nullptr;
+
+      // Map remote ClientTextureID -> local GL handle.
+      ClientTextureID client_tex_id = draw_src[draw_idx].mClientTexId;
+      auto it = texture_map_.find(client_tex_id);
+      if (it != texture_map_.end() && it->second != 0) {
+        command_dst[draw_idx].TexRef._TexData = nullptr;
+        command_dst[draw_idx].TexRef._TexID =
+            static_cast<ImTextureID>(it->second);
+      } else {
+        LogUnmappedTexture(client_tex_id, texture_map_.size(), draw_idx,
+                           texture_map_);
+        // Skip draw commands with unmapped textures.
+        command_dst[draw_idx].ElemCount = 0;
+      }
+    }
+
+    // ImGui's AddDrawList() asserts that these point at the end of the buffers,
+    // as they would after its own PrimReserve() API.
+    cmd_list->_VtxWritePtr =
+        cmd_list->VtxBuffer.Data + cmd_list->VtxBuffer.Size;
+    cmd_list->_IdxWritePtr =
+        cmd_list->IdxBuffer.Data + cmd_list->IdxBuffer.Size;
+    cmd_list->_VtxCurrentIdx = cmd_list->VtxBuffer.Size;
   }
-  remote_draw_data_.reset(frame);
 }
 
 // Keep in sync with CaptureImguiInput in the vendored
@@ -764,7 +779,8 @@ void RemoteUi::CaptureAndSendInput() {
 }
 
 void RemoteUi::Shutdown() {
-  remote_draw_data_.reset();
+  remote_draw_data_.Clear();
+  remote_draw_lists_.clear();
   last_uncompressed_frame_.reset();
   if (socket_) {
     Network::Disconnect(socket_);

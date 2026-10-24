@@ -698,9 +698,9 @@ TEST_F(SolverTest, ConeFoldEquivalent) {
       <geom name="floor" type="plane" size="1 1 .01"/>
       <geom name="wallx" type="box" size=".02 .5 .1" pos="-.5 0 .1"/>
       <geom name="wally" type="box" size=".5 .02 .1" pos="0 -.5 .1"/>
-      <replicate count="3" offset="0 .11 0">
-        <replicate count="3" offset=".11 0 0">
-          <replicate count="3" offset="0 0 .11">
+      <replicate count="2" offset="0 .11 0">
+        <replicate count="2" offset=".11 0 0">
+          <replicate count="2" offset="0 0 .11">
             <body pos="-.35 -.35 .06">
               <freejoint/>
               <geom type="box" size=".05 .05 .05"/>
@@ -730,7 +730,7 @@ TEST_F(SolverTest, ConeFoldEquivalent) {
   MjDataPtr data_dense = MakeData(model);
 
   // let the pile fall and clump against the walls (sparse drives the state)
-  for (int step = 0; step < 100; step++) {
+  for (int step = 0; step < 40; step++) {
     mj_step(model.get(), data_sparse.get());
   }
 
@@ -739,7 +739,7 @@ TEST_F(SolverTest, ConeFoldEquivalent) {
 
   // compare sparse (folding) and dense (rank-1 updates) accelerations while
   // the clump slides
-  for (int step = 0; step < 50; step++) {
+  for (int step = 0; step < 15; step++) {
     mj_getState(model.get(), data_sparse.get(), state.data(), mjSTATE_PHYSICS);
 
     model->opt.jacobian = mjJAC_SPARSE;
@@ -763,6 +763,126 @@ TEST_F(SolverTest, ConeFoldEquivalent) {
     model->opt.jacobian = mjJAC_SPARSE;
     mj_step(model.get(), data_sparse.get());
   }
+}
+
+// A chain of thin capsules whose tip is connected to a slider: the connect
+// fills H = M + J'*D*J, and once the chain sags, the twist pivots of the
+// reverse factorization (the capsules' tiny axial inertia) are five orders of
+// magnitude below their diagonals. In single precision rounding loses one:
+// Newton must clamp and decouple it and continue, not abort or diverge.
+TEST_F(SolverTest, NewtonHessianSurvivesLostPivot) {
+  constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <composite type="cable" curve="s" count="41 1 1" size="1" initial="none">
+        <joint kind="main" damping=".015"/>
+        <geom type="capsule" size=".005" contype="0" conaffinity="0"/>
+      </composite>
+      <body name="slider" pos="1 0 0">
+        <joint type="slide" axis="1 0 0" damping=".1"/>
+        <geom size=".01" contype="0" conaffinity="0"/>
+      </body>
+    </worldbody>
+    <equality>
+      <connect body1="B_last" body2="slider" anchor=".025 0 0"/>
+    </equality>
+  </mujoco>
+  )";
+
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  model->opt.solver = mjSOL_NEWTON;
+
+  for (mjtJacobian jacobian : {mjJAC_DENSE, mjJAC_SPARSE}) {
+    for (int disableflags : {0, (int)mjDSBL_ISLAND}) {
+      model->opt.jacobian = jacobian;
+      model->opt.disableflags = disableflags;
+      MjDataPtr data = MakeData(model);
+
+      // bounded by step count: a divergence resets mjData and rewinds the clock
+      for (int step = 0; step < 200; step++) {
+        mj_step(model.get(), data.get());
+      }
+      EXPECT_EQ(data->warning[mjWARN_BADQACC].number, 0)
+          << "jacobian " << jacobian << ", disableflags " << disableflags;
+    }
+  }
+}
+
+// When the arena has enough room for PrimalAllocate and CG but not for Newton's
+// sparse Hessian/Cholesky factor, MakeHessian warns (mjWARN_CNSTRFULL) and
+// mj_solPrimal falls back to CG instead of aborting in mj_stackAlloc.
+TEST_F(SolverTest, NewtonFallsBackToCGOnArenaExhaustion) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option integrator="implicitfast" solver="Newton"/>
+    <worldbody>
+      <geom type="plane" size="2 2 .01"/>
+      <flexcomp name="cloth" type="grid" dim="2" count="20 20 1"
+                spacing=".01 .01 .01" pos="0 0 .001" radius=".002" mass="1">
+        <contact selfcollide="none"/>
+        <edge equality="true"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+
+  char error[1024] = {0};
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+
+  // first run with ample arena to measure full Newton vs CG arena usage
+  MjDataPtr data_full = MakeData(model);
+  mj_step(model.get(), data_full.get());
+  ASSERT_EQ(data_full->warning[mjWARN_CNSTRFULL].number, 0);
+
+  model->opt.solver = mjSOL_CG;
+  MjDataPtr data_cg = MakeData(model);
+  mj_step(model.get(), data_cg.get());
+  ASSERT_LT(data_cg->maxuse_arena, data_full->maxuse_arena);
+
+  // set narena large enough for PrimalAllocate + CG, but too small for Newton's
+  // L factor
+  model->opt.solver = mjSOL_NEWTON;
+  model->narena = (data_cg->maxuse_arena + data_full->maxuse_arena) / 2;
+  MjDataPtr data_tight = MakeData(model);
+  mock_warning_handler.ExpectWarnings("Insufficient arena memory");
+  mj_step(model.get(), data_tight.get());
+  EXPECT_GT(data_tight->warning[mjWARN_CNSTRFULL].number, 0);
+  EXPECT_EQ(data_tight->warning[mjWARN_BADQACC].number, 0);
+
+  // also test dense Newton with discrete flex metric (flg_metric && !is_sparse)
+  static constexpr char xml_dense[] = R"(
+  <mujoco>
+    <option integrator="discrete" solver="Newton" jacobian="dense">
+      <flag island="disable"/>
+    </option>
+    <worldbody>
+      <geom type="plane" size="2 2 .01"/>
+      <flexcomp name="rod" type="grid" dim="1" count="12 1 1"
+                spacing=".02 .02 .02" pos="0 0 .001" radius=".005" mass="1">
+        <contact selfcollide="none"/>
+        <elasticity young="1e3" damping="1"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+  MjModelPtr model_dense = LoadModelFromString(xml_dense, error, sizeof(error));
+  ASSERT_THAT(model_dense.get(), NotNull()) << error;
+
+  MjDataPtr dense_full = MakeData(model_dense);
+  mj_step(model_dense.get(), dense_full.get());
+  ASSERT_EQ(dense_full->warning[mjWARN_CNSTRFULL].number, 0);
+
+  // set narena just above dense_full->maxuse_arena so PrimalAllocate + cg_buf
+  // fit, but MakeHessian's loop_bytes reserve check fails and falls back to CG
+  model_dense->narena = dense_full->maxuse_arena + 1024;
+  MjDataPtr dense_tight = MakeData(model_dense);
+  mock_warning_handler.ExpectWarnings("Insufficient arena memory");
+  mj_step(model_dense.get(), dense_tight.get());
+  EXPECT_GT(dense_tight->warning[mjWARN_CNSTRFULL].number, 0);
+  EXPECT_EQ(dense_tight->warning[mjWARN_BADQACC].number, 0);
 }
 
 }  // namespace

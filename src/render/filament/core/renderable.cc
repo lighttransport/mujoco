@@ -59,9 +59,13 @@ Renderable::Renderable(filament::Engine* engine,
                        MaterialManager* material_mgr)
     : material_mgr_(material_mgr), params_(params) {
   mjrf_defaultMaterial(&material_);
+  curr_state_.cast_shadow = params_.cast_shadow;
+  curr_state_.receive_shadow = params_.receive_shadow;
 }
 
-Renderable::~Renderable() noexcept {
+Renderable::~Renderable() noexcept { ClearParts(); }
+
+void Renderable::ClearParts() {
   filament::Engine* engine = GetEngine();
   utils::EntityManager& em = utils::EntityManager::get();
   for (Part& part : parts_) {
@@ -71,6 +75,11 @@ Renderable::~Renderable() noexcept {
     engine->destroy(part.entity);
     em.destroy(part.entity);
   }
+  parts_.clear();
+  get_transform_fn_ = nullptr;
+  curr_state_ = DrawState{};
+  curr_state_.cast_shadow = params_.cast_shadow;
+  curr_state_.receive_shadow = params_.receive_shadow;
 }
 
 void Renderable::SetMesh(const Mesh* mesh, int elem_offset, int elem_count) {
@@ -120,6 +129,7 @@ void Renderable::SetMesh(const Mesh* mesh, int elem_offset, int elem_count) {
   } else {
     mju_error("Cannot set mesh for renderable with multiple parts.");
   }
+  curr_state_.wireframe = false;
 }
 
 void Renderable::InitPartEntity(Part& part) {
@@ -139,10 +149,13 @@ void Renderable::InitPartEntity(Part& part) {
   } else {
     builder.culling(false);
   }
-  builder.castShadows(params_.cast_shadows);
-  builder.receiveShadows(params_.receive_shadows);
+  builder.castShadows(params_.cast_shadow);
+  builder.receiveShadows(params_.receive_shadow);
   builder.blendOrder(0, params_.blend_order);
   builder.screenSpaceContactShadows(true);
+  if (layer_mask_ != 0) {
+    builder.layerMask(0xff, layer_mask_);
+  }
 
   builder.build(*GetEngine(), part.entity);
   if (assigned_scene_) {
@@ -220,6 +233,7 @@ void Renderable::RemoveFromScene(filament::Scene* scene) {
   if (assigned_scene_ != scene) {
     mju_error("Attempting to remove renderable from wrong scene.");
   }
+  SetMaterialInstance(0);
   for (Part& part : parts_) {
     scene->remove(part.entity);
   }
@@ -228,7 +242,7 @@ void Renderable::RemoveFromScene(filament::Scene* scene) {
 
 void Renderable::UpdateMaterial(const mjrfMaterial& material) {
   uint8_t layer_mask = kLayerMask_Object;
-  if (material.decor_ux) {
+  if (material.decor) {
     layer_mask = kLayerMask_Decor;
   }
   if (material.selected) {
@@ -252,6 +266,8 @@ void Renderable::Prepare(std::span<const mjrfRenderRequest*> requests,
 
   for (const mjrfRenderRequest* request : requests) {
     DrawState draw_state;
+    draw_state.cast_shadow = params_.cast_shadow;
+    draw_state.receive_shadow = params_.receive_shadow;
     mjrfMaterial material = material_;
 
     // Selected materials are handled in a separate pass, so clear the value
@@ -259,9 +275,9 @@ void Renderable::Prepare(std::span<const mjrfRenderRequest*> requests,
     material.selected = false;
 
     draw_state.wireframe = (request->draw_mode == mjDRAW_MODE_WIREFRAME);
-    if (material.decor_ux) {
-      draw_state.cast_shadows = false;
-      draw_state.receive_shadows = false;
+    if (material.decor) {
+      draw_state.cast_shadow = false;
+      draw_state.receive_shadow = false;
     }
 
     if (geom_type_ == mjGEOM_PLANE) {
@@ -271,7 +287,7 @@ void Renderable::Prepare(std::span<const mjrfRenderRequest*> requests,
       const bool is_behind_camera = dot(camera_pos - position, forward) < 0;
       if (is_behind_camera) {
         material.color[3] *= 0.3;
-        draw_state.receive_shadows = false;
+        draw_state.receive_shadow = false;
       }
     }
 
@@ -321,14 +337,14 @@ void Renderable::Prepare(std::span<const mjrfRenderRequest*> requests,
       material.orm_texture = nullptr;
     }
 
+    const Mesh* mesh = !parts_.empty() ? parts_[0].mesh : nullptr;
+    const auto draw_mode = static_cast<mjrDrawMode>(request->draw_mode);
     const bool reflective =
         request->draw_mode == mjDRAW_MODE_DEFAULT &&
-        request->enable_reflections &&
+        request->reflections &&
         (geom_type_ == mjGEOM_PLANE || geom_type_ == mjGEOM_BOX) &&
         material.reflectance > 0.0;
     if (reflective) {
-      material.reflection_texture = reflection_mgr->Register(
-          this, request->viewport.width, request->viewport.height);
       // The mirror plane normal is the geom's local +Z (transform_[2], whose
       // scale carries the geom size -- normalize it). The reflect shader uses
       // it to apply the reflection only on the front face, so box mirrors don't
@@ -339,18 +355,16 @@ void Renderable::Prepare(std::span<const mjrfRenderRequest*> requests,
           geom_type_ == mjGEOM_PLANE
               ? float3(0.0f, 0.0f, 0.0f)
               : ToFilamentFrame(normalize(transform_[2].xyz));
-      material.reflection_normal[0] = refl_normal.x;
-      material.reflection_normal[1] = refl_normal.y;
-      material.reflection_normal[2] = refl_normal.z;
-      const mat4f view_proj = GetReflectionViewProjectionMatrix(
-          request->camera, request->viewport.width, request->viewport.height);
-      WriteMat4(material.reflection_view_proj, view_proj);
+      reflection_mgr->Register(this, mesh, material, geom_type_, refl_normal,
+                               request);
+
+      // Bind the non-reflective material by default so secondary reflection
+      // bounces are suppressed during reflection passes.
+      material.reflectance = 0.0f;
     }
 
-    const Mesh* mesh = !parts_.empty() ? parts_[0].mesh : nullptr;
     draw_state.material_key = material_mgr_->PrepareMaterialInstance(
-        material, static_cast<mjrDrawMode>(request->draw_mode), geom_type_,
-        mesh);
+        material, draw_mode, geom_type_, mesh);
     draw_queue_.push_back(draw_state);
   }
 }
@@ -361,8 +375,8 @@ void Renderable::BindMaterialInstance(const mjrfRenderRequest& request) {
   }
 
   const DrawState& state = draw_queue_.front();
-  SetCastShadows(state.cast_shadows);
-  SetReceiveShadows(state.receive_shadows);
+  SetCastShadows(state.cast_shadow);
+  SetReceiveShadows(state.receive_shadow);
   SetWireframe(state.wireframe);
   SetMaterialInstance(state.material_key);
   curr_state_ = state;
@@ -408,25 +422,25 @@ std::uint16_t Renderable::SetBlendOrder(std::uint16_t blend_order) {
   return prev;
 }
 
-void Renderable::SetCastShadows(bool cast_shadows) {
-  if (params_.cast_shadows != cast_shadows) {
-    params_.cast_shadows = cast_shadows;
+void Renderable::SetCastShadows(bool cast_shadow) {
+  if (curr_state_.cast_shadow != cast_shadow) {
+    curr_state_.cast_shadow = cast_shadow;
 
     filament::RenderableManager& rm = GetEngine()->getRenderableManager();
     for (Part& part : parts_) {
-      rm.setCastShadows(rm.getInstance(part.entity), params_.cast_shadows);
+      rm.setCastShadows(rm.getInstance(part.entity), curr_state_.cast_shadow);
     }
   }
 }
 
-void Renderable::SetReceiveShadows(bool receive_shadows) {
-  if (params_.receive_shadows != receive_shadows) {
-    params_.receive_shadows = receive_shadows;
+void Renderable::SetReceiveShadows(bool receive_shadow) {
+  if (curr_state_.receive_shadow != receive_shadow) {
+    curr_state_.receive_shadow = receive_shadow;
 
     filament::RenderableManager& rm = GetEngine()->getRenderableManager();
     for (Part& part : parts_) {
       rm.setReceiveShadows(rm.getInstance(part.entity),
-                           params_.receive_shadows);
+                           curr_state_.receive_shadow);
     }
   }
 }
@@ -463,6 +477,7 @@ void Renderable::SetWireframe(bool wireframe) {
 }
 
 void Renderable::SetGeomMesh(mjtGeom type, int nstack, int nslice, int nquad) {
+  ClearParts();
   Builtins* builtins =
       material_mgr_->GetObjectManager()->GetBuiltins(nstack, nslice, nquad);
   geom_type_ = type;
@@ -661,6 +676,7 @@ void Renderable::SetGeomMesh(mjtGeom type, int nstack, int nslice, int nquad) {
       mju_error("Unsupported geom type: %d", type);
       break;
   }
+  UpdateTransform();
 }
 
 filament::Engine* Renderable::GetEngine() { return material_mgr_->GetEngine(); }

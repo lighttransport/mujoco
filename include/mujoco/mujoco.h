@@ -16,7 +16,7 @@
 #define MUJOCO_MUJOCO_H_
 
 // header version; should match the library version as returned by mj_version()
-#define mjVERSION_HEADER 3013001
+#define mjVERSION_HEADER 3017001
 
 // needed to define size_t, fabs and log10
 #include <stdlib.h>
@@ -81,11 +81,11 @@ MJAPI extern const char* mjTOPICSTRING[mjNTOPIC];
 // Initialize an empty VFS, mj_deleteVFS must be called to deallocate the VFS.
 MJAPI void mj_defaultVFS(mjVFS* vfs);
 
-// Mount a ResourceProvider to handle file operations under the given path; return 0: success,
-// 2: repeated name, -1: invalid resource provider.
+// Mount a provider to handle file operations under the given path; return 0: success,
+// 2: repeated name, -1: invalid provider.
 MJAPI int mj_mountVFS(mjVFS* vfs, const char* filepath, const mjpResourceProvider* provider);
 
-// Unmount a previously mounted ResourceProvider; return 0: success, -1: not found in VFS.
+// Unmount a previously mounted provider; return 0: success, -1: not found in VFS.
 MJAPI int mj_unmountVFS(mjVFS* vfs, const char* filename);
 
 // Add file to VFS; return 0: success, 2: repeated name, -1: failed to load.
@@ -155,12 +155,26 @@ MJAPI mjtSize mj_encode(const mjSpec* s, const mjModel* m, const char* filename,
 // Nullable: vfs
 MJAPI mjModel* mj_compile(mjSpec* s, const mjVFS* vfs);
 
-// Copy real-valued arrays from model to spec; return 1 on success.
+// Copy the values which were changed in a model to the spec it was compiled from; return 1 on success.
 MJAPI int mj_copyBack(mjSpec* s, const mjModel* m);
 
 // Recompile spec to model, preserving the state; return 0 on success.
 // Nullable: vfs
 MJAPI int mj_recompile(mjSpec* s, const mjVFS* vfs, mjModel* m, mjData* d);
+
+// Decode texture id to raw bytes, exactly what compilation would store in tex_data, with
+// tex_nchannel channels; embedded textures are copied from the model. The buffer is allocated with
+// mju_malloc and freed by the caller; colorspace receives the resolved colorspace (mjtColorSpace).
+// Return 0 on success.
+// Nullable: width, height, colorspace, error
+MJAPI int mj_loadTexture(const mjModel* m, int id, mjtByte** data, int* width, int* height,
+                         int* colorspace, char* error, int error_sz);
+
+// Copy of m with every by-reference asset loaded into it, as compilation would have stored it.
+// Return NULL with error on a file that does not resolve. A hermetic MJB file of a model with
+// by-reference assets is mj_embedAssets, then mj_saveModel, then mj_deleteModel.
+// Nullable: error
+MJAPI mjModel* mj_embedAssets(const mjModel* m, char* error, int error_sz);
 
 // Update XML data structures with info from low-level model created with mj_loadXML, save as MJCF.
 // If error is not NULL, it must have size error_sz.
@@ -228,7 +242,7 @@ MJAPI mjModel* mj_copyModel(mjModel* dest, const mjModel* src);
 
 // Save model to binary MJB file or memory buffer; buffer has precedence when given.
 // Nullable: filename, buffer
-MJAPI void mj_saveModel(const mjModel* m, const char* filename, void* buffer, int buffer_sz);
+MJAPI void mj_saveModel(const mjModel* m, const char* filename, void* buffer, mjtSize buffer_sz);
 
 // Load model from binary MJB file.
 // If vfs is not NULL, look up file in vfs before reading from disk.
@@ -236,7 +250,7 @@ MJAPI void mj_saveModel(const mjModel* m, const char* filename, void* buffer, in
 MJAPI mjModel* mj_loadModel(const char* filename, const mjVFS* vfs);
 
 // Load model from memory buffer.
-MJAPI mjModel* mj_loadModelBuffer(const void* buffer, int buffer_sz);
+MJAPI mjModel* mj_loadModelBuffer(const void* buffer, mjtSize buffer_sz);
 
 // Free memory allocation in model.
 MJAPI void mj_deleteModel(mjModel* m);
@@ -518,9 +532,11 @@ MJAPI void mj_setState(const mjModel* m, mjData* d, const mjtNum* state, int sig
 MJAPI void mj_copyState(const mjModel* m, const mjData* src, mjData* dst, int sig);
 
 // Read ctrl value for actuator at given time.
-// Returns d->ctrl[id] if no history, otherwise reads from history buffer.
+// Returns pointer to ctrl (no history) or history buffer (exact match),
+// or NULL if interpolation performed (writes to result).
 // interp: 0=zero-order-hold, 1=linear, 2=cubic spline.
-MJAPI mjtNum mj_readCtrl(const mjModel* m, const mjData* d, int id, mjtNum time, int interp);
+MJAPI const mjtNum* mj_readCtrl(const mjModel* m, const mjData* d, int id, mjtNum time,
+                                mjtNum* result, int interp);
 
 // Read sensor value from history buffer at given time.
 // Returns pointer to sensordata (no history) or history buffer (exact match),
@@ -889,7 +905,8 @@ MJAPI void mjr_freeContext(mjrContext* con);
 // Resize offscreen buffers.
 MJAPI void mjr_resizeOffscreen(int width, int height, mjrContext* con);
 
-// Upload texture to GPU, overwriting previous upload if any.
+// Upload texture to GPU, overwriting previous upload if any. A by-reference texture (tex_adr == -1)
+// is decoded with mj_loadTexture.
 MJAPI void mjr_uploadTexture(const mjModel* m, const mjrContext* con, int texid);
 
 // Upload mesh to GPU, overwriting previous upload if any.
@@ -1547,24 +1564,24 @@ MJAPI const mjpPlugin* mjp_getPlugin(const char* name, int* slot);
 // Look up a plugin by the registered slot number that was returned by mjp_registerPlugin.
 MJAPI const mjpPlugin* mjp_getPluginAtSlot(int slot);
 
-// Set default resource provider definition.
-MJAPI void mjp_defaultResourceProvider(mjpResourceProvider* provider);
+// Set default provider definition.
+MJAPI void mjp_defaultProvider(mjpResourceProvider* provider);
 
-// Globally register a resource provider in a thread-safe manner. The provider must have a prefix
+// Globally register a provider in a thread-safe manner. The provider must have a prefix
 // that is not a sub-prefix or super-prefix of any current registered providers.
 // Return a slot number >= 0 on success, -1 on failure.
-MJAPI int mjp_registerResourceProvider(const mjpResourceProvider* provider);
+MJAPI int mjp_registerProvider(const mjpResourceProvider* provider);
 
-// Return the number of globally registered resource providers.
-MJAPI int mjp_resourceProviderCount(void);
+// Return the number of globally registered providers.
+MJAPI int mjp_providerCount(void);
 
-// Return the resource provider with the prefix that matches against the resource name.
+// Return the provider with the prefix that matches against the resource name.
 // If no match, return NULL.
-MJAPI const mjpResourceProvider* mjp_getResourceProvider(const char* resource_name);
+MJAPI const mjpResourceProvider* mjp_findProvider(const char* resource_name);
 
-// Look up a resource provider by slot number returned by mjp_registerResourceProvider.
+// Look up a provider by slot number returned by mjp_registerProvider.
 // If invalid slot number, return NULL.
-MJAPI const mjpResourceProvider* mjp_getResourceProviderAtSlot(int slot);
+MJAPI const mjpResourceProvider* mjp_getProviderAtSlot(int slot);
 
 // Globally register a decoder. This function is thread-safe.
 // If an identical mjpDecoder is already registered, this function does nothing.
@@ -1574,7 +1591,7 @@ MJAPI void mjp_registerDecoder(const mjpDecoder* decoder);
 // Set default resource decoder definition.
 MJAPI void mjp_defaultDecoder(mjpDecoder* decoder);
 
-// Return the resource provider with the prefix that matches against the resource name.
+// Return the decoder that matches against the resource or content type.
 // If no match, return NULL.
 MJAPI const mjpDecoder* mjp_findDecoder(const mjResource* resource, const char* content_type);
 
@@ -1590,11 +1607,21 @@ MJAPI void mjp_defaultEncoder(mjpEncoder* encoder);
 // If no match, return NULL.
 MJAPI const mjpEncoder* mjp_findEncoder(const char* filename, const char* content_type);
 
+// Globally register an archive provider. This function is thread-safe.
+// provider->prefix specifies the filename extension(s) (e.g. .mjz|.zip).
+MJAPI void mjp_registerArchiveProvider(const mjpResourceProvider* provider);
+
+// Return the archive provider that matches against the resource name.
+// If no match, return NULL.
+MJAPI const mjpResourceProvider* mjp_findArchiveProvider(const char* resource_name);
+
+// Return the number of globally registered archive providers.
+MJAPI int mjp_archiveProviderCount(void);
 
 
 //---------------------------------- Resources -----------------------------------------------------
 
-// Open a resource; if the name doesn't have a prefix matching a registered resource provider,
+// Open a resource; if the name doesn't have a prefix matching a registered provider,
 // then the OS filesystem is used.
 // Nullable: dir, vfs, error
 MJAPI mjResource* mju_openResource(const char* dir, const char* name,
@@ -1607,7 +1634,7 @@ MJAPI void mju_closeResource(mjResource* resource);
 // return negative value if error.
 MJAPI int mju_readResource(mjResource* resource, const void** buffer);
 
-// Write resource data via its resource provider, return bytes written or -1 on error.
+// Write resource data via its provider, return bytes written or -1 on error.
 // Nullable: vfs, error
 MJAPI mjtSize mju_writeResource(const char* name, const void* buffer, mjtSize nbytes,
                                 const mjVFS* vfs, char* error, size_t nerror);
@@ -1621,9 +1648,10 @@ MJAPI int mju_isModifiedResource(const mjResource* resource, const char* timesta
 
 // Find the decoder for a resource and return the decoded spec.
 // The caller takes ownership of the spec and is responsible for cleaning it up.
-// Nullable: vfs
+// On failure, return NULL and write the reason to error.
+// Nullable: vfs, error
 MJAPI mjSpec* mju_decodeResource(mjResource* resource, const char* content_type,
-                                 const mjVFS* vfs);
+                                 const mjVFS* vfs, char* error, int error_sz);
 
 
 //---------------------------------- Threads -------------------------------------------------------
@@ -1804,7 +1832,8 @@ MJAPI mjsHField* mjs_addHField(mjSpec* s);
 MJAPI mjsSkin* mjs_addSkin(mjSpec* s);
 
 // Add texture.
-MJAPI mjsTexture* mjs_addTexture(mjSpec* s);
+// Nullable: def
+MJAPI mjsTexture* mjs_addTexture(mjSpec* s, const mjsDefault* def);
 
 // Add material.
 // Nullable: def
@@ -1955,6 +1984,22 @@ MJAPI int mjs_setFrame(mjsElement* dest, mjsFrame* frame);
 // Resolve alternative orientations to quat; return error if any.
 MJAPI const char* mjs_resolveOrientation(double quat[4], mjtByte degree, const char* sequence,
                                          const mjsOrientation* orientation);
+
+// Fuse the static bodies of the spec with their parents; return the number fused, -1 on error.
+// Nullable: vfs
+MJAPI int mjs_fuseStatic(mjSpec* s, const mjVFS* vfs);
+
+// Discard the visual elements of the spec; return the number discarded, -1 on error.
+// Nullable: vfs
+MJAPI int mjs_discardVisual(mjSpec* s, const mjVFS* vfs);
+
+// Merge the textures and meshes of the spec which would compile to the same asset; return the number
+// merged, -1 on error.
+MJAPI int mjs_dedupAssets(mjSpec* s);
+
+// Make the inertial which compilation infers for a body part of the spec, return 0 on success.
+// Nullable: vfs
+MJAPI int mjs_adoptInertial(mjsBody* body, const mjVFS* vfs);
 
 // Transform body into a frame.
 MJAPI mjsFrame* mjs_bodyToFrame(mjsBody** body);

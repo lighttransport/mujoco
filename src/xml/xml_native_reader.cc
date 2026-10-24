@@ -21,6 +21,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -38,6 +39,7 @@
 #include "user/user_api.h"
 #include "user/user_composite.h"
 #include "user/user_flexcomp.h"
+#include "user/user_objects.h"
 #include "user/user_util.h"
 #include "xml/xml_base.h"
 #include "xml/xml_util.h"
@@ -295,11 +297,6 @@ void mjXReader::Parse(XMLElement* root, const mjVFS* vfs) {
     Sensor(section);
   }
 
-  for (XMLElement* section = FirstChildElement(root, "keyframe"); section;
-       section             = NextSiblingElement(section, "keyframe")) {
-    Keyframe(section);
-  }
-
   // set deepcopy flag to true to copy child specs during attach calls
   mjs_setDeepCopy(spec, true);
 
@@ -310,6 +307,13 @@ void mjXReader::Parse(XMLElement* root, const mjVFS* vfs) {
 
   // set deepcopy flag to false to disable copying during attach in all future calls
   mjs_setDeepCopy(spec, false);
+
+  // keyframes describe the complete model, so they are parsed after the kinematic tree: the
+  // attachments and deletions which expand a replicate would store and copy them as they go
+  for (XMLElement* section = FirstChildElement(root, "keyframe"); section;
+       section             = NextSiblingElement(section, "keyframe")) {
+    Keyframe(section);
+  }
 }
 
 
@@ -609,6 +613,16 @@ void mjXReader::OneFlex(XMLElement* elem, mjsFlex* flex) {
 }
 
 
+// an asset which has a file and no name is named after the file
+static void NameFromFile(XMLElement* elem, mjsElement* asset, const mjString* file) {
+  if (!mjs_getName(asset)->empty() || file->empty()) { return; }
+  std::string name = mjuu_stripext(mjuu_strippath(*file));
+  if (mjs_setName(asset, name.c_str())) {
+    throw mjXError(elem, "%s", mjs_getError(mjs_getSpec(asset)));
+  }
+}
+
+
 // mesh element parser
 void mjXReader::OneMesh(XMLElement* elem, mjsMesh* mesh, const mjVFS* vfs) {
   int    n;
@@ -620,6 +634,7 @@ void mjXReader::OneMesh(XMLElement* elem, mjsMesh* mesh, const mjVFS* vfs) {
   // file, resolved against the mesh directory
   auto file = ReadAttrFile(elem, "file", vfs, MeshDir());
   if (file) { mjs_setString(mesh->file, file->c_str()); }
+  NameFromFile(elem, mesh->element, mesh->file);
 
   // plugin sub-element
   XMLElement* eplugin = FirstChildElement(elem, "plugin");
@@ -656,6 +671,7 @@ void mjXReader::OneSkin(XMLElement* elem, mjsSkin* skin, const mjVFS* vfs) {
   // file, resolved against the asset directory
   auto file = ReadAttrFile(elem, "file", vfs, AssetDir());
   if (file.has_value()) { mjs_setString(skin->file, file->c_str()); }
+  NameFromFile(elem, skin->element, skin->file);
 
   // group with range validation
   ReadAttrInt(elem, "group", &skin->group);
@@ -709,6 +725,43 @@ void mjXReader::OneSkin(XMLElement* elem, mjsSkin* skin, const mjVFS* vfs) {
 }
 
 
+// texture element parser
+void mjXReader::OneTexture(XMLElement* elem, mjsTexture* texture, const mjVFS* vfs) {
+  string text;
+
+  // mechanical attributes
+  ReadAttrTable(elem, texture, texture->element, kTextureAttrs, kTextureAttrsN);
+
+  // file, resolved against the texture directory
+  auto file = ReadAttrFile(elem, "file", vfs, TextureDir());
+  if (file.has_value()) { mjs_setString(texture->file, file->c_str()); }
+  NameFromFile(elem, texture->element, texture->file);
+
+  // gridlayout length must equal the gridsize product (value-conditional)
+  if (ReadAttrTxt(elem, "gridlayout", text) &&
+      text.length() != texture->gridsize[0] * texture->gridsize[1]) {
+    throw mjXError(elem, "gridlayout length must match gridsize");
+  }
+
+  // separate files
+  std::vector<string> cubefiles(6);
+  std::vector<string> cubefile_names =
+      {"fileright", "fileleft", "fileup", "filedown", "filefront", "fileback"};
+  for (int i = 0; i < cubefiles.size(); i++) {
+    auto maybe_file = ReadAttrFile(elem, cubefile_names[i].c_str(), vfs, TextureDir());
+    if (maybe_file.has_value()) {
+      cubefiles[i] = maybe_file.value().Str();
+    } else {
+      cubefiles[i] = "";
+    }
+    mjs_setInStringVec(texture->cubefiles, i, cubefiles[i].c_str());
+  }
+
+  // write error info
+  mjs_setString(texture->info, ("line " + std::to_string(elem->GetLineNum())).c_str());
+}
+
+
 // material element parser
 void mjXReader::OneMaterial(XMLElement* elem, mjsMaterial* material) {
   string text, texture;
@@ -731,6 +784,7 @@ void mjXReader::OneMaterial(XMLElement* elem, mjsMaterial* material) {
     // layer sub-element
     ReadAttrTxt(layer, "role", text, true);
     int role = FindKey(texrole_map, texrole_sz, text);
+    if (role < 0) { throw mjXError(layer, "unknown layer role '%s'", text.c_str()); }
     ReadAttrTxt(layer, "texture", text, true);
     mjs_setInStringVec(material->textures, role, text.c_str());
     layer = NextSiblingElement(layer);
@@ -960,6 +1014,7 @@ void mjXReader::ReadAttrTableCore(XMLElement*    elem,
                            row.attr,
                            row.len);
           }
+          std::memset(base, 0, row.len);
           std::memcpy(base, text.data(), text.size());
           got = true;
         }
@@ -985,8 +1040,9 @@ void mjXReader::OneEquality(XMLElement* elem, mjsEquality* equality) {
   string text, name1, name2;
 
   // read type (bad keywords already detected by schema)
-  text           = elem->Value();
-  equality->type = (mjtEq)FindKey(equality_map, equality_sz, text);
+  text     = elem->Value();
+  int type = FindKey(equality_map, equality_sz, text);
+  if (type >= 0) equality->type = (mjtEq)type;
 
   // common attributes
   ReadAttrTable(elem, equality, equality->element, kEqualityBaseAttrs, kEqualityBaseAttrsN);
@@ -1095,8 +1151,8 @@ void mjXReader::OneTendon(XMLElement* elem, mjsTendon* tendon) {
 }
 
 
-// read the "input" attribute: so3 chart keyword, the "none" keyword (empty signature),
-// or a servo input token list, required to be in canonical order [pos, vel, ff, voltage]
+// read the "input" attribute: so3 chart keyword, the "none" keyword (empty signature), or an
+// input token list, required to be in canonical order [pos, vel, ff, voltage, pressure]
 static bool ReadInputSpec(tinyxml2::XMLElement* elem, int* ctrlspec) {
   std::string text;
   if (!mjXUtil::ReadAttrTxt(elem, "input", text)) { return false; }
@@ -1115,13 +1171,14 @@ static bool ReadInputSpec(tinyxml2::XMLElement* elem, int* ctrlspec) {
     return true;
   }
 
-  // servo input tokens; strictly ascending bits = canonical order, no duplicates
+  // input tokens; strictly ascending bits = canonical order, no duplicates
   int bits[inputbit_sz];
   int nbit = mjXUtil::MapValues(elem, "input", bits, inputbit_map, inputbit_sz);
   int spec = 0;
   for (int k = 0; k < nbit; k++) {
     if (bits[k] <= (k ? bits[k - 1] : 0)) {
-      throw mjXError(elem, "inputs must be listed in canonical order [pos, vel, ff, voltage]");
+      throw mjXError(elem,
+                     "inputs must be listed in canonical order [pos, vel, ff, voltage, pressure]");
     }
     spec |= bits[k];
   }
@@ -1131,11 +1188,21 @@ static bool ReadInputSpec(tinyxml2::XMLElement* elem, int* ctrlspec) {
 
 
 // actuator element parser
-void mjXReader::OneActuator(XMLElement* elem, mjsActuator* actuator) {
+void mjXReader::OneActuator(XMLElement* elem, mjsActuator* actuator, const mjsDefault* def) {
   string text, type, target, slidersite, refsite;
 
-  // mechanical attributes; per-tag legality is enforced by the schema check
-  ReadAttrTable(elem, actuator, actuator->element, kGeneralAttrs, kGeneralAttrsN);
+  // input signatures of <general> are scoped by gaintype
+  mjtGain inherited_gaintype = actuator->gaintype;
+
+  // the tag selects the shortcut and its mechanical rows; plugins read the general rows
+  type                          = elem->Value();
+  const mjXActuatorEntry* entry = nullptr;
+  for (int i = 0; i < kActuatorDispatchN; i++) {
+    if (type == kActuatorDispatch[i].tag) { entry = kActuatorDispatch + i; }
+  }
+  const mjXAttr* rows = entry ? entry->rows : kGeneralAttrs;
+  int            nrow = entry ? entry->n : kGeneralAttrsN;
+  ReadAttrTable(elem, actuator, actuator->element, rows, nrow);
 
   // transmission target and type
   if (ReadAttrTxt(elem, "joint", target)) {
@@ -1179,243 +1246,106 @@ void mjXReader::OneActuator(XMLElement* elem, mjsActuator* actuator) {
     throw mjXError(elem, "refsite can only be used with site transmission");
   }
 
-  // get predefined type
-  type = elem->Value();
-
-  // explicit attributes
-  string err;
+  // general: so3 chart keyword, or input token subset (validated per gaintype by the compiler)
   if (type == "general") {
-    // so3 chart keyword or servo token subset; dcmotor accepts the voltage keyword
+    if (actuator->gaintype != inherited_gaintype) { actuator->ctrlspec = 0; }
     ReadInputSpec(elem, &actuator->ctrlspec);
+    actuator->type = mjACTUATOR_GENERAL;
   }
 
-  // direct drive motor
-  else if (type == "motor") {
-    err = mjs_setToMotor(actuator);
-  }
-
-  // position or integrated velocity servo
-  else if (type == "position" || type == "intvelocity") {
-    double kp = actuator->gainprm[0];
-    ReadAttr(elem, "kp", 1, &kp, text);
-
-    // read kv
-    double  kv_data;
-    double* kv = &kv_data;
-    if (!ReadAttr(elem, "kv", 1, kv, text)) { kv = nullptr; }
-
-    // read dampratio
-    double  dampratio_data;
-    double* dampratio = &dampratio_data;
-    if (!ReadAttr(elem, "dampratio", 1, dampratio, text)) { dampratio = nullptr; }
-
-    // read timeconst, set dyntype
-    double  timeconst_data;
-    double* timeconst = &timeconst_data;
-    if (!ReadAttr(elem, "timeconst", 1, timeconst, text)) { timeconst = nullptr; }
-
-    // handle inheritrange
-    double inheritrange = actuator->inheritrange;
-    ReadAttr(elem, "inheritrange", 1, &inheritrange, text);
-
-    if (type == "position") {
-      err = mjs_setToPosition(actuator, kp, kv, dampratio, timeconst, inheritrange);
-    } else {
-      err = mjs_setToIntVelocity(actuator, kp, kv, dampratio, timeconst, inheritrange);
-    }
-  }
-
-  // orientation servo: geodesic PD on an SO3 transmission
-  else if (type == "orientation") {
-    double kp = actuator->gainprm[0];
-    ReadAttr(elem, "kp", 1, &kp, text);
-
-    double  kv_data;
-    double* kv = &kv_data;
-    if (!ReadAttr(elem, "kv", 1, kv, text)) { kv = nullptr; }
-
-    double  dampratio_data;
-    double* dampratio = &dampratio_data;
-    if (!ReadAttr(elem, "dampratio", 1, dampratio, text)) { dampratio = nullptr; }
-
-    // input chart: expmap (default) or quat
-    ReadInputSpec(elem, &actuator->ctrlspec);
-
-    err = mjs_setToOrientation(actuator, kp, kv, dampratio, actuator->ctrlspec);
-  }
-
-  // PID servo: inputs are position and velocity setpoints
-  else if (type == "pid") {
-    // kp: default inherited via -biasprm[1]
-    double kp = -actuator->biasprm[1];
-    ReadAttr(elem, "kp", 1, &kp, text);
-
-    double  kv_data;
-    double* kv = &kv_data;
-    if (!ReadAttr(elem, "kv", 1, kv, text)) { kv = nullptr; }
-
-    double  dampratio_data;
-    double* dampratio = &dampratio_data;
-    if (!ReadAttr(elem, "dampratio", 1, dampratio, text)) { dampratio = nullptr; }
-
-    // controller parameters: ki (gainprm[0]), imax (dynprm[0]), slewmax (dynprm[1]); inherited
-    double ki = actuator->gainprm[0] * (actuator->dyntype == mjDYN_PID);
-    ReadAttr(elem, "ki", 1, &ki, text);
-    double imax = actuator->dynprm[0] * (actuator->dyntype == mjDYN_PID);
-    ReadAttr(elem, "imax", 1, &imax, text);
-    double slewmax = actuator->dynprm[1] * (actuator->dyntype == mjDYN_PID);
-    ReadAttr(elem, "slewmax", 1, &slewmax, text);
-
-    // input subset selection
-    ReadInputSpec(elem, &actuator->ctrlspec);
-
-    // posrange is an alias of ctrlrange (the position-setpoint input);
-    // velrange and ffrange are read by the shared rows
-    ReadAttr(elem, "posrange", 2, actuator->ctrlrange, text);
-
-    // handle inheritrange
-    double inheritrange = actuator->inheritrange;
-    ReadAttr(elem, "inheritrange", 1, &inheritrange, text);
-
-    err = mjs_setToPID(actuator,
-                       kp,
-                       kv,
-                       dampratio,
-                       &ki,
-                       &imax,
-                       &slewmax,
-                       inheritrange,
-                       actuator->ctrlspec);
-  }
-
-  // velocity servo
-  else if (type == "velocity") {
-    double kv = actuator->gainprm[0];
-    ReadAttr(elem, "kv", 1, &kv, text);
-    err = mjs_setToVelocity(actuator, kv);
-  }
-
-  // damper
-  else if (type == "damper") {
-    bool   inherited = (actuator->gaintype == mjGAIN_AFFINE);
-    double kv        = inherited ? -actuator->gainprm[2] : 0;
-    ReadAttr(elem, "kv", 1, &kv, text);
-    err = mjs_setToDamper(actuator, kv);
-  }
-
-  // cylinder
-  else if (type == "cylinder") {
-    double timeconst = actuator->dynprm[0];
-    double bias[3]   = {actuator->biasprm[0], actuator->biasprm[1], actuator->biasprm[2]};
-    double area      = actuator->gainprm[0];
-    double diameter  = -1;
-    ReadAttr(elem, "timeconst", 1, &timeconst, text);
-    ReadAttr(elem, "bias", 3, bias, text);
-    ReadAttr(elem, "area", 1, &area, text);
-    ReadAttr(elem, "diameter", 1, &diameter, text);
-    err                  = mjs_setToCylinder(actuator, timeconst, bias[0], area, diameter);
-    actuator->biasprm[1] = bias[1];
-    actuator->biasprm[2] = bias[2];
-  }
-
-  // muscle
-  else if (type == "muscle") {
-    double tausmooth = actuator->dynprm[2];
-    double force = -1, scale = -1, lmin = -1, lmax = -1, vmax = -1, fpmax = -1, fvmax = -1;
-    double range[2] = {-1, -1}, timeconst[2] = {-1, -1};
-    ReadAttr(elem, "timeconst", 2, timeconst, text);
-    ReadAttr(elem, "tausmooth", 1, &tausmooth, text);
-    ReadAttr(elem, "range", 2, range, text);
-    ReadAttr(elem, "force", 1, &force, text);
-    ReadAttr(elem, "scale", 1, &scale, text);
-    ReadAttr(elem, "lmin", 1, &lmin, text);
-    ReadAttr(elem, "lmax", 1, &lmax, text);
-    ReadAttr(elem, "vmax", 1, &vmax, text);
-    ReadAttr(elem, "fpmax", 1, &fpmax, text);
-    ReadAttr(elem, "fvmax", 1, &fvmax, text);
-    err = mjs_setToMuscle(actuator,
-                          timeconst,
-                          tausmooth,
-                          range,
-                          force,
-                          scale,
-                          lmin,
-                          lmax,
-                          vmax,
-                          fpmax,
-                          fvmax);
-  }
-
-  // adhesion
-  else if (type == "adhesion") {
-    double gain = actuator->gainprm[0];
-    ReadAttr(elem, "gain", 1, &gain, text);
-    ReadAttr(elem, "ctrlrange", 2, actuator->ctrlrange, text);
-    err = mjs_setToAdhesion(actuator, gain);
-  }
-
-  // DC motor
-  else if (type == "dcmotor") {
-    bool   inherited     = (actuator->gaintype == mjGAIN_DCMOTOR);
-    double motorconst[2] = {inherited ? actuator->gainprm[1] : 0, 0};
-    double resistance    = inherited ? actuator->gainprm[0] : 0;
-    double nominal[3]    = {0, 0, 0};
-    double saturation[3] = {0, 0, inherited ? actuator->dynprm[1] : 0};
-    double controller[6] = {inherited ? actuator->gainprm[4] : 0,
-                            inherited ? actuator->gainprm[5] : 0,
-                            inherited ? actuator->gainprm[6] : 0,
-                            inherited ? actuator->dynprm[7] : 0,
-                            inherited ? actuator->dynprm[8] : 0,
-                            inherited ? actuator->gainprm[7] : 0};
-    double inductance[2] = {0, inherited ? actuator->dynprm[0] : 0};
-    double cogging[3]    = {inherited ? actuator->biasprm[0] : 0,
-                            inherited ? actuator->biasprm[1] : 0,
-                            inherited ? actuator->biasprm[2] : 0};
-    double thermal[6]    = {inherited ? actuator->dynprm[2] : 0,
-                            inherited ? actuator->dynprm[3] : 0,
-                            0,
-                            inherited ? actuator->gainprm[2] : 0,
-                            inherited ? actuator->gainprm[3] : 0,
-                            inherited ? actuator->dynprm[4] : 0};
-    double lugre[5]      = {inherited ? actuator->dynprm[5] : 0,
-                            inherited ? actuator->dynprm[6] : 0,
-                            inherited ? actuator->biasprm[3] : 0,
-                            inherited ? actuator->biasprm[4] : 0,
-                            inherited ? actuator->biasprm[5] : 0};
-    int    ctrlspec      = inherited ? actuator->ctrlspec : 0;
-    ReadAttr(elem, "motorconst", 2, motorconst, text, false, false);
-    ReadAttr(elem, "resistance", 1, &resistance, text);
-    ReadAttr(elem, "nominal", 3, nominal, text, false, false);
-    ReadAttr(elem, "saturation", 3, saturation, text, false, false);
-    ReadAttr(elem, "inductance", 2, inductance, text, false, false);
-    ReadAttr(elem, "cogging", 3, cogging, text, false, false);
-    ReadAttr(elem, "controller", 6, controller, text, false, false);
-    ReadAttr(elem, "thermal", 6, thermal, text, false, false);
-    ReadAttr(elem, "lugre", 5, lugre, text, false, false);
-    ReadInputSpec(elem, &ctrlspec);
-    err = mjs_setToDCMotor(actuator,
-                           motorconst,
-                           resistance,
-                           nominal,
-                           saturation,
-                           inductance,
-                           cogging,
-                           controller,
-                           thermal,
-                           lugre,
-                           ctrlspec);
-  }
-
+  // plugin
   else if (type == "plugin") {
     OnePlugin(elem, &actuator->plugin);
+    actuator->type = mjACTUATOR_GENERAL;
+  }
+
+  // shortcut: start from what the class or its nearest ancestor written with the same shortcut or
+  // general gives, else the documented defaults
+  else if (entry) {
+    mjtActuator        acttype = (mjtActuator)entry->type;
+    const mjCDef*      cdef    = def ? static_cast<const mjCDef*>(def->element) : nullptr;
+    const mjsActuator* src     = mjXShortcutSource(actuator, cdef, acttype);
+    mjXShortcut        s;
+    if (src) {
+      mjXShortcutFromActuator(&s, src, acttype);
+    } else {
+      mjXShortcutDefaults(&s, acttype);
+    }
+
+    // kv or dampratio, explicit; both given is an error of the setter
+    bool kv = ReadAttr(elem, "kv", 1, &s.kv, text);
+    bool dr = ReadAttr(elem, "dampratio", 1, &s.dampratio, text);
+    if (kv || dr) {
+      s.has_kv        = kv;
+      s.has_dampratio = dr;
+    }
+
+    switch (acttype) {
+      case mjACTUATOR_POSITION:
+      case mjACTUATOR_INTVELOCITY:
+        ReadAttr(elem, "kp", 1, &s.kp, text);
+        ReadAttr(elem, "inheritrange", 1, &s.inheritrange, text);
+        if (ReadAttr(elem, "timeconst", 1, s.timeconst, text)) { s.has_timeconst = true; }
+        break;
+      case mjACTUATOR_ORIENTATION:
+        ReadAttr(elem, "kp", 1, &s.kp, text);
+        ReadInputSpec(elem, &s.ctrlspec);
+        break;
+      case mjACTUATOR_PID:
+        ReadAttr(elem, "kp", 1, &s.kp, text);
+        ReadAttr(elem, "ki", 1, &s.ki, text);
+        ReadAttr(elem, "imax", 1, &s.imax, text);
+        ReadAttr(elem, "slewmax", 1, &s.slewmax, text);
+        ReadAttr(elem, "inheritrange", 1, &s.inheritrange, text);
+        ReadInputSpec(elem, &s.ctrlspec);
+        // posrange is an alias of ctrlrange (the position-setpoint input)
+        ReadAttr(elem, "posrange", 2, actuator->ctrlrange, text);
+        break;
+      case mjACTUATOR_CYLINDER:
+        ReadAttr(elem, "timeconst", 1, s.timeconst, text);
+        ReadAttr(elem, "bias", 3, s.bias, text);
+        ReadAttr(elem, "area", 1, &s.area, text);
+        ReadAttr(elem, "diameter", 1, &s.diameter, text);
+        break;
+      case mjACTUATOR_MUSCLE:
+        ReadAttr(elem, "timeconst", 2, s.timeconst, text);
+        ReadAttr(elem, "tausmooth", 1, &s.tausmooth, text);
+        ReadAttr(elem, "range", 2, s.range, text);
+        ReadAttr(elem, "force", 1, &s.force, text);
+        ReadAttr(elem, "scale", 1, &s.scale, text);
+        ReadAttr(elem, "lmin", 1, &s.lmin, text);
+        ReadAttr(elem, "lmax", 1, &s.lmax, text);
+        ReadAttr(elem, "vmax", 1, &s.vmax, text);
+        ReadAttr(elem, "fpmax", 1, &s.fpmax, text);
+        ReadAttr(elem, "fvmax", 1, &s.fvmax, text);
+        break;
+      case mjACTUATOR_ADHESION:
+        ReadAttr(elem, "gain", 1, &s.gain, text);
+        break;
+      case mjACTUATOR_DCMOTOR:
+        ReadAttr(elem, "motorconst", 2, s.motorconst, text, false, false);
+        ReadAttr(elem, "resistance", 1, &s.resistance, text);
+        ReadAttr(elem, "nominal", 3, s.nominal, text, false, false);
+        ReadAttr(elem, "saturation", 3, s.saturation, text, false, false);
+        ReadAttr(elem, "inductance", 2, s.inductance, text, false, false);
+        ReadAttr(elem, "cogging", 3, s.cogging, text, false, false);
+        ReadAttr(elem, "controller", 6, s.controller, text, false, false);
+        ReadAttr(elem, "thermal", 6, s.thermal, text, false, false);
+        ReadAttr(elem, "lugre", 5, s.lugre, text, false, false);
+        ReadInputSpec(elem, &s.ctrlspec);
+        break;
+      default:  // motor, velocity, damper: kv is read above
+        break;
+    }
+
+    // throw error if the setter failed
+    const char* err = mjXSetToShortcut(actuator, acttype, s);
+    if (err[0]) { throw mjXError(elem, err); }
   }
 
   else {  // SHOULD NOT OCCUR
     throw mjXError(elem, "unrecognized actuator type: %s", type.c_str());
   }
-
-  // throw error if any of the above failed
-  if (!err.empty()) { throw mjXError(elem, err.c_str()); }
 
   // write info
   mjs_setString(actuator->info, ("line " + std::to_string(elem->GetLineNum())).c_str());
@@ -1431,7 +1361,8 @@ void mjXReader::OneComposite(XMLElement*       elem,
   int    n;
 
   // create out-of-DOM element
-  mjCComposite comp;
+  auto          comp_ptr = std::make_unique<mjCComposite>();
+  mjCComposite& comp     = *comp_ptr;
 
   // common properties
   ReadAttrTxt(elem, "prefix", comp.prefix);
@@ -1448,7 +1379,10 @@ void mjXReader::OneComposite(XMLElement*       elem,
   // cable
   string curves;
   ReadAttrTxt(elem, "curve", curves);
-  ReadAttrTxt(elem, "initial", comp.initial);
+  if (ReadAttrTxt(elem, "initial", comp.initial) &&
+      FindKey(initial_map, initial_sz, comp.initial) < 0) {
+    throw mjXError(elem, "invalid keyword: '%s'", comp.initial.c_str());
+  }
   ReadAttr(elem, "size", 3, comp.size, text, false, false);
   auto uservert = ReadAttrVec<float>(elem, "vertex");
   if (uservert.has_value()) { comp.uservert = std::move(uservert.value()); }
@@ -1586,8 +1520,9 @@ void mjXReader::OneFlexcomp(XMLElement* elem, mjsBody* body, const mjVFS* vfs) {
   int    n;
 
   // create out-of-DOM element
-  mjCFlexcomp fcomp;
-  mjsFlex&    dflex = *fcomp.def.spec.flex;
+  auto         fcomp_ptr = std::make_unique<mjCFlexcomp>();
+  mjCFlexcomp& fcomp     = *fcomp_ptr;
+  mjsFlex&     dflex     = *fcomp.def.spec.flex;
 
   // common properties
   ReadAttrTxt(elem, "name", fcomp.name, true);
@@ -1604,15 +1539,19 @@ void mjXReader::OneFlexcomp(XMLElement* elem, mjsBody* body, const mjVFS* vfs) {
   } else {
     fcomp.file = "";
   }
+  ReadAttrTxt(elem, "mesh", fcomp.mesh);
+  if (!fcomp.mesh.empty() && !fcomp.file.empty()) {
+    throw mjXError(elem, "both 'file' and 'mesh' specified");
+  }
+  if (!fcomp.mesh.empty() && !elem->Attribute("type")) { fcomp.type = mjFCOMPTYPE_MESH; }
   if (ReadAttrTxt(elem, "material", material)) { mjs_setString(dflex.material, material.c_str()); }
   ReadAttr(elem, "rgba", 4, dflex.rgba, text);
   if (MapValue(elem, "flatskin", &n, bool_map, 2)) { dflex.flatskin = (n == 1); }
-  ReadAttrInt(elem, "dim", &dflex.dim);
+  if (ReadAttrInt(elem, "dim", &dflex.dim)) { fcomp.has_dim = true; }
   ReadAttr(elem, "radius", 1, &dflex.radius, text);
   ReadAttrInt(elem, "group", &dflex.group);
-  if (!ReadAttr(elem, "origin", 3, fcomp.origin, text) &&
-      fcomp.type == mjFCOMPTYPE_MESH &&
-      dflex.dim == 3) {
+  fcomp.has_origin = ReadAttr(elem, "origin", 3, fcomp.origin, text);
+  if (!fcomp.has_origin && fcomp.type == mjFCOMPTYPE_MESH && fcomp.mesh.empty() && dflex.dim == 3) {
     throw mjXError(elem, "origin must be specified for mesh flexcomps if dim=3");
   }
 
@@ -1651,11 +1590,8 @@ void mjXReader::OneFlexcomp(XMLElement* elem, mjsBody* body, const mjVFS* vfs) {
     ReadAttr(elasticity, "damping", 1, &dflex.damping, text);
     ReadAttr(elasticity, "thickness", 1, &dflex.thickness, text);
     MapValue(elasticity, "elastic2d", &dflex.elastic2d, elastic2d_map, 4);
-  }
-
-  // check errors
-  if (dflex.elastic2d != 1 && fcomp.equality && dflex.young > 0) {
-    throw mjXError(elem, "flex constraints and elasticity (young) cannot both be present");
+    MapValue(elasticity, "section", &dflex.section, flexsection_map, flexsection_sz);
+    ReadAttr(elasticity, "sectionsize", 2, dflex.sectionsize, text);
   }
 
   // contact
@@ -1671,7 +1607,6 @@ void mjXReader::OneFlexcomp(XMLElement* elem, mjsBody* body, const mjVFS* vfs) {
     ReadAttr(cont, "solimp", mjNIMP, dflex.solimp, text, false, false);
     ReadAttr(cont, "margin", 1, &dflex.margin, text);
     ReadAttr(cont, "gap", 1, &dflex.gap, text);
-    if (MapValue(cont, "internal", &n, bool_map, 2)) { dflex.internal = (n == 1); }
     MapValue(cont, "selfcollide", &dflex.selfcollide, flexself_map, 5);
     if (MapValue(cont, "passive", &n, bool_map, 2)) { dflex.passive = (n == 1); }
     ReadAttrInt(cont, "activelayers", &dflex.activelayers);
@@ -1760,6 +1695,10 @@ void mjXReader::Default(XMLElement* section, const mjsDefault* def, const mjVFS*
     // read mesh
     if (name == "mesh") OneMesh(elem, def->mesh, vfs);
 
+    // read texture
+    else if (name == "texture")
+      OneTexture(elem, def->texture, vfs);
+
     // read material
     else if (name == "material")
       OneMaterial(elem, def->material);
@@ -1797,19 +1736,8 @@ void mjXReader::Default(XMLElement* section, const mjsDefault* def, const mjVFS*
       OneTendon(elem, def->tendon);
 
     // read actuator
-    else if (name == "general" ||
-             name == "motor" ||
-             name == "position" ||
-             name == "velocity" ||
-             name == "damper" ||
-             name == "intvelocity" ||
-             name == "orientation" ||
-             name == "pid" ||
-             name == "cylinder" ||
-             name == "muscle" ||
-             name == "adhesion" ||
-             name == "dcmotor") {
-      OneActuator(elem, def->actuator);
+    else if (FindKey(actuatortype_map, actuatortype_sz, name) >= 0) {
+      OneActuator(elem, def->actuator, def);
     }
 
     // advance
@@ -2117,38 +2045,9 @@ void mjXReader::Asset(XMLElement* section, const mjVFS* vfs) {
 
     // texture sub-element
     if (name == "texture") {
-      // create texture
-      mjsTexture* texture = mjs_addTexture(spec);
-
-      // write error info
-      mjs_setString(texture->info, ("line " + std::to_string(elem->GetLineNum())).c_str());
-
-      // mechanical attributes
-      ReadAttrTable(elem, texture, texture->element, kTextureAttrs, kTextureAttrsN);
-
-      // file, resolved against the texture directory
-      auto file = ReadAttrFile(elem, "file", vfs, TextureDir());
-      if (file.has_value()) { mjs_setString(texture->file, file->c_str()); }
-
-      // gridlayout length must equal the gridsize product (value-conditional)
-      if (ReadAttrTxt(elem, "gridlayout", text) &&
-          text.length() != texture->gridsize[0] * texture->gridsize[1]) {
-        throw mjXError(elem, "gridlayout length must match gridsize");
-      }
-
-      // separate files
-      std::vector<string> cubefiles(6);
-      std::vector<string> cubefile_names =
-          {"fileright", "fileleft", "fileup", "filedown", "filefront", "fileback"};
-      for (int i = 0; i < cubefiles.size(); i++) {
-        auto maybe_file = ReadAttrFile(elem, cubefile_names[i].c_str(), vfs, TextureDir());
-        if (maybe_file.has_value()) {
-          cubefiles[i] = maybe_file.value().Str();
-        } else {
-          cubefiles[i] = "";
-        }
-        mjs_setInStringVec(texture->cubefiles, i, cubefiles[i].c_str());
-      }
+      // create texture and parse
+      mjsTexture* texture = mjs_addTexture(spec, def);
+      OneTexture(elem, texture, vfs);
     }
 
     // material sub-element
@@ -2186,6 +2085,7 @@ void mjXReader::Asset(XMLElement* section, const mjVFS* vfs) {
       // file, resolved against the asset directory
       auto file = ReadAttrFile(elem, "file", vfs, AssetDir());
       if (file.has_value()) { mjs_setString(hfield->file, file->c_str()); }
+      NameFromFile(elem, hfield->element, hfield->file);
 
       // allocate buffer for dynamic hfield, copy user data if given
       if (!file.has_value() && hfield->nrow > 0 && hfield->ncol > 0) {
@@ -2257,10 +2157,9 @@ static const char* stripError(const char* err) {
   return err;
 }
 
-// body/world section parser; recursive
+// body/world section parser
 void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const mjVFS* vfs) {
-  string      text, name;
-  XMLElement* elem;
+  string text, name;
 
   // sanity check
   if (!body) { throw mjXError(section, "null body pointer"); }
@@ -2270,9 +2169,31 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const 
     throw mjXError(section, "World body cannot have attributes");
   }
 
+  // when parsing the contents of a replicate, body is the temporary subtree
+  // that gets attached into the parent body; anything added directly to it
+  // (including via frames or includes) is replicated into the parent body
+  mjsBody* replicate_body = string(section->Value()) == "replicate" ? body : nullptr;
+
+  // stack of elements to process
+  struct BodyFrame {
+    XMLElement* elem;
+    mjsBody*    body;
+    mjsFrame*   frame;
+  };
+  vector<BodyFrame> stack;
+  stack.push_back({FirstChildElement(section), body, frame});
+
   // iterate over sub-elements; attributes set while parsing parent body
-  elem = FirstChildElement(section);
-  while (elem) {
+  while (!stack.empty()) {
+    XMLElement* elem = stack.back().elem;
+    if (!elem) {
+      stack.pop_back();
+      continue;
+    }
+    body              = stack.back().body;
+    frame             = stack.back().frame;
+    stack.back().elem = NextSiblingElement(elem);
+
     // get sub-element name
     name = elem->Value();
 
@@ -2289,12 +2210,21 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const 
       ReadQuat(elem, "quat", body->iquat, text);
       ReadAlternative(elem, body->ialt);
       ReadAttr(elem, "fullinertia", 6, body->fullinertia, text);
+
+      // the inertial frame is relative to the enclosing frame
+      mjCBody* bodyC = static_cast<mjCBody*>(body->element);
+      bodyC->iframe  = frame ? static_cast<mjCFrame*>(frame->element) : nullptr;
     }
 
     // joint sub-element
     else if (name == "joint") {
       // no joints allowed in world body
       if (mjs_getId(body->element) == 0) { throw mjXError(elem, "World body cannot have joints"); }
+
+      // joints would be replicated into the parent body
+      if (replicate_body && body == replicate_body) {
+        throw mjXError(elem, "joint cannot be a direct child of replicate");
+      }
 
       // create joint and parse
       mjsJoint* joint = mjs_addJoint(body, def);
@@ -2306,6 +2236,11 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const 
     else if (name == "freejoint") {
       // no joints allowed in world body
       if (mjs_getId(body->element) == 0) { throw mjXError(elem, "World body cannot have joints"); }
+
+      // joints would be replicated into the parent body
+      if (replicate_body && body == replicate_body) {
+        throw mjXError(elem, "joint cannot be a direct child of replicate");
+      }
 
       // create free joint without defaults
       mjsJoint* joint = mjs_addFreeJoint(body);
@@ -2400,8 +2335,16 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const 
       ReadAttr(elem, "pos", 3, pframe->pos, text);
       ReadQuat(elem, "quat", pframe->quat, text);
       ReadAlternative(elem, pframe->alt);
+      int nscale = ReadAttr(elem, "scale", 3, pframe->scale, text, false, false);
+      if (nscale == 1) {
+        pframe->scale[1] = pframe->scale[2] = pframe->scale[0];
+      } else if (nscale == 2) {
+        throw mjXError(elem, "attribute 'scale' must have 1 or 3 values");
+      }
+      MapValue(elem, "scaling", &pframe->scaling, scaling_map, scaling_sz);
+      ReadAttr(elem, "massscale", 1, &pframe->massscale, text);
 
-      Body(elem, body, pframe, vfs);
+      stack.push_back({FirstChildElement(elem), body, pframe});
     }
 
     // replicate sub-element
@@ -2435,7 +2378,7 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const 
       double   quat[4] = {1, 0, 0, 0};
 
       // parent frame that will be used to attach the subtree
-      mjsFrame* pframe = mjs_addFrame(subtree, frame);
+      mjsFrame* pframe = mjs_addFrame(subtree, nullptr);
       mjs_setDefault(pframe->element, childdef ? childdef : def);
       mjs_setString(pframe->info, ("line = " + std::to_string(elem->GetLineNum())).c_str());
 
@@ -2461,8 +2404,11 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const 
         string suffix = separator;
         UpdateString(suffix, count, i);
 
-        // attach to parent
-        if (!mjs_attach(body->element, pframe->element, /*prefix=*/"", suffix.c_str())) {
+        // attach to parent, inside the enclosing frame
+        if (!mjs_attach(frame ? frame->element : body->element,
+                        pframe->element,
+                        /*prefix=*/"",
+                        suffix.c_str())) {
           throw mjXError(elem, "%s", stripError(mjs_getError(spec)));
         }
       }
@@ -2483,6 +2429,7 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const 
 
       // create child body
       mjsBody* child = mjs_addBody(body, childdef);
+      if (!child) { throw mjXError(elem, "null body pointer"); }
       mjs_setString(child->info, string("line " + std::to_string(elem->GetLineNum())).c_str());
 
       // set default from class or childclass
@@ -2502,8 +2449,8 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const 
       // add frame
       mjs_setFrame(child->element, frame);
 
-      // make recursive call
-      Body(elem, child, nullptr, vfs);
+      // push child onto traversal stack
+      stack.push_back({FirstChildElement(elem), child, nullptr});
     }
 
     // attachment
@@ -2594,9 +2541,6 @@ void mjXReader::Body(XMLElement* section, mjsBody* body, mjsFrame* frame, const 
     else {
       throw mjXError(elem, "unrecognized model element '%s'", name.c_str());
     }
-
-    // advance to next element
-    elem = NextSiblingElement(elem);
   }
 }
 
@@ -2773,7 +2717,7 @@ void mjXReader::Actuator(XMLElement* section) {
 
     // create actuator and parse
     mjsActuator* actuator = mjs_addActuator(spec, def);
-    OneActuator(elem, actuator);
+    OneActuator(elem, actuator, def);
 
     // advance to next element
     elem = NextSiblingElement(elem);

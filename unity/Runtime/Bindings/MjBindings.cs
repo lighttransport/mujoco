@@ -27,6 +27,7 @@ public static class MujocoLib {
 // ----------------------------------Constants----------------------------------
 
 public const bool THIRD_PARTY_MUJOCO_MJASSERT_H_ = true;
+public const bool THIRD_PARTY_MUJOCO_MJBATCH_H_ = true;
 public const bool THIRD_PARTY_MUJOCO_MJDATA_H_ = true;
 public const bool THIRD_PARTY_MUJOCO_MJEXPORT_H_ = true;
 public const bool MUJOCO_HELPER_DLL_LOCAL = true;
@@ -43,7 +44,7 @@ public const int mjMAXCONPAIR = 50;
 public const int mjMAXTREEDEPTH = 50;
 public const int mjMAXFLEXNODES = 27;
 public const int mjMINAWAKE = 10;
-public const int mjNEQDATA = 11;
+public const int mjNEQDATA = 12;
 public const int mjNDYN = 10;
 public const int mjNGAIN = 10;
 public const int mjNBIAS = 10;
@@ -117,8 +118,11 @@ public const int mjMAXLINE = 100;
 public const int mjMAXLINEPNT = 1001;
 public const int mjMAXPLANEGRID = 200;
 public const bool THIRD_PARTY_MUJOCO_MJXMACRO_H_ = true;
+public const int mjSC_IN = 1;
+public const int mjSC_OUT = 2;
+public const int mjSC_INOUT = 3;
 public const bool THIRD_PARTY_MUJOCO_MUJOCO_H_ = true;
-public const int mjVERSION_HEADER = 3013001;
+public const int mjVERSION_HEADER = 3017001;
 
 
 // ------------------------------------Enums------------------------------------
@@ -309,6 +313,7 @@ public enum mjtCtrlInput : int{
   mjINPUT_FF = 4,
   mjINPUT_VOLTAGE = 8,
   mjINPUT_NONE = 16,
+  mjINPUT_PRESSURE = 32,
 }
 public enum mjtObj : int{
   mjOBJ_UNKNOWN = 0,
@@ -413,7 +418,9 @@ public enum mjtConDataField : int{
   mjCONDATA_POS = 4,
   mjCONDATA_NORMAL = 5,
   mjCONDATA_TANGENT = 6,
-  mjNCONDATA = 7,
+  mjCONDATA_LINVEL = 7,
+  mjCONDATA_ANGVEL = 8,
+  mjNCONDATA = 9,
 }
 public enum mjtRayDataField : int{
   mjRAYDATA_DIST = 0,
@@ -569,6 +576,16 @@ public enum mjtMeshBuiltin : int{
   mjMESH_BUILTIN_SUPERTORUS = 5,
   mjMESH_BUILTIN_WEDGE = 6,
   mjMESH_BUILTIN_PLATE = 7,
+  mjMESH_BUILTIN_GRID = 8,
+  mjMESH_BUILTIN_BOX = 9,
+  mjMESH_BUILTIN_CYLINDER = 10,
+  mjMESH_BUILTIN_ELLIPSOID = 11,
+  mjMESH_BUILTIN_SQUARE = 12,
+  mjMESH_BUILTIN_DISC = 13,
+}
+public enum mjtFlexSection : int{
+  mjFLEXSECTION_CIRCLE = 0,
+  mjFLEXSECTION_BOX = 1,
 }
 public enum mjtBuiltin : int{
   mjBUILTIN_NONE = 0,
@@ -592,6 +609,15 @@ public enum mjtAlignFree : int{
   mjALIGNFREE_TRUE = 1,
   mjALIGNFREE_AUTO = 2,
 }
+public enum mjtPassthrough : int{
+  mjPASSTHROUGH_NONE = 0,
+  mjPASSTHROUGH_TEXTURES = 1,
+}
+public enum mjtEmbed : int{
+  mjEMBED_FALSE = 0,
+  mjEMBED_TRUE = 1,
+  mjEMBED_AUTO = 2,
+}
 public enum mjtInertiaFromGeom : int{
   mjINERTIAFROMGEOM_FALSE = 0,
   mjINERTIAFROMGEOM_TRUE = 1,
@@ -608,6 +634,24 @@ public enum mjtConflict : int{
   mjCONFLICT_WARNING = 0,
   mjCONFLICT_MERGE = 1,
   mjCONFLICT_ERROR = 2,
+}
+public enum mjtScaling : int{
+  mjSCALING_SIMILAR = 0,
+  mjSCALING_GEOMETRY = 1,
+}
+public enum mjtActuator : int{
+  mjACTUATOR_GENERAL = 0,
+  mjACTUATOR_MOTOR = 1,
+  mjACTUATOR_POSITION = 2,
+  mjACTUATOR_VELOCITY = 3,
+  mjACTUATOR_INTVELOCITY = 4,
+  mjACTUATOR_DAMPER = 5,
+  mjACTUATOR_CYLINDER = 6,
+  mjACTUATOR_MUSCLE = 7,
+  mjACTUATOR_ADHESION = 8,
+  mjACTUATOR_PID = 9,
+  mjACTUATOR_ORIENTATION = 10,
+  mjACTUATOR_DCMOTOR = 11,
 }
 public enum mjtCTimer : int{
   mjCTIMER_TOTAL = 0,
@@ -1069,9 +1113,9 @@ public unsafe struct mjModel_ {
   public UInt64 nflexbending;
   public UInt64 nefm0dof;
   public UInt64 nefm0L;
+  public UInt64 nefmCvert;
   public UInt64 nflexelemedge;
   public UInt64 nflexshelldata;
-  public UInt64 nflexevpair;
   public UInt64 nflextexcoord;
   public UInt64 nJfe;
   public UInt64 nJfv;
@@ -1307,7 +1351,6 @@ public unsafe struct mjModel_ {
   public double* flex_friction;
   public double* flex_margin;
   public double* flex_gap;
-  public byte* flex_internal;
   public int* flex_selfcollide;
   public int* flex_activelayers;
   public int* flex_passive;
@@ -1330,11 +1373,10 @@ public unsafe struct mjModel_ {
   public int* flex_bendingadr;
   public int* flex_shellnum;
   public int* flex_shelldataadr;
-  public int* flex_evpairadr;
-  public int* flex_evpairnum;
   public int* flex_texcoordadr;
   public int* flex_nodebodyid;
   public int* flex_vertbodyid;
+  public int* flex_vertcell;
   public int* flex_vertedgeadr;
   public int* flex_vertedgenum;
   public int* flex_vertedge;
@@ -1345,7 +1387,6 @@ public unsafe struct mjModel_ {
   public int* flex_elemedge;
   public int* flex_elemlayer;
   public int* flex_shell;
-  public int* flex_evpair;
   public double* flex_vert;
   public double* flex_vert0;
   public double* flex_vertmetric;
@@ -1362,6 +1403,7 @@ public unsafe struct mjModel_ {
   public int* efm0_L_rowadr;
   public int* efm0_L_colind;
   public double* efm0_L;
+  public int* efmC_perm;
   public double* flex_damping;
   public double* flex_edgestiffness;
   public double* flex_edgedamping;
@@ -1450,6 +1492,7 @@ public unsafe struct mjModel_ {
   public UInt64* tex_adr;
   public byte* tex_data;
   public int* tex_pathadr;
+  public int* tex_contenttypeadr;
   public int* mat_texid;
   public byte* mat_texuniform;
   public float* mat_texrepeat;
@@ -5796,6 +5839,9 @@ public unsafe struct mjData_ {
   public double* flexvert_xpos;
   public double* flexelem_aabb;
   public double* flexelem_krot;
+  public byte* flex_hessian_valid;
+  public double* flexvert_hessian;
+  public double* flexedge_hessian;
   public double* flexedge_J;
   public double* flexedge_length;
   public double* flexvert_J;
@@ -5948,8 +5994,11 @@ public unsafe struct mjsCompiler_ {
   public mjtInertiaFromGeom inertiafromgeom;
   public fixed int inertiagrouprange[2];
   public byte saveinertial;
+  public byte savecompiled;
+  public byte savecanonical;
   public byte alignfree;
   public mjtConflict conflict;
+  public mjtPassthrough passthrough;
   public mjLROpt_ LRopt;
   public void* meshdir;
   public void* texturedir;
@@ -6780,6 +6829,12 @@ public static unsafe extern mjModel_* mj_loadXML([MarshalAs(UnmanagedType.LPStr)
 public static unsafe extern UInt64 mj_encode(void* s, mjModel_* m, [MarshalAs(UnmanagedType.LPStr)]string filename, [MarshalAs(UnmanagedType.LPStr)]string content_type, void* vfs, StringBuilder error, int error_sz);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
+public static unsafe extern int mj_loadTexture(mjModel_* m, int id, byte** data, int* width, int* height, int* colorspace, StringBuilder error, int error_sz);
+
+[DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
+public static unsafe extern mjModel_* mj_embedAssets(mjModel_* m, StringBuilder error, int error_sz);
+
+[DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern int mj_saveLastXML([MarshalAs(UnmanagedType.LPStr)]string filename, mjModel_* m, StringBuilder error, int error_sz);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
@@ -6825,13 +6880,13 @@ public static unsafe extern void mj_defaultVisual(mjVisual_* vis);
 public static unsafe extern mjModel_* mj_copyModel(mjModel_* dest, mjModel_* src);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
-public static unsafe extern void mj_saveModel(mjModel_* m, [MarshalAs(UnmanagedType.LPStr)]string filename, void* buffer, int buffer_sz);
+public static unsafe extern void mj_saveModel(mjModel_* m, [MarshalAs(UnmanagedType.LPStr)]string filename, void* buffer, UInt64 buffer_sz);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern mjModel_* mj_loadModel([MarshalAs(UnmanagedType.LPStr)]string filename, void* vfs);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
-public static unsafe extern mjModel_* mj_loadModelBuffer(void* buffer, int buffer_sz);
+public static unsafe extern mjModel_* mj_loadModelBuffer(void* buffer, UInt64 buffer_sz);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mj_deleteModel(mjModel_* m);
@@ -7062,7 +7117,7 @@ public static unsafe extern void mj_setState(mjModel_* m, mjData_* d, double* st
 public static unsafe extern void mj_copyState(mjModel_* m, mjData_* src, mjData_* dst, int sig);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
-public static unsafe extern double mj_readCtrl(mjModel_* m, mjData_* d, int id, double time, int interp);
+public static unsafe extern double* mj_readCtrl(mjModel_* m, mjData_* d, int id, double time, double* result, int interp);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern double* mj_readSensor(mjModel_* m, mjData_* d, int id, double time, double* result, int interp);

@@ -20,10 +20,16 @@ separating the viewer and simulation.
 from typing import Any
 
 import mujoco
+from mujoco import mjrf
 from mujoco.experimental.studio import endpoints
+from mujoco.experimental.studio import messages
 from mujoco.experimental.studio import native_viewer_cc as _viewer
 from mujoco.experimental.studio import ux
 from mujoco.experimental.studio import viewer_protocol
+from mujoco.experimental.studio import window
+from mujoco.rendering.filament import renderer
+
+import numpy as np
 
 from mujoco.experimental.dear_imgui import dear_imgui as imgui
 from mujoco.experimental.implot import implot
@@ -38,7 +44,6 @@ class NativeViewer(viewer_protocol.Viewer):
       endpoint: endpoints.ViewerEndpoint,
       *,
       model: mujoco.MjModel | None = None,
-      model_path: str = '',
       plugins: list[Any] | None = None,
       camera: mujoco.MjvCamera | None = None,
       vis_options: mujoco.MjvOption | None = None,
@@ -52,7 +57,6 @@ class NativeViewer(viewer_protocol.Viewer):
       config: Viewer window configuration.
       endpoint: The viewer endpoint for communication with the sim side.
       model: Optional initial MjModel. Forwarded to the base Viewer.
-      model_path: Optional path to the model file.
       plugins: Optional list of plugin instances.
       camera: Camera parameters. Internal object is created if None.
       vis_options: Visualization options. Internal object is created if None.
@@ -64,7 +68,6 @@ class NativeViewer(viewer_protocol.Viewer):
         config,
         endpoint,
         model=model,
-        model_path=model_path,
         plugins=plugins,
         camera=camera,
         vis_options=vis_options,
@@ -73,55 +76,137 @@ class NativeViewer(viewer_protocol.Viewer):
         extra_geoms=extra_geoms,
     )
 
-    # Create the renderer.
-    self._viewer = _viewer.Viewer(
-        config.title, config.width, config.height, config.gfx or ''
+    gfx_mode = config.gfx or ''
+
+    self._window = window.Window(
+        config.title,
+        config.width,
+        config.height,
+        gfx_mode,
+    )
+
+    mjrf_ctx = mjrf.Context(
+        mjrf.ContextConfig(graphics_api=mjrf.GraphicsApi.GRAPHICS_API_OPENGL)
+    )
+    self._renderer = renderer.Renderer(mjrf_ctx)
+    self._model_scene = None
+    self._imgui_bridge = _viewer.ImguiBridge(
+        mjrf_ctx, self._renderer.scene('ux')
     )
 
     # Track the python object id of the model currently loaded in the renderer
     # so we can detect when the model changes and re-initialize.
     self._renderer_model_id = id(None)
 
-    ctx = self._viewer.GetImGuiContext()
+    ctx = window.GetImGuiContext()
     imgui.SetCurrentContext(ctx)
     ux.set_imgui_context(ctx)
-    ux.set_implot_context(self._viewer.GetImPlotContext())
+    ux.set_implot_context(window.GetImPlotContext())
     implot.set_imgui_context(ctx)
-    implot.set_implot_context(self._viewer.GetImPlotContext())
+    implot.set_implot_context(window.GetImPlotContext())
 
     # Dispatch lifecycle event so handlers can cache the viewer reference.
-    self.dispatch(viewer_protocol.ViewerInitEvent(viewer=self))
+    try:
+      self.dispatch(viewer_protocol.ViewerInitEvent(viewer=self))
+    except BaseException:
+      self.close()  # Release the C++ viewer on this thread, see close().
+      raise
 
   def _sync_renderer(self, model: mujoco.MjModel) -> None:
     """Re-initializes the renderer if the model object has changed."""
     if id(model) != self._renderer_model_id:
-      self._viewer.InitRenderer(model)
+      self._model_scene = None
+      self._model_scene = _viewer.ModelScene(
+          self._renderer.context, self._renderer.scene('scn'), model
+      )
       self._renderer_model_id = id(model)
 
   def prepare_next_frame(self) -> bool:
     """Advances to the next frame; returns False when the window is closed."""
-    if not self._viewer.NewFrame():
-      self._is_running = False
+    if not self._window.NewFrame():
+      self.dispatch(messages.ExitEvent())
       return False
     return True
 
   def sync(self) -> None:
     """Render the scene and present it to the window."""
+    width = self._window.GetWidth()
+    height = self._window.GetHeight()
+    scale = self._window.GetScale()
+
+    pixels = None
+    if _viewer.render_to_pixels(self._window.GetGraphicsMode()):
+      pixels = np.empty((height, width, 3), dtype=np.uint8)
+      self._renderer.target('out', pixels)
+    else:
+      width = int(width * scale)
+      height = int(height * scale)
+
     self._sync_renderer(self.model)
-    self._viewer.Present(
-        self.model,
-        self.data,
-        self.perturb,
-        self.camera,
-        self.vis_options,
-        self.render_flags.flags,
-        self.extra_geoms,
+    self._imgui_bridge.update()
+    if self._model_scene:
+      self._model_scene.sync(
+          width,
+          height,
+          self.model,
+          self.data,
+          self.perturb,
+          self.camera,
+          self.vis_options,
+          self.extra_geoms,
+      )
+
+    draw_mode = mjrf.DrawMode.DRAW_MODE_DEFAULT
+    if self.render_flags.flags[mujoco.mjtRndFlag.mjRND_SEGMENT]:
+      if self.render_flags.flags[mujoco.mjtRndFlag.mjRND_IDCOLOR]:
+        draw_mode = mjrf.DrawMode.DRAW_MODE_SEGMENTATION_BY_ID
+      else:
+        draw_mode = mjrf.DrawMode.DRAW_MODE_SEGMENTATION_BY_COLOR
+    elif self.render_flags.flags[mujoco.mjtRndFlag.mjRND_DEPTH]:
+      draw_mode = mjrf.DrawMode.DRAW_MODE_DEPTH
+    elif self.render_flags.flags[mujoco.mjtRndFlag.mjRND_WIREFRAME]:
+      draw_mode = mjrf.DrawMode.DRAW_MODE_WIREFRAME
+    elif self.vis_options.flags[mujoco.mjtVisFlag.mjVIS_ISLAND]:
+      draw_mode = mjrf.DrawMode.DRAW_MODE_ISLANDS
+
+    scene_view = renderer.View(
+        scene='scn',
+        target='out' if pixels is not None else '',
+        camera=mujoco.mjv_camera2GLCamera(self.model, self.data, self.camera),
+        draw_mode=draw_mode,
+        shadows=self.render_flags.flags[mujoco.mjtRndFlag.mjRND_SHADOW],
+        reflections=self.render_flags.flags[mujoco.mjtRndFlag.mjRND_REFLECTION],
+        headlight=self.model.vis.headlight.active != 0,
+        headlight_color=tuple(self.model.vis.headlight.diffuse),
+        headlight_intensity=self._model_scene.get_headlight_intensity()
+        if self._model_scene
+        else 0.0,
     )
 
-  # TODO(matijak): Remove stop() and rename callers to close().
-  def stop(self) -> None:
-    """Stop the viewer."""
-    self.close()
+    ux_camera = mjrf.Camera(
+        orthographic=True,
+        pos=[0.0, 0.0, 1.0],
+        forward=[0.0, 0.0, -1.0],
+        up=[0.0, 1.0, 0.0],
+        frustum_top=0.0,
+        frustum_near=0.0,
+        frustum_far=1.0,
+        frustum_center=width / 2.0,
+        frustum_width=width / 2.0,
+        frustum_bottom=height,
+    )
+    ux_view = renderer.View(
+        scene='ux',
+        target='out' if pixels is not None else '',
+        camera=ux_camera,
+        shadows=False,
+        reflections=False,
+        post_processing=False,
+    )
+
+    # ensure output buffer is of right size (in case of window resize)
+    self._renderer.render([scene_view, ux_view])
+    self._window.Present(pixels)
 
   def close(self) -> None:
     """Close the viewer and explicitly destroy the renderer.
@@ -131,14 +216,23 @@ class NativeViewer(viewer_protocol.Viewer):
     thread affinity.  Without this override the pybind11 prevent object would
     be garbage-collected on the main thread, triggering a SIGABRT.
     """
-    # Destroy the C++ viewer *before* closing the endpoint so that the
-    # FilamentRenderer destructor runs on the daemon/viewer thread.
-    self._viewer = None  # Release the C++ Viewer pybind11 prevent object.
-    super().close()
+    try:
+      if self._is_running:
+        self._is_running = False
+        self.dispatch(messages.ExitEvent())
+    finally:
+      # Destroy the C++ viewer *before* closing the endpoint so that the
+      # FilamentRenderer destructor runs on the daemon/viewer thread, even if
+      # an ExitEvent handler raised.
+      del self._model_scene
+      del self._imgui_bridge
+      del self._renderer
+      del self._window
+      super().close()
 
   def get_drop_file(self) -> str:
     """Returns the path of the file dropped into the window, or empty string."""
-    return self._viewer.GetDropFile()
+    return self._window.GetDropFile()
 
   def upload_image(
       self, tex_id: int, img: str | bytes, width: int, height: int, bpp: int
@@ -159,37 +253,4 @@ class NativeViewer(viewer_protocol.Viewer):
     Returns:
       The texture ID.
     """
-    return self._viewer.UploadImage(tex_id, img, width, height, bpp)
-
-  def render_to_texture(
-      self,
-      model: mujoco.MjModel,
-      data: mujoco.MjData,
-      tex_id: int,
-      width: int,
-      height: int,
-  ) -> int:
-    """Renders the scene to a texture.
-
-    This function renders the scene from the current camera view into a texture.
-    It handles buffer allocation internally.
-
-    Args:
-      model: The MuJoCo model provided by the simulation.
-      data: The MuJoCo data provided by the simulation.
-      tex_id: The texture ID to render into (0 to create a new one).
-      width: Width of the texture.
-      height: Height of the texture.
-
-    Returns:
-      The texture ID.
-    """
-    self._sync_renderer(model)
-    return self._viewer.RenderToTexture(
-        model,
-        data,
-        self.camera,
-        width,
-        height,
-        tex_id,
-    )
+    return self._imgui_bridge.upload_image(tex_id, img, width, height, bpp)

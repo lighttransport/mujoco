@@ -16,10 +16,10 @@
 
 #include <mujoco/mjdata.h>
 #include <mujoco/mjmodel.h>
+#include <mujoco/mjtype.h>
 #include "engine/engine_inline.h"
 #include "engine/engine_util_blas.h"
 #include "engine/engine_util_misc.h"
-#include "engine/engine_util_spatial.h"
 
 
 //--------------------------- plane collisions -----------------------------------------------------
@@ -425,95 +425,28 @@ int mjc_SphereCylinder(const mjModel* m, mjData* d, mjPreContact* con, int g1, i
 int mjraw_CapsuleCapsule(mjPreContact* con, mjtNum margin,
                          const mjtNum* pos1, const mjtNum* mat1, const mjtNum* size1,
                          const mjtNum* pos2, const mjtNum* mat2, const mjtNum* size2) {
-  // get capsule axes (scaled) and center difference
+  // get capsule axes (scaled) and segment endpoints
   mjtNum axis1[3] = {mat1[2] * size1[1], mat1[5] * size1[1], mat1[8] * size1[1]};
   mjtNum axis2[3] = {mat2[2] * size2[1], mat2[5] * size2[1], mat2[8] * size2[1]};
-  mjtNum dif[3] = {pos1[0] - pos2[0], pos1[1] - pos2[1], pos1[2] - pos2[2]};
+  mjtNum p1[3], p2[3], q1[3], q2[3];
+  mju_sub3(p1, pos1, axis1);
+  mju_add3(p2, pos1, axis1);
+  mju_sub3(q1, pos2, axis2);
+  mju_add3(q2, pos2, axis2);
 
-  // compute matrix coefficients and determinant
-  mjtNum ma =  mju_dot3(axis1, axis1);
-  mjtNum mb = -mju_dot3(axis1, axis2);
-  mjtNum mc =  mju_dot3(axis2, axis2);
-  mjtNum u  = -mju_dot3(axis1, dif);
-  mjtNum v  =  mju_dot3(axis2, dif);
-  mjtNum det = ma*mc - mb*mb;
+  mjtNum w[4];
+  int n = mjc_segWeights(w, p1, p2, q1, q2);
 
-  // general configuration (non-parallel axes)
-  if (mju_abs(det) >= mjMINVAL) {
-    // find projections, clip to segments
-    mjtNum x1 = (mc*u - mb*v) / det;
-    mjtNum x2 = (ma*v - mb*u) / det;
-
-    if (x1 > 1) {
-      x1 = 1;
-      x2 = (v - mb) / mc;
-    } else if (x1 < -1) {
-      x1 = -1;
-      x2 = (v + mb) / mc;
-    }
-    if (x2 > 1) {
-      x2 = 1;
-      x1 = mju_clip((u - mb) / ma, -1, 1);
-    } else if (x2 < -1) {
-      x2 = -1;
-      x1 = mju_clip((u + mb) / ma, -1, 1);
-    }
-
-    // find nearest points, do sphere-sphere test
+  int ncon = 0;
+  for (int i = 0; i < n; i++) {
     mjtNum vec1[3], vec2[3];
-    mji_scl3(vec1, axis1, x1);
-    mji_addTo3(vec1, pos1);
-    mji_scl3(vec2, axis2, x2);
-    mji_addTo3(vec2, pos2);
-
-    return mjraw_SphereSphere(con, margin, vec1, mat1, size1, vec2, mat2, size2);
-  }
-
-  // parallel axes
-  else {
-    // x1 = 1
-    mjtNum vec1[3];
-    mji_add3(vec1, pos1, axis1);
-    mjtNum x2 = mju_clip((v - mb) / mc, -1, 1);
-
-    mjtNum vec2[3];
-    mji_scl3(vec2, axis2, x2);
-    mji_addTo3(vec2, pos2);
-    int n1 = mjraw_SphereSphere(con, margin, vec1, mat1, size1, vec2, mat2, size2);
-
-    // x1 = -1
-    mji_sub3(vec1, pos1, axis1);
-    x2 = mju_clip((v + mb) / mc, -1, 1);
-    mji_scl3(vec2, axis2, x2);
-    mji_addTo3(vec2, pos2);
-    int n2 = mjraw_SphereSphere(con + n1, margin, vec1, mat1, size1, vec2, mat2, size2);
-
-    // return if two contacts already found
-    if (n1+n2 >= 2) {
-      return n1+n2;
+    for (int k = 0; k < 3; k++) {
+      vec1[k] = p1[k] + w[2*i] * (p2[k] - p1[k]);
+      vec2[k] = q1[k] + w[2*i + 1] * (q2[k] - q1[k]);
     }
-
-    // x2 = 1
-    mji_add3(vec2, pos2, axis2);
-    mjtNum x1 = mju_clip((u - mb) / ma, -1, 1);
-    mji_scl3(vec1, axis1, x1);
-    mji_addTo3(vec1, pos1);
-    int n3 = mjraw_SphereSphere(con + n1 + n2, margin, vec1, mat1, size1, vec2, mat2, size2);
-
-    // return if two contacts already found
-    if (n1+n2+n3 >= 2) {
-      return n1+n2+n3;
-    }
-
-    // x2 = -1
-    mji_sub3(vec2, pos2, axis2);
-    x1 = mju_clip((u + mb) / ma, -1, 1);
-    mji_scl3(vec1, axis1, x1);
-    mji_addTo3(vec1, pos1);
-    int n4 = mjraw_SphereSphere(con + n1 + n2 + n3, margin, vec1, mat1, size1, vec2, mat2, size2);
-
-    return n1+n2+n3+n4;
+    ncon += mjraw_SphereSphere(con + ncon, margin, vec1, mat1, size1, vec2, mat2, size2);
   }
+  return ncon;
 }
 
 
@@ -530,280 +463,142 @@ int mjc_CapsuleCapsule(const mjModel* m, mjData* d, mjPreContact* con, int g1, i
 }
 
 
-// sign of (signed) area of planar triangle
-static mjtNum areaSign(const mjtNum p1[2], const mjtNum p2[2], const mjtNum p3[2]) {
-  return mju_sign((p1[0]-p3[0])*(p2[1]-p3[1]) - (p2[0]-p3[0])*(p1[1]-p3[1]));
+// compute the barycentric weights w of the closest point on triangle ABC to p
+void mjc_triWeights(mjtNum w[3], const mjtNum p[3], const mjtNum a[3], const mjtNum b[3],
+                    const mjtNum c[3]) {
+  // compute barycentric coordinates via Voronoi regions (See Ericson 5.1.5)
+  mjtNum ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+  mjtNum ac[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+  mjtNum ap[3] = {p[0] - a[0], p[1] - a[1], p[2] - a[2]};
+  mjtNum bp[3] = {p[0] - b[0], p[1] - b[1], p[2] - b[2]};
+  mjtNum cp[3] = {p[0] - c[0], p[1] - c[1], p[2] - c[2]};
+
+  mjtNum dot1 = mju_dot3(ab, ap);
+  mjtNum dot2 = mju_dot3(ac, ap);
+  mjtNum dot3 = mju_dot3(ab, bp);
+  mjtNum dot4 = mju_dot3(ac, bp);
+  mjtNum dot5 = mju_dot3(ab, cp);
+  mjtNum dot6 = mju_dot3(ac, cp);
+
+  // vertex region outside A
+  if (dot1 <= 0 && dot2 <= 0) {
+    w[0] = 1, w[1] = 0, w[2] = 0;
+    return;
+  }
+
+  // vertex region outside B
+  if (dot3 >= 0 && dot4 <= dot3) {
+    w[0] = 0, w[1] = 1, w[2] = 0;
+    return;
+  }
+
+  // vertex region outside C
+  if (dot6 >= 0 && dot5 <= dot6) {
+    w[0] = 0, w[1] = 0, w[2] = 1;
+    return;
+  }
+
+  // signed areas of PBC, PCA, PAB scaled by 4*area(ABC)
+  mjtNum va = dot3 * dot6 - dot5 * dot4;
+  mjtNum vb = dot5 * dot2 - dot1 * dot6;
+  mjtNum vc = dot1 * dot4 - dot3 * dot2;
+
+  // edge region AB
+  if (vc <= 0 && dot1 >= 0 && dot3 <= 0) {
+    mjtNum t = dot1 / (dot1 - dot3);
+    w[0] = 1 - t,  w[1] = t, w[2] = 0;
+    return;
+  }
+
+  // edge region AC
+  if (vb <= 0 && dot2 >= 0 && dot6 <= 0) {
+    mjtNum t = dot2 / (dot2 - dot6);
+    w[0] = 1 - t, w[1] = 0, w[2] = t;
+    return;
+  }
+
+  // edge region BC
+  if (va <= 0 && (dot4 - dot3) >= 0 && (dot5 - dot6) >= 0) {
+    mjtNum t = (dot4 - dot3) / ((dot4 - dot3) + (dot5 - dot6));
+    w[0] = 0, w[1] = 1 - t, w[2] = t;
+    return;
+  }
+
+  // face region ABC
+  mjtNum d = 1.0 / (va + vb + vc), t = vb * d, u = vc * d;
+  w[0] = 1 - t - u, w[1] = t, w[2] = u;
 }
 
 
-// find nearest point to p within line segment (u,v); return distance to p
-static mjtNum pointSegment(mjtNum res[2], const mjtNum p[2],
-                           const mjtNum u[2], const mjtNum v[2]) {
-  // make u the origin
-  mjtNum uv[2] = {v[0]-u[0], v[1]-u[1]};
-  mjtNum up[2] = {p[0]-u[0], p[1]-u[1]};
-
-  // project: find a s.t. uv is orthogonal to (up-a*uv)
-  mjtNum a = mju_dot(uv, up, 2) / mju_max(mjMINVAL, mju_dot(uv, uv, 2));
-
-  // find nearest point to p, clamp to u or v if a is not in (0,1)
-  if (a <= 0) {
-    res[0] = u[0];
-    res[1] = u[1];
-  } else if (a >= 1) {
-    res[0] = v[0];
-    res[1] = v[1];
+// clamp t to [0, 1] and recompute s on segment AB (s0 at t=0, s1 at t=1)
+static inline void clampSeg(mjtNum w[2], mjtNum s, mjtNum t, mjtNum s0, mjtNum s1) {
+  if (t < 0) {
+    w[0] = mju_clip(s0, 0, 1), w[1] = 0;
+  } else if (t > 1) {
+    w[0] = mju_clip(s1, 0, 1), w[1] = 1;
   } else {
-    mju_addScl(res, u, uv, a, 2);
+    w[0] = s, w[1] = t;
   }
-
-  // compute distance
-  return mju_sqrt((res[0]-p[0])*(res[0]-p[0]) + (res[1]-p[1])*(res[1]-p[1]));
 }
 
 
-// sphere : triangle with radius
-int mjraw_SphereTriangle(mjPreContact* con, mjtNum margin,
-                         const mjtNum* s, mjtNum rs,
-                         const mjtNum* t1, const mjtNum* t2, const mjtNum* t3, mjtNum rt) {
-  mjtNum rbound = margin + rs + rt;
-  mjtNum X[3];
+// compute the barycentric weights w = {s1, t1, s2, t2} in [0, 1] of the closest points
+// A + s*(B - A) on segment AB and C + t*(D - C) on segment CD;
+// return the number of closest point pairs (1, or 2 if parallel)
+int mjc_segWeights(mjtNum w[4], const mjtNum a[3], const mjtNum b[3], const mjtNum c[3],
+                   const mjtNum d[3]) {
+  const mjtNum sin2 = 1e-8;  // sin^2(0.006 deg) cutoff for parallel segments
 
-  // make t1 the origin: triangle is (O,A,B); sphere center is S
-  mjtNum S[3] = { s[0]-t1[0],  s[1]-t1[1],  s[2]-t1[2]};
-  mjtNum A[3] = {t2[0]-t1[0], t2[1]-t1[1], t2[2]-t1[2]};
-  mjtNum B[3] = {t3[0]-t1[0], t3[1]-t1[1], t3[2]-t1[2]};
+  // compute barycentric coordinates via Voronoi regions (See Ericson 5.1.9)
+  mjtNum ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+  mjtNum cd[3] = {d[0] - c[0], d[1] - c[1], d[2] - c[2]};
+  mjtNum ca[3] = {a[0] - c[0], a[1] - c[1], a[2] - c[2]};
 
-  // N is normal to triangle plane
-  mjtNum N[3];
-  mji_cross(N, A, B);
-  mju_normalize3(N);
+  mjtNum dot1 = mju_dot3(ab, ab);
+  mjtNum dot2 = mju_dot3(cd, cd);
+  mjtNum dot3 = mju_dot3(cd, ca);
+  mjtNum dot4 = mju_dot3(ab, ca);
+  mjtNum dot5 = mju_dot3(ab, cd);
 
-  // dstS is signed distance from S to plane; exit if too large
-  mjtNum dstS = mju_dot3(N, S);
-  if (mju_abs(dstS) > rbound) {
-    return 0;
+  // both segments degenerate into points
+  if (dot1 <= mjMINVAL && dot2 <= mjMINVAL) {
+    w[0] = 0, w[1] = 0;
+    return 1;
   }
 
-  // P is projection of S in triangle plane
-  mjtNum P[3];
-  mji_addScl3(P, S, N, -dstS);
-
-  // construct orthogonal axes (V1~A, V2) of triangle plane
-  mjtNum V1[3], V2[3];
-  mji_copy3(V1, A);
-  mjtNum lenA = mju_normalize3(V1);
-  mji_cross(V2, N, A);
-  mju_normalize3(V2);
-
-  // triangle is (o,a,b), sphere center is p
-  mjtNum o[2] = {0, 0};
-  mjtNum a[2] = {lenA, 0};  // equals {mju_dot3(V1, A), mju_dot3(V2, A)}
-  mjtNum b[2] = {mju_dot3(V1, B), mju_dot3(V2, B)};
-  mjtNum p[2] = {mju_dot3(V1, P), mju_dot3(V2, P)};
-
-  // computed signs of areas of (p,o,a), (p,a,b), (p,b,o)
-  mjtNum sign1 = areaSign(p, o, a);
-  mjtNum sign2 = areaSign(p, a, b);
-  mjtNum sign3 = areaSign(p, b, o);
-
-  // p is inside triangle
-  if (sign1 == sign2 && sign2 == sign3) {
-    // P is nearest point to S within triangle
-    mji_copy3(X, P);
+  // first segment degenerates into a point
+  if (dot1 <= mjMINVAL) {
+    w[0] = 0, w[1] = mju_clip(dot3 / dot2, 0, 1);
+    return 1;
   }
 
-  // p is not inside triangle
-  else {
-    // find nearest point to p on triangle edges (o,a), (a,b), (b,o)
-    mjtNum x[3][2], dstx[3];
-    dstx[0] = pointSegment(x[0], p, o, a);
-    dstx[1] = pointSegment(x[1], p, a, b);
-    dstx[2] = pointSegment(x[2], p, b, o);
-
-    // select minimum
-    int best = (dstx[0] < dstx[1] && dstx[0] < dstx[2]) ? 0 : (dstx[1] < dstx[2] ? 1 : 2);
-
-    // convert x[best] to 3D
-    mji_scl3(X, V1, x[best][0]);
-    mji_addToScl3(X, V2, x[best][1]);
+  // second segment degenerates into a point
+  if (dot2 <= mjMINVAL) {
+    w[0] = mju_clip(-dot4 / dot1, 0, 1), w[1] = 0;
+    return 1;
   }
 
-  // X is now the nearest point to S within the 3D triangle (O,A,B)
-  // compute contact normal and distance
-  mjtNum nrm[3] = {X[0]-S[0], X[1]-S[1], X[2]-S[2]};
-  mjtNum dst = mju_normalize3(nrm);
+  // projections of C (t=0) and D (t=1) onto AB
+  mjtNum s0 = -dot4 / dot1;
+  mjtNum s1 = (dot5 - dot4) / dot1;
 
-  // exit if too far
-  if (dst > rbound) {
-    return 0;
+  // compute determinant via Lagrange's identity to avoid cancellation for parallel segments
+  mjtNum cross[3];
+  mji_cross(cross, ab, cd);
+  mjtNum det = mju_dot3(cross, cross);
+
+  // segments are considered non-parallel
+  if (det > sin2 * dot1 * dot2) {
+    // compute s via Binet-Cauchy identity to avoid cancellation for near-parallel segments
+    mjtNum cross_ca[3];
+    mji_cross(cross_ca, cd, ca);
+    mjtNum s = mju_clip(mju_dot3(cross, cross_ca) / det, 0, 1);
+    clampSeg(w, s, (dot5 * s + dot3) / dot2, s0, s1);
+    return 1;
   }
 
-  // construct contact
-  con[0].dist = dst - rs - rt;
-  mji_addScl3(con[0].pos, s, nrm, rs + con[0].dist / 2);
-  mji_copy3(con[0].normal, nrm);
-  mju_zero3(con[0].tangent);
-
-  return 1;
-}
-
-
-// box : triangle with radius
-int mjraw_BoxTriangle(mjPreContact* con, mjtNum margin, const mjtNum* pos,
-                      const mjtNum* mat, const mjtNum* size, const mjtNum* t1,
-                      const mjtNum* t2, const mjtNum* t3, mjtNum rt) {
-  int cnt = 0;
-  const mjtNum* vert[3] = {t1, t2, t3};
-
-  for (int i = 0; i < 3; i++) {
-    // map vertex to box local frame
-    mjtNum diff[3], local[3];
-    mju_sub3(diff, vert[i], pos);
-    mju_mulMatTVec3(local, mat, diff);
-
-    // find max penetration / closest face
-    int maxaxis = 0;
-    mjtNum maxval = mju_abs(local[0]) - size[0];
-    for (int j = 1; j < 3; j++) {
-      mjtNum val = mju_abs(local[j]) - size[j];
-      if (val > maxval) {
-        maxval = val;
-        maxaxis = j;
-      }
-    }
-
-    // contact distance: dist = maxval - rt
-    // strictly, we only care if dist < margin
-    if (maxval - rt > margin) {
-      continue;
-    }
-
-    // check if within other dimensions (with margin/radius)
-    int inside = 1;
-    for (int j = 0; j < 3; j++) {
-      if (mju_abs(local[j]) > size[j] + margin + rt) {
-        inside = 0;
-        break;
-      }
-    }
-    if (!inside) {
-      continue;
-    }
-
-    // create contact
-    if (cnt < mjMAXCONPAIR) {
-      // normal in local frame
-      mjtNum nrm_local[3] = {0, 0, 0};
-      nrm_local[maxaxis] = (local[maxaxis] > 0 ? 1 : -1);
-
-      // normal in global frame (from Box to Triangle)
-      mju_mulMatVec3(con[cnt].normal, mat, nrm_local);
-
-      // distance
-      con[cnt].dist = maxval - rt;
-
-      // position: v - nrm * (rt + dist/2)
-      mjtNum offset = rt + con[cnt].dist * 0.5;
-      mji_addScl3(con[cnt].pos, vert[i], con[cnt].normal, -offset);
-
-      // frame details
-      mju_zero3(con[cnt].tangent);
-
-      cnt++;
-    }
-  }
-
-  // check box corners against triangle
-  for (int i = 0; i < 8; i++) {
-    if (cnt >= mjMAXCONPAIR) {
-      break;
-    }
-
-    // get corner in local coordinates
-    mjtNum vec[3];
-    vec[0] = (i & 1 ? size[0] : -size[0]);
-    vec[1] = (i & 2 ? size[1] : -size[1]);
-    vec[2] = (i & 4 ? size[2] : -size[2]);
-
-    // get corner in global coordinates relative to box center
-    mjtNum corner[3];
-    mju_mulMatVec3(corner, mat, vec);
-    mju_addTo3(corner, pos);
-
-    // check collision with triangle (radius 0 for corner)
-    if (mjraw_SphereTriangle(con + cnt, margin, corner, 0, t1, t2, t3, rt)) {
-      // mjraw_SphereTriangle normal points from Sphere (Corner) to Triangle.
-      cnt++;
-    }
-  }
-
-  return cnt;
-}
-
-
-// capsule : triangle with radius
-int mjraw_CapsuleTriangle(mjPreContact* con, mjtNum margin, const mjtNum* pos,
-                          const mjtNum* mat, const mjtNum* size,
-                          const mjtNum* t1, const mjtNum* t2, const mjtNum* t3,
-                          mjtNum rt) {
-  int cnt = 0;
-  mjtNum radius = size[0];
-  mjtNum len = size[1];
-  mjtNum axis[3] = {mat[2], mat[5], mat[8]};
-  mjtNum p1[3], p2[3];
-
-  // capsule endpoints
-  mju_addScl3(p1, pos, axis, -len);
-  mju_addScl3(p2, pos, axis, len);
-
-  // Check endpoints against triangle
-  cnt += mjraw_SphereTriangle(con + cnt, margin, p1, radius, t1, t2, t3, rt);
-  if (cnt >= mjMAXCONPAIR) return cnt;
-  cnt += mjraw_SphereTriangle(con + cnt, margin, p2, radius, t1, t2, t3, rt);
-  if (cnt >= mjMAXCONPAIR) return cnt;
-
-  // Check triangle vertices against capsule axis (Point-Segment)
-  const mjtNum* vert[3] = {t1, t2, t3};
-  for (int i = 0; i < 3; i++) {
-    // point-segment distance
-    mjtNum vec[3], ab[3];
-    mju_sub3(vec, vert[i], p1);
-    mju_sub3(ab, p2, p1);
-    mjtNum t = mju_dot3(vec, ab) / (4 * len * len);  // ab length is 2*len
-
-    // clamp t to [0, 1] segment (only process interior)
-    if (t <= mjMINVAL || t >= 1 - mjMINVAL) {
-      continue;
-    }
-
-    // closest point on segment
-    mjtNum closest[3];
-    mji_addScl3(closest, p1, ab, t);
-
-    // distance vector
-    mju_sub3(vec, vert[i], closest);
-    mjtNum dist = mju_normalize3(vec);
-
-    if (dist > radius + rt + margin) {
-      continue;
-    }
-
-    // con->dist
-    con[cnt].dist = dist - radius - rt;
-
-    // Frame: normal from Capsule to Triangle. 'vec' points Closest->Vert.
-    mji_copy3(con[cnt].normal, vec);
-    mju_zero3(con[cnt].tangent);
-
-    // Position: midway between surfaces
-    mji_add3(con[cnt].pos, closest, vert[i]);
-    mji_addToScl3(con[cnt].pos, vec, radius - rt);
-    mju_scl3(con[cnt].pos, con[cnt].pos, 0.5);
-
-    cnt++;
-    if (cnt >= mjMAXCONPAIR) return cnt;
-  }
-
-  return cnt;
+  // segments are close to parallel (compute closest points on both segments)
+  clampSeg(w, 0, dot3 / dot2, s0, s1);
+  clampSeg(w + 2, 1, (dot5 + dot3) / dot2, s0, s1);
+  return 2;
 }

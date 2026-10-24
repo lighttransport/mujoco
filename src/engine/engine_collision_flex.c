@@ -21,8 +21,196 @@
 #include <mujoco/mjsan.h>  // IWYU pragma: keep
 #include "engine/engine_collision_convex.h"
 #include "engine/engine_collision_primitive.h"
+#include "engine/engine_inline.h"
 #include "engine/engine_util_blas.h"
 #include "engine/engine_util_spatial.h"
+
+// sphere : triangle with radius
+static int sphereTriangle(mjPreContact* con, mjtNum margin, const mjtNum* s,
+                          mjtNum rs, const mjtNum* t1, const mjtNum* t2,
+                          const mjtNum* t3, mjtNum rt) {
+  mjtNum rbound = margin + rs + rt;
+  mjtNum w[3], X[3], nrm[3];
+  mjc_triWeights(w, s, t1, t2, t3);
+  for (int k = 0; k < 3; k++) {
+    X[k] = w[0] * t1[k] + w[1] * t2[k] + w[2] * t3[k];
+  }
+
+  // compute contact normal and distance
+  mji_sub3(nrm, X, s);
+  mjtNum dst = mju_normalize3(nrm);
+  if (dst > rbound) {
+    return 0;
+  }
+
+  // construct contact
+  con[0].dist = dst - rs - rt;
+  mji_addScl3(con[0].pos, s, nrm, rs + con[0].dist / 2);
+  mji_copy3(con[0].normal, nrm);
+  mju_zero3(con[0].tangent);
+
+  return 1;
+}
+
+
+// box : triangle with radius
+static int boxTriangle(mjPreContact* con, mjtNum margin, const mjtNum* pos,
+                       const mjtNum* mat, const mjtNum* size, const mjtNum* t1,
+                       const mjtNum* t2, const mjtNum* t3, mjtNum rt) {
+  int cnt = 0;
+  const mjtNum* vert[3] = {t1, t2, t3};
+
+  for (int i = 0; i < 3; i++) {
+    // map vertex to box local frame
+    mjtNum diff[3], local[3];
+    mju_sub3(diff, vert[i], pos);
+    mju_mulMatTVec3(local, mat, diff);
+
+    // find max penetration / closest face
+    int maxaxis = 0;
+    mjtNum maxval = mju_abs(local[0]) - size[0];
+    for (int j = 1; j < 3; j++) {
+      mjtNum val = mju_abs(local[j]) - size[j];
+      if (val > maxval) {
+        maxval = val;
+        maxaxis = j;
+      }
+    }
+
+    // contact distance: dist = maxval - rt
+    // strictly, we only care if dist < margin
+    if (maxval - rt > margin) {
+      continue;
+    }
+
+    // check if within other dimensions (with margin/radius)
+    int inside = 1;
+    for (int j = 0; j < 3; j++) {
+      if (mju_abs(local[j]) > size[j] + margin + rt) {
+        inside = 0;
+        break;
+      }
+    }
+    if (!inside) {
+      continue;
+    }
+
+    // create contact
+    if (cnt < mjMAXCONPAIR) {
+      // normal in local frame
+      mjtNum nrm_local[3] = {0, 0, 0};
+      nrm_local[maxaxis] = (local[maxaxis] > 0 ? 1 : -1);
+
+      // normal in global frame (from Box to Triangle)
+      mju_mulMatVec3(con[cnt].normal, mat, nrm_local);
+
+      // distance
+      con[cnt].dist = maxval - rt;
+
+      // position: v - nrm * (rt + dist/2)
+      mjtNum offset = rt + con[cnt].dist * 0.5;
+      mji_addScl3(con[cnt].pos, vert[i], con[cnt].normal, -offset);
+
+      // frame details
+      mju_zero3(con[cnt].tangent);
+
+      cnt++;
+    }
+  }
+
+  // check box corners against triangle
+  for (int i = 0; i < 8; i++) {
+    if (cnt >= mjMAXCONPAIR) {
+      break;
+    }
+
+    // get corner in local coordinates
+    mjtNum vec[3];
+    vec[0] = (i & 1 ? size[0] : -size[0]);
+    vec[1] = (i & 2 ? size[1] : -size[1]);
+    vec[2] = (i & 4 ? size[2] : -size[2]);
+
+    // get corner in global coordinates relative to box center
+    mjtNum corner[3];
+    mju_mulMatVec3(corner, mat, vec);
+    mju_addTo3(corner, pos);
+
+    // check collision with triangle (radius 0 for corner)
+    if (sphereTriangle(con + cnt, margin, corner, 0, t1, t2, t3, rt)) {
+      // mjraw_SphereTriangle normal points from Sphere (Corner) to Triangle.
+      cnt++;
+    }
+  }
+
+  return cnt;
+}
+
+
+// capsule : triangle with radius
+static int capsuleTriangle(mjPreContact* con, mjtNum margin, const mjtNum* pos,
+                           const mjtNum* mat, const mjtNum* size,
+                           const mjtNum* t1, const mjtNum* t2, const mjtNum* t3,
+                           mjtNum rt) {
+  int cnt = 0;
+  mjtNum radius = size[0];
+  mjtNum len = size[1];
+  mjtNum axis[3] = {mat[2], mat[5], mat[8]};
+  mjtNum p1[3], p2[3];
+
+  // capsule endpoints
+  mju_addScl3(p1, pos, axis, -len);
+  mju_addScl3(p2, pos, axis, len);
+
+  // Check endpoints against triangle
+  cnt += sphereTriangle(con + cnt, margin, p1, radius, t1, t2, t3, rt);
+  if (cnt >= mjMAXCONPAIR) return cnt;
+  cnt += sphereTriangle(con + cnt, margin, p2, radius, t1, t2, t3, rt);
+  if (cnt >= mjMAXCONPAIR) return cnt;
+
+  // Check triangle vertices against capsule axis (Point-Segment)
+  const mjtNum* vert[3] = {t1, t2, t3};
+  for (int i = 0; i < 3; i++) {
+    // point-segment distance
+    mjtNum vec[3], ab[3];
+    mju_sub3(vec, vert[i], p1);
+    mju_sub3(ab, p2, p1);
+    mjtNum t = mju_dot3(vec, ab) / (4 * len * len);  // ab length is 2*len
+
+    // clamp t to [0, 1] segment (only process interior)
+    if (t <= mjMINVAL || t >= 1 - mjMINVAL) {
+      continue;
+    }
+
+    // closest point on segment
+    mjtNum closest[3];
+    mji_addScl3(closest, p1, ab, t);
+
+    // distance vector
+    mju_sub3(vec, vert[i], closest);
+    mjtNum dist = mju_normalize3(vec);
+
+    if (dist > radius + rt + margin) {
+      continue;
+    }
+
+    // con->dist
+    con[cnt].dist = dist - radius - rt;
+
+    // Frame: normal from Capsule to Triangle. 'vec' points Closest->Vert.
+    mji_copy3(con[cnt].normal, vec);
+    mju_zero3(con[cnt].tangent);
+
+    // Position: midway between surfaces
+    mji_add3(con[cnt].pos, closest, vert[i]);
+    mji_addToScl3(con[cnt].pos, vec, radius - rt);
+    mju_scl3(con[cnt].pos, con[cnt].pos, 0.5);
+
+    cnt++;
+    if (cnt >= mjMAXCONPAIR) return cnt;
+  }
+
+  return cnt;
+}
 
 // test a plane geom and a flex for collision, return number of contacts
 int mjc_PlaneFlex(const mjModel* m, mjData* d, mjPreContact* con, int* vert, int g, int f,
@@ -166,7 +354,7 @@ int mjc_GeomElem(const mjModel* m, mjData* d, mjPreContact* con, int g, int f, i
   // sphere : triangle
   else if (type == mjGEOM_SPHERE && dim == 2) {
     const mjtNum* vertxpos = d->flexvert_xpos + 3*m->flex_vertadr[f];
-    ncon = mjraw_SphereTriangle(con, margin,
+    ncon = sphereTriangle(con, margin,
                                d->geom_xpos + 3*g, m->geom_size[3*g],
                                vertxpos + 3*edata[0], vertxpos + 3*edata[1],
                                vertxpos + 3*edata[2], m->flex_radius[f]);
@@ -175,7 +363,7 @@ int mjc_GeomElem(const mjModel* m, mjData* d, mjPreContact* con, int g, int f, i
   // box : triangle
   else if (type == mjGEOM_BOX && dim == 2) {
     const mjtNum* vertxpos = d->flexvert_xpos + 3*m->flex_vertadr[f];
-    ncon = mjraw_BoxTriangle(con, margin, d->geom_xpos + 3*g,
+    ncon = boxTriangle(con, margin, d->geom_xpos + 3*g,
                              d->geom_xmat + 9*g, m->geom_size + 3*g,
                              vertxpos + 3*edata[0], vertxpos + 3*edata[1],
                              vertxpos + 3*edata[2], m->flex_radius[f]);
@@ -184,7 +372,7 @@ int mjc_GeomElem(const mjModel* m, mjData* d, mjPreContact* con, int g, int f, i
   // capsule : triangle
   else if (type == mjGEOM_CAPSULE && dim == 2) {
     const mjtNum* vertxpos = d->flexvert_xpos + 3*m->flex_vertadr[f];
-    ncon = mjraw_CapsuleTriangle(con, margin, d->geom_xpos + 3*g, d->geom_xmat + 9*g,
+    ncon = capsuleTriangle(con, margin, d->geom_xpos + 3*g, d->geom_xmat + 9*g,
                                  m->geom_size + 3*g, vertxpos + 3*edata[0], vertxpos + 3*edata[1],
                                  vertxpos + 3*edata[2], m->flex_radius[f]);
   }
@@ -195,6 +383,77 @@ int mjc_GeomElem(const mjModel* m, mjData* d, mjPreContact* con, int g, int f, i
   }
 
   return ncon;
+}
+
+
+// range [lo, hi] of the interpolation grid cells containing vertex v of flex f, per axis: a vertex
+//   on an internal cell plane belongs to the cells on both sides, so that the result does not
+//   depend on the side the vertex is rounded to; vertices within eps of a plane are treated as on
+//   the plane, where eps is relative to the cell size and covers the rounding of flex_vert0 in
+//   [0, 1] in single precision; if v falls in a pruned/empty cell, returns the active cell that
+//   extrapolates v so mjc_ElemSharedNode reflects the nodes actually driving v
+void mjc_vertCellRange(const mjModel* m, int f, int v, int lo[3], int hi[3]) {
+  int gv = m->flex_vertadr[f] + v;
+  const mjtNum* coord = m->flex_vert0 + 3*gv;
+  const int* cellnum = m->flex_cellnum + 3*f;
+  int cell = m->flex_vertcell[gv];
+  if (cell >= 0) {
+    int cx = cellnum[0], cy = cellnum[1], cz = cellnum[2];
+    int ci = mjMAX(0, mjMIN(cx - 1, (int)mju_floor(coord[0] * cx)));
+    int cj = mjMAX(0, mjMIN(cy - 1, (int)mju_floor(coord[1] * cy)));
+    int ck = mjMAX(0, mjMIN(cz - 1, (int)mju_floor(coord[2] * cz)));
+    if (cell != ci * cy * cz + cj * cz + ck) {
+      lo[0] = hi[0] = cell / (cy * cz);
+      lo[1] = hi[1] = (cell / cz) % cy;
+      lo[2] = hi[2] = cell % cz;
+      return;
+    }
+  }
+  for (int i = 0; i < 3; i++) {
+    mjtNum u = coord[i] * cellnum[i];
+    mjtNum eps = 1e-6 * cellnum[i];
+    lo[i] = mjMAX(0, mjMIN(cellnum[i] - 1, (int)mju_floor(u - eps)));
+    hi[i] = mjMAX(0, mjMIN(cellnum[i] - 1, (int)mju_floor(u + eps)));
+  }
+}
+
+
+// return 1 if cell ranges [lo1, hi1] and [lo2, hi2] are within distance 1 along every axis
+int mjc_cellRangeShared(const int lo1[3], const int hi1[3], const int lo2[3], const int hi2[3]) {
+  return lo2[0] - hi1[0] <= 1 && lo1[0] - hi2[0] <= 1 &&
+         lo2[1] - hi1[1] <= 1 && lo1[1] - hi2[1] <= 1 &&
+         lo2[2] - hi1[2] <= 1 && lo1[2] - hi2[2] <= 1;
+}
+
+
+// return 1 if elements e1 and e2 of flex f have vertices in the same or in neighboring cells of
+//   its interpolation grid, 0 for non-interpolated flexes. Such elements are driven by a common
+//   grid node (neighboring cells share a face, edge or corner of nodes, for both trilinear and
+//   quadratic interpolation) and can only intersect if the grid inverts locally, which is resisted
+//   by elasticity; their vertices have no body for the shared-body filter
+int mjc_ElemSharedNode(const mjModel* m, int f, int e1, int e2) {
+  if (!m->flex_interp[f]) {
+    return 0;
+  }
+
+  int dim = m->flex_dim[f];
+  const int* edata1 = m->flex_elem + m->flex_elemdataadr[f] + e1*(dim + 1);
+  const int* edata2 = m->flex_elem + m->flex_elemdataadr[f] + e2*(dim + 1);
+  int lo1[4][3], hi1[4][3], lo2[4][3], hi2[4][3];
+  for (int i = 0; i <= dim; i++) {
+    mjc_vertCellRange(m, f, edata1[i], lo1[i], hi1[i]);
+    mjc_vertCellRange(m, f, edata2[i], lo2[i], hi2[i]);
+  }
+
+  // cell ranges within distance 1 along every axis
+  for (int i1 = 0; i1 <= dim; i1++) {
+    for (int i2 = 0; i2 <= dim; i2++) {
+      if (mjc_cellRangeShared(lo1[i1], hi1[i1], lo2[i2], hi2[i2])) {
+        return 1;
+      }
+    }
+  }
+  return 0;
 }
 
 
@@ -246,49 +505,6 @@ int mjc_ElemElem(const mjModel* m, mjData* d, mjPreContact* con, int f1, int e1,
   // general convex collision
   else {
     ncon = mjc_ConvexElem(m, d, con, -1, f1, e1, -1, f2, e2, margin);
-  }
-  return ncon;
-}
-
-
-// test element and vertex for collision, return number of contacts
-int mjc_ElemVert(const mjModel* m, mjData* d, mjPreContact* con, int f, int e, int v,
-                 mjtNum margin) {
-  mjtNum radius = m->flex_radius[f];
-  const mjtNum* vert = d->flexvert_xpos + 3*(m->flex_vertadr[f] + v);
-  int dim = m->flex_dim[f];
-  const int* edata = m->flex_elem + m->flex_elemdataadr[f] + e*(dim + 1);
-  int ncon = 0;
-
-  // box-box filter (sphere treated as box)
-  const mjtNum* aabb = d->flexelem_aabb + 6*(m->flex_elemadr[f] + e);
-  mjtNum rbound = margin + radius;
-  if (aabb[0] - aabb[3] > vert[0] + rbound) return 0;
-  if (aabb[1] - aabb[4] > vert[1] + rbound) return 0;
-  if (aabb[2] - aabb[5] > vert[2] + rbound) return 0;
-  if (aabb[0] + aabb[3] < vert[0] - rbound) return 0;
-  if (aabb[1] + aabb[4] < vert[1] - rbound) return 0;
-  if (aabb[2] + aabb[5] < vert[2] - rbound) return 0;
-
-  // sphere : capsule
-  if (dim == 1) {
-    mjtNum pos[3], mat[9], size[2];
-    mjtNum I[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-    makeCapsule(m, d, f, edata, pos, mat, size);
-    ncon = mjraw_SphereCapsule(con, 0, vert, I, &radius, pos, mat, size);
-  }
-
-  // sphere : triangle
-  else if (dim == 2) {
-    const mjtNum* vertxpos = d->flexvert_xpos + 3*m->flex_vertadr[f];
-    ncon = mjraw_SphereTriangle(con, 0, vert, radius,
-                               vertxpos + 3*edata[0], vertxpos + 3*edata[1],
-                               vertxpos + 3*edata[2], radius);
-  }
-
-  // sphere : tetrahedron
-  else {
-    ncon = mjc_ConvexElem(m, d, con, -1, f, -1, v, f, e, 0);
   }
   return ncon;
 }

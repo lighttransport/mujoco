@@ -109,6 +109,57 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
         return dependencies;
       });
 
+  // mj_loadTexture returns its out-parameters: a (height, width, nchannel)
+  // uint8 array which owns the mju_malloc'ed buffer, and the colorspace
+  pymodule.def(
+      "mj_loadTexture",
+      [](const MjModelWrapper& m, int id) {
+        std::array<char, 1024> error;
+        mjtByte* data = nullptr;
+        int width, height, colorspace, status;
+        {
+          py::gil_scoped_release no_gil;
+          status = InterceptMjErrors(::mj_loadTexture)(
+              m.get(), id, &data, &width, &height, &colorspace, error.data(),
+              error.size());
+        }
+        if (status) {
+          throw py::value_error(std::string(error.data()));
+        }
+        int nchannel = m.get()->tex_nchannel[id];
+        py::capsule owner(data, [](void* p) { mju_free(p); });
+        py::array_t<std::uint8_t> pixels({height, width, nchannel}, data,
+                                         owner);
+        return std::make_pair(pixels, colorspace);
+      },
+      py::arg("m"), py::arg("id"),
+      py::doc((std::string(traits::mj_loadTexture::doc) +
+               std::string(" Returns (pixels, colorspace), pixels an array of "
+                           "shape (height, width, nchannel)."))
+                  .c_str()));
+
+  // mj_embedAssets returns a new MjModel which owns the model
+  py::function mjmodel_from_raw_ptr = py::module::import("mujoco._structs")
+                                          .attr("MjModel")
+                                          .attr("_from_model_ptr");
+  pymodule.def(
+      "mj_embedAssets",
+      [mjmodel_from_raw_ptr](const MjModelWrapper& m) -> py::object {
+        std::array<char, 1024> error;
+        raw::MjModel* embedded = nullptr;
+        {
+          py::gil_scoped_release no_gil;
+          embedded = InterceptMjErrors(::mj_embedAssets)(
+              m.get(), error.data(), error.size());
+        }
+        if (!embedded) {
+          throw py::value_error(std::string(error.data()));
+        }
+        // wrapped by _structs, which owns MjModelWrapper's symbols
+        return mjmodel_from_raw_ptr(reinterpret_cast<std::uintptr_t>(embedded));
+      },
+      py::arg("m"), py::doc(traits::mj_embedAssets::doc));
+
   // Main simulation
   pymodule.def(
       "mj_step",
@@ -144,7 +195,7 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
          std::optional<Eigen::Ref<Eigen::Vector<std::uint8_t, Eigen::Dynamic>>>
              buffer = std::nullopt) {
         void* buffer_ptr = nullptr;
-        int buffer_sz = 0;
+        mjtSize buffer_sz = 0;
         if (buffer.has_value()) {
           buffer_ptr = buffer->data();
           buffer_sz = buffer->size();
@@ -359,17 +410,40 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
         return InterceptMjErrors(::mj_setState)(m, d, state.data(), sig);
       });
   Def<traits::mj_copyState>(pymodule);
-  Def<traits::mj_readCtrl>(pymodule);
+  Def<traits::mj_readCtrl>(
+      pymodule,
+      [](const raw::MjModel* m, const raw::MjData* d, int id, mjtNum time,
+         Eigen::Ref<EigenVectorX> result, int interp) {
+        if (id < 0 || id >= m->nactuator) {
+          throw py::index_error("actuator id out of range");
+        }
+        int dim = m->actuator_ctrlnum[id];
+        if (result.size() != dim) {
+          throw py::type_error(
+              "result should have length actuator_ctrlnum[id]");
+        }
+        const mjtNum* ptr = InterceptMjErrors(::mj_readCtrl)(
+            m, d, id, time, result.data(), interp);
+        if (ptr && ptr != result.data()) {
+          for (int i = 0; i < dim; ++i) {
+            result[i] = ptr[i];
+          }
+        }
+        return result;
+      });
   Def<traits::mj_readSensor>(
       pymodule,
       [](const raw::MjModel* m, const raw::MjData* d, int id, mjtNum time,
-         Eigen::Ref<EigenVectorX> result, int order) {
+         Eigen::Ref<EigenVectorX> result, int interp) {
+        if (id < 0 || id >= m->nsensor) {
+          throw py::index_error("sensor id out of range");
+        }
         int dim = m->sensor_dim[id];
         if (result.size() != dim) {
           throw py::type_error("result should have length sensor_dim[id]");
         }
         const mjtNum* ptr = InterceptMjErrors(::mj_readSensor)(
-            m, d, id, time, result.data(), order);
+            m, d, id, time, result.data(), interp);
         if (ptr && ptr != result.data()) {
           for (int i = 0; i < dim; ++i) {
             result[i] = ptr[i];
@@ -381,15 +455,20 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
       pymodule,
       [](const raw::MjModel* m, raw::MjData* d, int id,
          std::optional<Eigen::Ref<const EigenVectorX>> times,
-         Eigen::Ref<const EigenVectorX> values) {
-        int nhistory = m->actuator_history[2*id];
+         Eigen::Ref<const EigenArrayXX> values) {
+        if (id < 0 || id >= m->nactuator) {
+          throw py::index_error("actuator id out of range");
+        }
+        int nhistory = m->actuator_history[2 * id];
+        int dim = m->actuator_ctrlnum[id];
         if (times.has_value() && times->size() != nhistory) {
           throw py::type_error(
               "times should have length actuator_history[2*id]");
         }
-        if (values.size() != nhistory) {
+        if (values.rows() != nhistory || values.cols() != dim) {
           throw py::type_error(
-              "values should have length actuator_history[2*id]");
+              "values should have shape (actuator_history[2*id], "
+              "actuator_ctrlnum[id])");
         }
         return InterceptMjErrors(::mj_initCtrlHistory)(
             m, d, id,
@@ -399,6 +478,9 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
       pymodule, [](const raw::MjModel* m, raw::MjData* d, int id,
                    std::optional<Eigen::Ref<const EigenVectorX>> times,
                    Eigen::Ref<const EigenArrayXX> values, mjtNum phase) {
+        if (id < 0 || id >= m->nsensor) {
+          throw py::index_error("sensor id out of range");
+        }
         int nhistory = m->sensor_history[2 * id];
         int dim = m->sensor_dim[id];
         if (times.has_value() && times->size() != nhistory) {
@@ -1686,7 +1768,9 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
       [](MjDataWrapper& d, int ncon, int nefc, int nJ) {
         raw::MjData* data = d.get();
 
-        auto cleanup = [](raw::MjData* data, int nJ) {
+        // discard all contacts and constraint rows: like mj_clearEfc, clear the
+        // arena pointers and every count that sizes or indexes them
+        auto cleanup = [](raw::MjData* data) {
 #ifdef ADDRESS_SANITIZER
         ASAN_POISON_MEMORY_REGION(
             static_cast<char*>(data->arena),
@@ -1694,8 +1778,12 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
 #endif
           data->parena = 0;
           data->ncon = 0;
-          data->nefc = 0;
-          if (nJ > -1) data->nJ = 0;
+          data->ne = data->nf = data->nl = data->nefc = 0;
+          data->nisland = data->nidof = 0;
+          data->nJ = data->nY = data->nA = 0;
+          data->efm_active = 0;
+          data->nefmT = data->nefmA = data->nefmK = data->nefmL = 0;
+          data->nefmdof = data->nefmcon = 0;
           data->contact = static_cast<raw::MjContact*>(data->arena);
 #define X(type, name, nr, nc) data->name = nullptr;
           MJDATA_ARENA_POINTERS_SOLVER
@@ -1710,15 +1798,16 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
         const char* error_msg_fmt =
             "Insufficient arena memory, currently allocated memory=\"%s\". "
             "Increase using <size memory=\"X\"/>.";
-        cleanup(data, nJ);
+        if (nJ < 0) nJ = data->nJ;  // by default, keep the current size
+        cleanup(data);
         data->ncon = ncon;
         data->nefc = nefc;
-        if (nJ > -1) data->nJ = nJ;
+        data->nJ = nJ;
         data->contact =
             static_cast<raw::MjContact*>(InterceptMjErrors(::mj_arenaAllocByte)(
                 data, ncon * sizeof(raw::MjContact), alignof(raw::MjContact)));
         if (!data->contact) {
-          cleanup(data, nJ);
+          cleanup(data);
           std::snprintf(error_msg, sizeof(error_msg), error_msg_fmt,
                         mju_writeNumBytes(data->narena));
           throw FatalError(error_msg);
@@ -1732,7 +1821,7 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
   data->name = static_cast<type*>(InterceptMjErrors(::mj_arenaAllocByte)( \
       data, sizeof(type) * (nr) * (nc), alignof(type)));                  \
   if (!data->name) {                                                      \
-    cleanup(data, nJ);                                                    \
+    cleanup(data);                                                        \
     std::snprintf(error_msg, sizeof(error_msg), error_msg_fmt,            \
                   mju_writeNumBytes(data->narena));                       \
     throw FatalError(error_msg);                                          \
@@ -1759,15 +1848,35 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
         size_t parena_start = data->parena;
         // Find island block start in arena to reclaim memory on re-allocation.
         char* min_ptr = nullptr;
-#define X(type, name, nr, nc)                                                   \
-        if (data->name &&                                                       \
-            (!min_ptr || reinterpret_cast<char*>(data->name) < min_ptr)) {      \
-          min_ptr = reinterpret_cast<char*>(data->name);                        \
-        }
+#define X(type, name, nr, nc)                                        \
+  if (data->name &&                                                  \
+      (!min_ptr || reinterpret_cast<char*>(data->name) < min_ptr)) { \
+    min_ptr = reinterpret_cast<char*>(data->name);                   \
+  }
         MJDATA_ARENA_POINTERS_ISLAND
 #undef X
+
+#undef MJ_M
+#define MJ_M(x) d.model().get()->x
+#undef MJ_D
+#define MJ_D(x) data->x
+        // Reclaim the island block only if no other arena array follows it; a
+        // forward pass allocates the dual and effective-metric arrays after it.
         if (min_ptr && data->arena) {
-          parena_start = min_ptr - static_cast<char*>(data->arena);
+          bool followed = false;
+#define X(type, name, nr, nc)                           \
+  if (data->name && (nr) * (nc) > 0 &&                  \
+      reinterpret_cast<char*>(data->name) >= min_ptr) { \
+    followed = true;                                    \
+  }
+          MJDATA_ARENA_POINTERS_CONTACT
+          MJDATA_ARENA_POINTERS_SOLVER
+          MJDATA_ARENA_POINTERS_DUAL
+          MJDATA_ARENA_POINTERS_EFM
+#undef X
+          if (!followed) {
+            parena_start = min_ptr - static_cast<char*>(data->arena);
+          }
         }
 
         auto cleanup = [](raw::MjData* data, size_t target_parena) {
@@ -1795,19 +1904,15 @@ PYBIND11_MODULE(_functions, pymodule, pybind11::mod_gil_not_used()) {
         data->nisland = nisland;
         data->nidof = nidof;
 
-#undef MJ_M
-#define MJ_M(x) d.model().get()->x
-#undef MJ_D
-#define MJ_D(x) data->x
-#define X(type, name, nr, nc)                                                   \
-        data->name = static_cast<type*>(InterceptMjErrors(::mj_arenaAllocByte)( \
-            data, sizeof(type) * (nr) * (nc), alignof(type)));                  \
-        if (!data->name) {                                                      \
-          cleanup(data, parena_start);                                          \
-          std::snprintf(error_msg, sizeof(error_msg), error_msg_fmt,            \
-                        mju_writeNumBytes(data->narena));                       \
-          throw FatalError(error_msg);                                          \
-        }
+#define X(type, name, nr, nc)                                             \
+  data->name = static_cast<type*>(InterceptMjErrors(::mj_arenaAllocByte)( \
+      data, sizeof(type) * (nr) * (nc), alignof(type)));                  \
+  if (!data->name) {                                                      \
+    cleanup(data, parena_start);                                          \
+    std::snprintf(error_msg, sizeof(error_msg), error_msg_fmt,            \
+                  mju_writeNumBytes(data->narena));                       \
+    throw FatalError(error_msg);                                          \
+  }
 
         MJDATA_ARENA_POINTERS_ISLAND
 #undef X

@@ -26,7 +26,7 @@
 #include <mujoco/mjrfilament.h>
 #include <mujoco/mujoco.h>
 #include "engine/engine_vis_visualize.h"
-#include "render/filament/mjrfilament_cpp.h"
+#include "render/filament/support/mjrf_ptr.h"
 #include "render/filament/support/filament_util.h"
 
 namespace mujoco {
@@ -89,7 +89,7 @@ static void AddFlexFace(T* vertices, const mjtNum* src_positions,
   const float sign = radius >= 0 ? 1.f : -1.f;
   if (flatten_normals) {
     const float3 flat = normalize(cross(v1 - v0, v2 - v0));
-    const float4 orientation = CalculateOrientation(sign * flat);
+    const float4 orientation = CalculateOrientation(flat);
     vertices[0].orientation = orientation;
     vertices[1].orientation = orientation;
     vertices[2].orientation = orientation;
@@ -363,13 +363,13 @@ static void FillSkinVertices(T* vertices, const mjModel* model,
 }
 
 static void PrepareMeshData(mjrfMeshConfig* config, mjrfMeshData* data,
-                            int num_vertices, bool has_uvs) {
+                            int num_vertices, int num_indices, bool has_uvs) {
   mjrf_defaultMeshConfig(config);
   config->max_vertices = num_vertices;
   config->num_attributes = has_uvs ? 3 : 2;
   config->interleaved = true;
   config->primitive_type = mjMESH_PRIMITIVE_TYPE_TRIANGLES;
-  config->max_indices = num_vertices;
+  config->max_indices = num_indices;
   config->index_type = mjINDEX_TYPE_U32;
   config->attributes[0].usage = mjVERTEX_ATTRIBUTE_USAGE_POSITION;
   config->attributes[0].type = mjVERTEX_ATTRIBUTE_TYPE_FLOAT3;
@@ -401,7 +401,7 @@ static void PrepareMeshData(mjrfMeshConfig* config, mjrfMeshData* data,
   if (has_uvs) {
     data->vertices[2] = buf + sizeof(float[7]);
   }
-  data->num_indices = num_vertices;
+  data->num_indices = num_indices;
   data->indices = nullptr;
 }
 
@@ -435,7 +435,8 @@ UniquePtr<mjrfMesh> CreateFlexMesh(mjrfContext* ctx, const mjModel* model,
 
   mjrfMeshConfig mesh_config;
   mjrfMeshData mesh_data;
-  PrepareMeshData(&mesh_config, &mesh_data, num_vertices, has_uvs);
+  PrepareMeshData(&mesh_config, &mesh_data, num_vertices, num_vertices,
+                  has_uvs);
 
   float3 min_pt = float3(FLT_MAX);
   float3 max_pt = float3(FLT_MIN);
@@ -449,19 +450,19 @@ UniquePtr<mjrfMesh> CreateFlexMesh(mjrfContext* ctx, const mjModel* model,
   SetBounds(&mesh_data, min_pt, max_pt);
 
   auto mesh = CreateMesh(ctx, mesh_config);
-  mjrf_setMeshData(mesh.get(), &mesh_data);
+  mjrf_uploadMesh(mesh.get(), &mesh_data);
   return mesh;
 }
 
 UniquePtr<mjrfMesh> CreateSkinMesh(mjrfContext* ctx, const mjModel* model,
                                    const mjData* data, int skin_id) {
   const int num_vertices = model->skin_vertnum[skin_id];
+  const int num_indices = 3 * model->skin_facenum[skin_id];
   const bool has_uvs = model->skin_texcoordadr[skin_id] >= 0;
-
 
   mjrfMeshConfig mesh_config;
   mjrfMeshData mesh_data;
-  PrepareMeshData(&mesh_config, &mesh_data, num_vertices, has_uvs);
+  PrepareMeshData(&mesh_config, &mesh_data, num_vertices, num_indices, has_uvs);
 
   float3 min_pt = float3(FLT_MAX);
   float3 max_pt = float3(FLT_MIN);
@@ -472,12 +473,11 @@ UniquePtr<mjrfMesh> CreateSkinMesh(mjrfContext* ctx, const mjModel* model,
     VertexNoUv* vertices = (VertexNoUv*)(mesh_data.user_data);
     FillSkinVertices(vertices, model, data, skin_id, &min_pt, &max_pt);
   }
-  mesh_data.num_indices = 3 * model->skin_facenum[skin_id];
   mesh_data.indices = model->skin_face + 3 * model->skin_faceadr[skin_id];
   SetBounds(&mesh_data, min_pt, max_pt);
 
   auto mesh = CreateMesh(ctx, mesh_config);
-  mjrf_setMeshData(mesh.get(), &mesh_data);
+  mjrf_uploadMesh(mesh.get(), &mesh_data);
   return mesh;
 }
 
@@ -485,18 +485,17 @@ void GatherSpatialTendonPoints(const mjModel* model, const mjData* data,
                                int tendon_id, std::vector<float4>& points) {
   mjtNum length = 0.f;
   const bool is_catenary = mjv_isCatenary(model, data, tendon_id, &length);
-  if (is_catenary) {
-    const int max_segments = mjMIN(model->vis.quality.numslices + 1, 100);
+  const int max_segments = mjMIN(model->vis.quality.numslices + 1, mjMAXCURVE);
+  const float width = model->tendon_width[tendon_id];
+  mjtNum pts[3 * mjMAXCURVE];
 
+  if (is_catenary) {
     mjtNum x0[3];
     mju_copy3(x0, data->wrap_xpos + 3 * data->ten_wrapadr[tendon_id] + 0);
 
     mjtNum x1[3];
     mju_copy3(x1, data->wrap_xpos + 3 * data->ten_wrapadr[tendon_id] + 3);
 
-    const float width = model->tendon_width[tendon_id];
-
-    mjtNum pts[3 * 100];
     const int npoints =
         mjv_catenary(x0, x1, model->opt.gravity, length, pts, max_segments);
 
@@ -512,12 +511,20 @@ void GatherSpatialTendonPoints(const mjModel* model, const mjData* data,
         continue;
       }
 
-      float width = model->tendon_width[tendon_id];
       if (data->wrap_obj[j] >= 0 && data->wrap_obj[j + 1] >= 0) {
-        width *= 0.5;
+        const int gid = data->wrap_obj[j];
+        const int npoints = mjv_geodesic(
+            pts, max_segments, data->geom_xpos + 3 * gid,
+            data->geom_xmat + 9 * gid, model->geom_size[3 * gid],
+            model->geom_type[gid], data->wrap_xpos + 3 * j - 3);
+        for (int k = 0; k < npoints - 1; ++k) {
+          points.emplace_back(ReadFloat3(pts, k), width);
+          points.emplace_back(ReadFloat3(pts, k + 1), width);
+        }
+      } else {
+        points.emplace_back(ReadFloat3(data->wrap_xpos, j + 0), width);
+        points.emplace_back(ReadFloat3(data->wrap_xpos, j + 1), width);
       }
-      points.emplace_back(ReadFloat3(data->wrap_xpos, j + 0), width);
-      points.emplace_back(ReadFloat3(data->wrap_xpos, j + 1), width);
     }
   }
 }

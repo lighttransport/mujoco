@@ -24,11 +24,12 @@
 #include "experimental/studio/hal/graphics_mode.h"
 #include "experimental/studio/ux/imgui_widgets.h"
 #include "experimental/studio/ux/plugin.h"
-#include "render/filament/mjrfilament_cpp.h"
+#include "render/filament/support/mjrf_ptr.h"
+#include "render/filament/core/imgui_editor.h"
 #include "render/filament/support/imgui_bridge.h"
 #include "render/filament/support/model_decorations.h"
 #include "render/filament/support/model_lights.h"
-#include "render/filament/support/model_objects.h"
+#include "render/filament/support/model_resources.h"
 #include "render/filament/support/model_renderables.h"
 
 namespace mujoco::studio {
@@ -40,11 +41,10 @@ static void PluginUpdate(GuiPlugin* plugin) {
   }
 }
 
-FilamentRenderer::FilamentRenderer(void* native_window, GraphicsMode gfx)
-    : native_window_(native_window), gfx_(gfx) {
+FilamentRenderer::FilamentRenderer(void* native_window, GraphicsMode gfx) {
   g_update_gui_callback = [this]() {
     if (main_scene_) {
-      mjrf_DEBUG_drawImguiEditor(main_scene_.get());
+      DrawSceneEditor(main_scene_.get());
     }
   };
 
@@ -54,10 +54,10 @@ FilamentRenderer::FilamentRenderer(void* native_window, GraphicsMode gfx)
 
   mjrfContextConfig cfg;
   mjrf_defaultContextConfig(&cfg);
-  cfg.native_window = native_window_;
-  cfg.force_software_rendering = IsSoftware(gfx_);
-  cfg.graphics_api = IsOpenGl(gfx_) || IsWebGl(gfx_) ? mjGRAPHICS_API_OPENGL
-                                                      : mjGRAPHICS_API_VULKAN;
+  cfg.native_window = native_window;
+  cfg.software_rendering = IsSoftware(gfx);
+  cfg.graphics_api = IsOpenGl(gfx) || IsWebGl(gfx) ? mjGRAPHICS_API_OPENGL
+                                                   : mjGRAPHICS_API_VULKAN;
   filament_context_ = CreateContext(cfg);
 
   ux_scene_ = CreateScene(filament_context_.get(), {});
@@ -79,12 +79,12 @@ void FilamentRenderer::Init(const mjModel* model) {
   model_decorations_.reset();
   model_renderables_.reset();
   model_lights_.reset();
-  model_objects_.reset();
+  model_resources_.reset();
   main_scene_.reset();
 
   if (model) {
     float clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    const int id = mj_name2id(model, mjOBJ_NUMERIC, "filament.clearColor");
+    const int id = mj_name2id(model, mjOBJ_NUMERIC, "filament.clear_color");
     if (id >= 0 && model->numeric_size[id] == 4) {
       const mjtNum* ptr = model->numeric_data + model->numeric_adr[id];
       for (int i = 0; i < 4; ++i) {
@@ -95,22 +95,22 @@ void FilamentRenderer::Init(const mjModel* model) {
 
     main_scene_ = CreateScene(filament_context_.get(), {});
     mjrf_configureSceneFromModel(main_scene_.get(), model);
-    model_objects_ =
-        std::make_unique<ModelObjects>(model, filament_context_.get());
+    offsamples_ = model->vis.quality.offsamples;
+    model_resources_ =
+        std::make_unique<ModelResources>(model, filament_context_.get());
     model_lights_ =
-        std::make_unique<ModelLights>(main_scene_.get(), model_objects_.get());
+        std::make_unique<ModelLights>(main_scene_.get(), model_resources_.get());
     model_renderables_ = std::make_unique<ModelRenderables>(
-        main_scene_.get(), model_objects_.get());
+        main_scene_.get(), model_resources_.get());
     model_decorations_ = std::make_unique<ModelDecorations>(
         filament_context_.get(), main_scene_.get(), model);
   }
 }
 
-void FilamentRenderer::Render(const mjModel* model, mjData* data,
-                              const mjvPerturb* perturb, mjvCamera* camera,
-                              const mjvOption* vis_option, int width,
-                              int height, std::span<std::byte> pixels,
-                              std::span<mjvGeom> extra_geoms) {
+void FilamentRenderer::Sync(const mjModel* model, mjData* data,
+                            const mjvPerturb* perturb, mjvCamera* camera,
+                            const mjvOption* vis_option, int width,
+                            int height, std::span<mjvGeom> extra_geoms) {
   const mjrRect viewport = {0, 0, width, height};
 
   mjvCamera default_cam;
@@ -138,18 +138,11 @@ void FilamentRenderer::Render(const mjModel* model, mjData* data,
   const mjrCamera gl_camera = mjv_camera2GLCamera(model, data, camera);
 
   model_lights_->Update(data);
-  // Place headlight behind the camera.
-  // TODO: The "headlight" feature should be a render option rather than a
-  // light in the scene. This would allow us to render the scene from multiple
-  // cameras without having a physical light projected from a single camera.
-  if (mjrfLight* headlight = model_lights_->GetLight(model->nlight)) {
-    float pos[3];
-    for (int i = 0; i < 3; ++i) {
-      pos[i] = gl_camera.pos[i] - 0.05f * gl_camera.forward[i];
-    }
-    mjrf_setLightTransform(headlight, pos, gl_camera.forward);
+
+  if (model->vis.quality.offsamples != offsamples_) {
+    offsamples_ = model->vis.quality.offsamples;
+    mjrf_setSceneMsaa(main_scene_.get(), offsamples_);
   }
-  model_renderables_->Update(data);
 
   if (vis_option) {
     model_renderables_->SetOptions(*vis_option);
@@ -163,19 +156,26 @@ void FilamentRenderer::Render(const mjModel* model, mjData* data,
   } else {
     model_renderables_->MarkAsSelected(mjOBJ_UNKNOWN, -1);
   }
+  model_renderables_->Update(data);
 
   model_decorations_->Update(data, vis_option, perturb, camera, viewport,
                              DrawTextAt, extra_geoms);
 
-  imgui_bridge_->Update();
+  BuildMainRenderRequest(&render_requests_[0], model->vis, *vis_option,
+                         viewport, gl_camera);
+  BuildUxRenderRequest(&render_requests_[1], viewport);
+}
 
-  mjrfRenderRequest reqs[2];
-  BuildMainRenderRequest(&reqs[0], vis_option, viewport, gl_camera);
-  BuildUxRenderRequest(&reqs[1], viewport);
+void FilamentRenderer::Submit(int width, int height,
+                              std::span<std::byte> pixels) {
+  const mjrRect viewport = {0, 0, width, height};
+
+  imgui_bridge_->Update();
 
   mjrfFrameHandle frame = 0;
   if (pixels.empty()) {
-    frame = mjrf_render(filament_context_.get(), &reqs[0], 2, nullptr, 0);
+    frame = mjrf_render(filament_context_.get(), &render_requests_[0], 2,
+                        nullptr, 0);
   } else {
     if (pixels.size() != width * height * 3) {
       mju_error("Offscreen mode requires a pixel buffer of size %d.",
@@ -183,16 +183,17 @@ void FilamentRenderer::Render(const mjModel* model, mjData* data,
     }
 
     mjrf_resizeRenderTarget(render_target_.get(), width, height);
-    reqs[0].target = render_target_.get();
-    reqs[1].target = render_target_.get();
+    render_requests_[0].target = render_target_.get();
+    render_requests_[1].target = render_target_.get();
 
-    mjrfReadPixelsRequest read_request;
-    mjrf_defaultReadPixelsRequest(&read_request);
+    mjrfReadRequest read_request;
+    mjrf_defaultReadRequest(&read_request);
     read_request.target = render_target_.get();
     read_request.output = pixels.data();
     read_request.num_bytes = viewport.width * viewport.height * 3;
 
-    frame = mjrf_render(filament_context_.get(), &reqs[0], 2, &read_request, 1);
+    frame = mjrf_render(filament_context_.get(), &render_requests_[0], 2,
+                        &read_request, 1);
   }
 
   mjrf_waitForFrame(filament_context_.get(), frame);
@@ -200,7 +201,7 @@ void FilamentRenderer::Render(const mjModel* model, mjData* data,
   mjrfFrameStats stats;
   mjrf_defaultFrameStats(&stats);
   mjrf_getFrameStats(filament_context_.get(), frame, &stats);
-  fps_ = stats.frame_rate;
+  gpu_frame_ms_ = stats.frame_rate > 0 ? 1000.0 / stats.frame_rate : 0;
 }
 
 void FilamentRenderer::RenderToTexture(const mjModel* model, mjData* data,
@@ -216,12 +217,13 @@ void FilamentRenderer::RenderToTexture(const mjModel* model, mjData* data,
   mjv_defaultOption(&vis_option);
 
   mjrfRenderRequest request;
-  BuildMainRenderRequest(&request, &vis_option, {0, 0, width, height},
+  BuildMainRenderRequest(&request, model->vis, vis_option,
+                         {0, 0, width, height},
                          mjv_camera2GLCamera(model, data, camera));
   request.target = render_target_.get();
 
-  mjrfReadPixelsRequest read_request;
-  mjrf_defaultReadPixelsRequest(&read_request);
+  mjrfReadRequest read_request;
+  mjrf_defaultReadRequest(&read_request);
   read_request.target = render_target_.get();
   read_request.output = output;
   read_request.num_bytes = width * height * 3;
@@ -231,17 +233,16 @@ void FilamentRenderer::RenderToTexture(const mjModel* model, mjData* data,
   mjrf_waitForFrame(filament_context_.get(), frame);
 }
 
-int FilamentRenderer::UploadImage(int texture_id, const std::byte* pixels,
-                                  int width, int height, int bpp) {
-  return imgui_bridge_->UploadImage(
-      texture_id, reinterpret_cast<const unsigned char*>(pixels), width, height,
-      bpp);
+int FilamentRenderer::UploadImage(int tex_id, std::span<const std::byte> pixels,
+                                  int width, int height) {
+  return imgui_bridge_->UploadImage(tex_id, pixels, width, height);
 }
 
-double FilamentRenderer::GetFps() { return fps_; }
+double FilamentRenderer::GetGpuFrameMs() { return gpu_frame_ms_; }
 
 void FilamentRenderer::BuildMainRenderRequest(mjrfRenderRequest* request,
-                                              const mjvOption* vis_option,
+                                              const mjVisual& vis,
+                                              const mjvOption& vis_option,
                                               const mjrRect& viewport,
                                               const mjrCamera& camera) {
   mjrDrawMode draw_mode = mjDRAW_MODE_DEFAULT;
@@ -255,7 +256,7 @@ void FilamentRenderer::BuildMainRenderRequest(mjrfRenderRequest* request,
     draw_mode = mjDRAW_MODE_DEPTH;
   } else if (render_flags_[mjRND_WIREFRAME]) {
     draw_mode = mjDRAW_MODE_WIREFRAME;
-  } else if (vis_option->flags[mjVIS_ISLAND]) {
+  } else if (vis_option.flags[mjVIS_ISLAND]) {
     draw_mode = mjDRAW_MODE_ISLANDS;
   }
 
@@ -264,8 +265,13 @@ void FilamentRenderer::BuildMainRenderRequest(mjrfRenderRequest* request,
   request->draw_mode = draw_mode;
   request->camera = camera;
   request->viewport = viewport;
-  request->enable_shadows = render_flags_[mjRND_SHADOW];
-  request->enable_reflections = render_flags_[mjRND_REFLECTION];
+  request->shadows = render_flags_[mjRND_SHADOW];
+  request->reflections = render_flags_[mjRND_REFLECTION];
+  request->headlight = vis.headlight.active;
+  request->headlight_color[0] = vis.headlight.diffuse[0];
+  request->headlight_color[1] = vis.headlight.diffuse[1];
+  request->headlight_color[2] = vis.headlight.diffuse[2];
+  request->headlight_intensity = model_lights_->GetHeadlightIntensity();
 }
 
 void FilamentRenderer::BuildUxRenderRequest(mjrfRenderRequest* request,
@@ -273,11 +279,26 @@ void FilamentRenderer::BuildUxRenderRequest(mjrfRenderRequest* request,
   mjrf_defaultRenderRequest(request);
   request->scene = ux_scene_.get();
   request->draw_mode = mjDRAW_MODE_DEFAULT;
-  request->camera = imgui_bridge_->GetCamera(viewport.width, viewport.height);
+  request->camera.orthographic = true;
+  request->camera.pos[0] = 0.0f;
+  request->camera.pos[1] = 0.0f;
+  request->camera.pos[2] = 1.0f;
+  request->camera.forward[0] = 0.0f;
+  request->camera.forward[1] = 0.0f;
+  request->camera.forward[2] = -1.0f;
+  request->camera.up[0] = 0.0f;
+  request->camera.up[1] = 1.0f;
+  request->camera.up[2] = 0.0f;
+  request->camera.frustum_top = 0.0f;
+  request->camera.frustum_near = 0.0f;
+  request->camera.frustum_far = 1.0f;
+  request->camera.frustum_center = viewport.width / 2.0f;
+  request->camera.frustum_width = viewport.width / 2.0f;
+  request->camera.frustum_bottom = viewport.height;
   request->viewport = viewport;
-  request->enable_shadows = false;
-  request->enable_reflections = false;
-  request->enable_post_processing = false;
+  request->shadows = false;
+  request->reflections = false;
+  request->post_processing = false;
 }
 }  // namespace mujoco::studio
 

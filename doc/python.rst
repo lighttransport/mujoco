@@ -275,6 +275,13 @@ that create a new :ref:`mjModel` instance: ``mujoco.MjModel.from_xml_string``, `
 functions accept the path to either an XML or MJB model file. All three functions optionally accept a Python
 dictionary which is converted into a MuJoCo :ref:`Virtualfilesystem` for use during model compilation.
 
+Assigning to a struct attribute writes into the underlying C memory rather than rebinding the attribute. For array
+fields, ``model.opt.gravity = value`` is equivalent to ``model.opt.gravity[:] = value``. Likewise, the sub-struct
+attributes of ``MjModel`` (``opt``, ``vis``, ``stat``) and ``MjVisual`` (``global_``, ``quality``, ``headlight``,
+``map``, ``scale``, ``rgba``) can be assigned to, for example ``model.opt = new_opt``, which copies the fields of
+``new_opt`` into the model's own ``mjOption`` struct in place. Any existing references and NumPy array views into the
+destination struct remain valid and reflect the new values; later modifications to ``new_opt`` do not propagate.
+
 
 
 .. _PyFunctions:
@@ -424,12 +431,106 @@ aliases defined in the Python API.
 Rendering
 ---------
 
-MuJoCo itself expects users to set up a working OpenGL context before calling any of its ``mjr_`` rendering routine.
-The Python bindings provide a basic class ``mujoco.GLContext`` that helps users set up such a context for offscreen
-rendering. To create a context, call ``ctx = mujoco.GLContext(max_width, max_height)``. Once the context is created,
-it must be made current before MuJoCo rendering functions can be called, which you can do so via ``ctx.make_current()``.
-Note that a context can only be made current on one thread at any given time, and all subsequent rendering calls must be
-made on the same thread.
+MuJoCo provides two rendering APIs: the :ref:`classic rendering<OpenGLrendering>` API (which uses OpenGL 1.5) and the
+:ref:`filament rendering<FilamentRendering>` API (which provides more modern physically-based rendering capabilities).
+
+.. _PyFilamentRender:
+
+Filament Rendering
+------------------
+
+The Python ``mjrf`` module exposes the ``mjrf_`` :ref:`C API<FilamentRenderingApi>` to python. It can be imported using
+``from mujoco import mjrf``. This module also provides the following conveniences around the C library:
+
+- Enums are exposed directly but without the ``mjr`` prefix. So, for example, :ref:`mjrGraphicsApi` becomes
+  ``mjrf.GraphicsApi`` and ``mjGRAPHICS_API_DEFAULT`` becomes ``mjrf.GraphicsApi.GRAPHICS_API_DEFAULT``.
+
+- Tuple/list/numpy array types are automatically converted into the corresponding native C types (e.g. ``float*``).
+
+- ``mjrf`` C structs are treated in two different ways. Basic structs (e.g. :ref:`mjrRect`, ``mjrCamera``, etc.) are
+  considered to be simple POD data types and are bound directly as python types allowing copies to be made as needed.
+
+- ``mjrf`` types that have explicit create/destroy functions in the C API (e.g. :ref:`mjrfContext`, :ref:`mjrfTexture`,
+  etc.) are treated as "Objects". When created in python, their lifetimes are managed by python; calling ``del`` on the
+  objects will destroy the underlying C object. However, when they are returned from an API call, they are returned as
+  references such that python will not manage their lifetimes.
+
+- In cases where the ``mjrf_`` C function takes a pointer to an object as its first argument, we bind the function as a
+  method of the object itself. So, for example, :ref:`mjrf_setLightActive(mjrfLight*, bool)<mjrf_setLightActive>`
+  becomes ``Light.set_active(bool)``.
+
+- Some functions (e.g. ``mjrf.ReadRequest.set_buffer``) require users to provide a buffer. Users are responsible
+  for ensuring the lifetime of the buffer outlives the request to which it is associated.
+
+We also provide a `ModelScene
+<https://github.com/google-deepmind/mujoco/blob/main/python/mujoco/rendering/filament/model_scene.py>`__ helper class
+under ``mujoco.rendering.filament``. This class can be used to add and update :ref:`mjrfRenderable` and :ref:`mjrfLight`
+objects in an :ref:`mjrfScene` based on the contents of an :ref:`mjModel` and :ref:`mjData`.
+
+Similarly, we also provide a `Renderer
+<https://github.com/google-deepmind/mujoco/blob/main/python/mujoco/rendering/filament/renderer.py>`__ class under
+``mujoco.rendering.filament``. This class can be used to manage the lifetimes of key objects (such as the
+:ref:`mjrfContext` and :ref:`mjrfScene`) and provides useful functions for controlling the camera and reading pixels.
+
+Here is a minimal example for rendering an mjModel with the filament renderer:
+
+.. code-block:: python
+
+   import mujoco
+   from mujoco import mjrf
+   from mujoco.rendering.filament import model_scene
+   from mujoco.rendering.filament import renderer
+   import numpy as np
+
+   def render(model: mujoco.MjModel, data: MjData, width: int, height: int) -> np.ndarray:
+     # create the rendering context
+     ctx = mjrf.Context(mjrf.ContextConfig())
+
+     # create a renderer
+     r = renderer.Renderer(ctx)
+
+     # add lights and renderables defined in the model to a scene in the renderer
+     ms = model_scene.ModelScene(ctx, model, r.scene("scn"))
+
+     # create the pixel buffer into which we'll render the image
+     pixels = np.empty((height, width, 3), dtype=np.uint8)
+
+     # associate the pixel buffer with a render target
+     r.target("out", pixels)
+
+     # update the lights and renderables with the current `data` state
+     ms.update(data)
+
+     # define the camera for the view we want to render
+     vcam = mujoco.MjvCamera()
+     mujoco.mjv_defaultFreeCamera(model, vcam)
+     vcam.type = int(mujoco.mjtCamera.mjCAMERA_FIXED)
+     vcam.fixedcamid = 0
+     # define a view that connects the scene we want to render to an output target
+     view = renderer.View(
+         scene="scn",
+         target="out",
+         camera=mujoco.mjv_camera2GLCamera(model, data, vcam),
+     )
+
+     # render the scene; blocks until the render has completed writing to the render target
+     r.render([view])
+
+     # return the pixels
+     return pixels
+
+.. _PyClassicRender:
+
+Classic Rendering
+-----------------
+
+The MuJoCo classic renderer expects users to set up a working OpenGL context before calling any of its ``mjr_``
+:ref:`rendering routines<OpenGLrendering>`. The Python bindings provide a basic class ``mujoco.GLContext`` that helps
+users set up such a context for offscreen rendering. To create a context, call ``ctx = mujoco.GLContext(max_width,
+max_height)``. Once the context is
+created, it must be made current before MuJoCo rendering functions can be called, which you can do so via
+``ctx.make_current()``. Note that a context can only be made current on one thread at any given time, and all subsequent
+rendering calls must be made on the same thread.
 
 The context is freed automatically when the ``ctx`` object is deleted, but in some multi-threaded scenario it may be
 necessary to explicitly free the underlying OpenGL context. To do so, call ``ctx.free()``, after which point it is the
@@ -522,9 +623,7 @@ Assets
 ^^^^^^
 
 MuJoCo optionally uses a :ref:`Virtual File System <Virtualfilesystem>` (VFS) to load assets (like meshes and textures)
-from memory. Some :ref:`decoders<exDecoder>` may also choose to leverage the VFS as a way to load assets on
-demand, such as when addressing files in an archive format. This requires the same VFS to be used when parsing and
-compiling a spec (and all attached specs) into a model.
+from memory.
 
 The Python bindings provide the ``mujoco.MjVfs`` as a wrapper around the :ref:`mjVFS` C struct.
 
@@ -579,7 +678,11 @@ For reference, the deprecated ``assets`` dictionary approach looked like this:
 Save to XML
 -----------
 
-Compiled ``MjSpec`` objects can be saved to XML string with the ``to_xml()`` method:
+``MjSpec`` objects can be saved to an XML string with the ``to_xml()`` method. By default the values which
+compilation made of the model are saved; set ``spec.compiler.savecompiled = False`` to save the model as it is written
+in the spec instead, see :ref:`Model Encoding & Saving <meSaving>`. Unlike :ref:`mj_saveXMLString`, ``to_xml()``
+compiles the spec before it saves it: the spec must compile, with its assets, and the compilation changes it as
+:ref:`mj_compile` says, for example by applying :ref:`fusestatic<compiler-fusestatic>`.
 
 .. code-block:: python
 
@@ -617,6 +720,17 @@ The ``encode()`` method accepts the target filename, an optional compiled ``mode
 ``vfs`` (:ref:`MjVFS`), and an optional ``content_type``. The target format is automatically determined by the file
 extension (``.xml``, ``.mjb``, ``.txt``, ``.mjz``) or content type.
 
+Values which were changed in a compiled model can be written to the spec itself with ``copy_back()``. They are then in
+the models which are compiled from the spec afterwards and in what it saves; see :ref:`mj_copyBack` for what is copied
+and how:
+
+.. code-block:: python
+
+   model = spec.compile()
+   model.geom('my_geom').size[0] = 2
+   spec.copy_back(model)
+   print(spec.geom('my_geom').size[0])  # 2.0
+
 Attachment
 ----------
 
@@ -638,6 +752,9 @@ in the parent and therefore modifying the child will modify the parent. This is 
 :ref:`attach<body-attach>` and :ref:`replicate<replicate>` meta-elements in MJCF, which create deep copies while
 attaching. However, it is possible to override the default behavior by setting ``spec.copy_during_attach`` to
 ``True``. In this case, the child spec is copied and the references to the child will not point to the parent.
+Without copying, a child spec can be attached as a whole only once, since its elements move to the parent; its bodies
+and frames which are not attached yet can still be attached, if they contain nothing which is attached already. An
+element of the parent, including one attached to it, can be attached to the parent only as a copy.
 
 .. code-block:: python
 
@@ -649,16 +766,18 @@ attaching. However, it is possible to override the default behavior by setting `
    frame = parent.worldbody.add_frame()
    site = parent.worldbody.add_site()
 
-   # Create the child spec.
+   # Create the child specs.
    child = mujoco.MjSpec()
    child_body = child.worldbody.add_body()
    child_frame = child.worldbody.add_frame()
+   child2 = mujoco.MjSpec()
+   child3 = mujoco.MjSpec()
 
-   # Attach the child to the parent in different ways.
+   # Attach the children to the parent in different ways.
    body_in_frame = frame.attach_body(child_body, 'child-', '')
    frame_in_body = body.attach_frame(child_frame, 'child-', '')
-   worldframe_in_site = parent.attach(child, site=site, prefix='child-')
-   worldframe_in_frame = parent.attach(child, frame=frame, prefix='child-')
+   worldframe_in_site = parent.attach(child2, site=site, prefix='child2-')
+   worldframe_in_frame = parent.attach(child3, frame=frame, prefix='child3-')
 
 .. _PyEditConvenience:
 
@@ -684,9 +803,9 @@ Lists of all elements in a spec can be accessed using named properties, using th
 Element removal
 ^^^^^^^^^^^^^^^
 The method ``delete()`` removes the corresponding element from the spec, e.g. ``spec.delete(spec.geom('my_geom'))`` will
-remove the geom named "my_geom" and all of the elements that reference it. For elements that can have children (bodies
-and defaults), ``delete`` also removes all of their children. When deleting body subtrees, all elements which reference
-elements in the subtree, will also be removed.
+remove the geom named "my_geom" and all of the elements that reference it. For elements that can have children (bodies,
+frames and defaults), ``delete`` also removes all of their children. When deleting bodies or frames, all elements which
+reference the deleted children will also be removed.
 
 Tree traversal
 ^^^^^^^^^^^^^^
@@ -750,7 +869,7 @@ For users familiar with ``PyMJCF``, the ``MjSpec`` object is conceptually simila
 Model Editing
 `colab notebook <https://colab.research.google.com/github/google-deepmind/mujoco/blob/main/python/mjspec.ipynb>`__
 includes a reimplementation of the ``PyMJCF`` example in the ``dm_control``
-`tutorial notebook <https://github.com/google-deepmind/dm_control/blob/main/dm_control/mjcf/tutorial.ipynb>`__.
+`tutorial notebook <https://github.com/google-deepmind/dm_control/blob/main/tutorial.ipynb>`__.
 
 ``PyMJCF`` provides a notion of "binding", giving access to :ref:`mjModel` and :ref:`mjData` values via a helper class.
 In the native API, the helper class is not needed, so it is possible to directly bind an ``mjs`` object to
@@ -855,6 +974,35 @@ successfully installed, ``cd`` outside of the ``mujoco`` directory and run
    `continuous integration setup <https://github.com/google-deepmind/mujoco/blob/main/.github/workflows/build.yml>`_ on
    GitHub.
 
+.. _PyBuildBazel:
+
+Building with Bazel
+-------------------
+
+The Python bindings can also be built with Bazel (see :ref:`inBuildBazel`). The ``@mujoco//python/mujoco`` target
+provides the ``mujoco`` package, so Python targets in your own Bazel module can depend on it directly. With a
+``bazel_dep`` on ``rules_python`` in your ``MODULE.bazel``:
+
+.. code-block:: python
+
+   load("@rules_python//python:py_binary.bzl", "py_binary")
+
+   py_binary(
+       name = "simulate_model",
+       srcs = ["simulate_model.py"],
+       deps = ["@mujoco//python/mujoco"],
+   )
+
+As in the wheel, the bindings link MuJoCo dynamically (``@mujoco//:mujoco_shared``), and the bundled plugins are
+separate shared libraries that ``mujoco`` loads when it is imported. C++ code in the same process that links MuJoCo the
+same way shares the engine with the bindings.
+
+To run the bindings' tests from the root of the cloned repository, use ``bazel test //python/...``.
+
+The Bazel build supports the Python versions listed in ``MODULE.bazel``, and installs the bindings' PyPI dependencies
+from ``pypi.org``. It covers the core bindings; rendering (``mujoco.Renderer`` and the GL contexts), the interactive
+viewer, MJX, and the USD exporter are not yet supported.
+
 
 .. _PyModule:
 
@@ -906,6 +1054,9 @@ Therefore, non-increasing time values can be used to detect diverged rollouts.
 The ``rollout`` function is designed to be computationally stateless, so all inputs of the stepping pipeline are set and
 any values already present in the given ``MjData`` instance will have no effect on the output.
 
+``rollout`` threads across rollouts, so an ``MjData`` with a :ref:`mju_threadpool` installed is rejected. For
+simulations that persist between calls, see :ref:`batch<PyBatch>`.
+
 By default ``rollout.rollout`` creates a new thread pool every call if ``len(data) > 1``. To reuse the thread pool
 over multiple calls use the ``persistent_pool`` argument. ``rollout.rollout`` is not thread safe when using
 a persistent pool. The basic usage form is
@@ -938,6 +1089,93 @@ Since the Global Interpreter Lock is released, this function can also be threade
 is less efficient than using native threads. See the ``test_threading`` function in
 `rollout_test.py <https://github.com/google-deepmind/mujoco/blob/main/python/mujoco/rollout_test.py>`__ for an example
 of threaded operation (and for more general usage examples).
+
+.. _PyBatch:
+
+batch
+-----
+``mujoco.batch.Batch`` runs many simulations of one model on a thread pool and exposes their fields as rows of NumPy
+arrays. It wraps the :ref:`batch API<Batchedsimulation>`.
+
+.. code-block:: python
+
+   from mujoco import batch
+
+   b = batch.Batch(model, nsim=1024, nthread=8)
+   qpos, ctrl, xpos = b.bind('qpos'), b.bind('ctrl'), b.bind('xpos')
+   for _ in range(1000):
+     ctrl[:] = policy(qpos, xpos)
+     b.step()
+
+Each simulation is its :ref:`integration state<siIntegrationState>`, one row of ``b.state``. A call loads each
+simulation's row into an ``MjData``, runs, and saves the row back, on ``nthread`` threads including the caller's (by
+default, one per CPU), with the Global Interpreter Lock released. Results are bit-identical to a loop over one
+``MjData`` per simulation, at any thread count.
+
+- ``bind(name)`` returns a live ``nsim x ...`` array over an ``MjData`` field. State fields such as ``qpos``, ``ctrl``
+  and ``mocap_pos`` are views of the rows, and a write is the simulation's state at its next call. Other fields are
+  copied out after every call on a simulation, and are read-only; after ``step`` they lag the state by one substep, as
+  with :ref:`mj_step`. Of the scalars, the counts ``ncon``, ``ne``, ``nf``, ``nl``, ``nefc``, ``nJ``, ``nA``,
+  ``nisland`` and ``nidof`` bind as ``nsim`` int arrays. In a batch that is not persistent, a field bound between calls
+  reads zero until the next call.
+  The rows hold :ref:`mjtNum` values, so ``eq_active`` binds as ``mjtNum`` rather than as ``MjData``'s bytes. Fields
+  are also attributes, as on ``MjData``: ``b.xpos`` binds ``xpos``, and ``b.ctrl = u`` writes every simulation's
+  controls. ``mujoco.batch.DATA_FIELDS`` and ``mujoco.batch.MODEL_FIELDS`` name the fields ``bind`` and ``expand``
+  accept.
+- ``joint(name)``, ``body(name)``, ``site(name)``, ``sensor(name)``, ``actuator(name)``, ``geom(name)``,
+  ``tendon(name)``, ``camera(name)`` and ``light(name)`` give one object's columns of the bound and expanded fields,
+  with the attributes of :ref:`named access<PyNamed>` of both ``MjData`` and ``MjModel``: ``b.joint('hinge').qpos`` is
+  ``nsim x 1``, and ``b.body('pole').mass = masses`` writes per-simulation masses, as ``expand`` does.
+  ``equality(name)``, ``pair(name)``, ``material(name)``, ``numeric(name)`` and ``keyframe(name)`` do the same with
+  the attributes of ``MjModel`` only.
+- ``get_model(sim)`` and ``get_data(sim)`` materialize one simulation as an ``MjModel`` and ``MjData``, for rendering
+  or for any function; see :ref:`mjb_getModel` and :ref:`mjb_getData`.
+- ``set_models(models)`` runs each simulation on a model of the caller's, an ``MjModel`` per simulation or one for all,
+  instead of the batch's model, in place of expanded fields; named views then read model attributes from each
+  simulation's model. See :ref:`mjb_setModels`.
+- ``expand(name)`` gives an ``MjModel`` field, or an ``MjOption`` field named ``opt.<name>``, per-simulation values,
+  applied before each call. ``set_const`` runs :ref:`mj_setConst` per simulation, and the fields it derives become
+  per-simulation as well. After writing a field that :ref:`mj_setConst` reads, one of
+  ``mujoco.MjModel._setconst_inputs`` or an ``MjOption`` field, call ``set_const`` so that the constants derived from it
+  follow.
+- ``step(ids, nstep)``, ``forward(ids)``, ``reset(ids, keyframe)`` and ``set_const(ids)`` run on the simulations
+  ``ids``, sorted, unique and non-negative integers or a boolean mask, or on all of them. ``reset`` discards writes
+  made before it, and takes a keyframe for every simulation of the call or one each.
+- ``step(nstep, stage=mujoco.mjtStage.mjSTAGE_VEL)`` makes position- and velocity-dependent fields and sensors describe
+  the new state, as :ref:`mj_step1` does, rather than the state before the last substep. In a persistent batch this
+  costs nothing extra; see :ref:`mjb_step`. ``reset`` and ``forward`` take a ``stage`` too, by default
+  ``mjSTAGE_ACC``: ``reset(ids, stage=mujoco.mjtStage.mjSTAGE_NONE)`` skips the forward pass of a reset that is
+  followed by randomization and ``forward(ids)``.
+- ``rollout(nstep, control, control_spec, record, ids)`` steps as :ref:`rollout<PyRollout>` does, records any ``MjData``
+  fields or state vectors after every substep, and returns them as ``n x nstep x ...`` arrays. A simulation whose
+  warning counters rise stops stepping, and its remaining records repeat its last ones.
+- ``jac(body, point, ids)`` and ``ray(pnt, vec, ..., normal=False)`` evaluate :ref:`mj_jac` and :ref:`mj_ray` per
+  simulation, with a body per simulation and a body to exclude per ray if given, and the surface normals of the hits on
+  request. They first compute the kinematics from the state, with :ref:`mj_kinematics` and :ref:`mj_comPos` for
+  ``jac``, and :ref:`mj_kinematics` and, if the model has flexes, :ref:`mj_flex` for ``ray``. The state and bound
+  fields are unchanged; in a persistent batch, the simulation's ``MjData`` keeps these kinematics.
+- ``b.warning`` holds each simulation's warning counters, ``nsim x mjNWARNING x 2`` (``lastinfo`` and ``number`` of
+  :ref:`mjWarningStat`), saved and restored with its state.
+
+If MuJoCo raises an error in some simulations, the call raises ``mujoco.batch.SimulationError`` listing them. They keep
+the state they had before the call, and the others run to completion. ``b.status`` and ``b.error(i)`` hold the outcome
+of each simulation's last call. ``SimulationError`` is a ``RuntimeError`` whose ``ids`` attribute lists the failed
+simulations. Invalid arguments raise ``ValueError``, or ``mujoco.FatalError`` where the batch API rejects them. A
+``Batch`` must not be used from several Python threads at once: its calls are serialized, but each reports its failures
+from this per-simulation outcome, which the next call overwrites.
+
+By default an ``MjData`` serves many simulations, so memory grows with threads rather than simulations, and a field a
+call does not compute, such as ``qfrc_inverse`` after ``step``, holds another simulation's value. ``Batch(model, nsim,
+persistent=True)`` keeps one ``MjData`` per simulation instead, and is required for models with
+:ref:`sleep<option-flag-sleep>` or :ref:`IPC<option-flag-ipc>` enabled. Likewise, :ref:`engine plugins<exPlugin>` that
+keep state outside ``plugin_state`` share it among the simulations a thread runs, unless the batch is persistent.
+
+The batch's threads run across simulations, while :ref:`mju_threadpool` threads one simulation from within; the two are
+not combined. :ref:`Physics callbacks<glPhysics>` must be C functions, installed through ``ctypes``: with a Python
+function installed as one, the batch's calls raise ``ValueError``. A ``ctypes`` function that wraps a Python function
+is accepted, but it holds the Global Interpreter Lock while it runs, which serializes the batch's threads, and its
+exceptions are printed rather than raised. Warnings raised on the batch's threads go to the global log handler, and
+only those raised on the caller's thread also reach a thread-local one; the counters of ``b.warning`` count them all.
 
 .. _PyMinimize:
 
@@ -1130,8 +1368,8 @@ mujoco-py migration
 ===================
 
 In mujoco-py, the main entry point is the `MjSim <https://github.com/openai/mujoco-py/blob/master/mujoco_py/mjsim.pyx>`_
-class.  Users construct a stateful ``MjSim`` instance from an MJCF model (similar to ``dm_control.Physics``), and this
-instance holds references to an ``mjModel`` instance and its associated ``mjData``.  In contrast, the MuJoCo Python
+class. Users construct a stateful ``MjSim`` instance from an MJCF model (similar to ``dm_control.Physics``), and this
+instance holds references to an ``mjModel`` instance and its associated ``mjData``. In contrast, the MuJoCo Python
 bindings (``mujoco``) take a more low-level approach, as explained above: following the design principle of the C
 library, the ``mujoco`` module itself is stateless, and merely wraps the underlying native structs and functions.
 

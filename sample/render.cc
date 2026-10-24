@@ -41,10 +41,10 @@
 #include "lodepng.h"
 #include <mujoco/mjrfilament.h>
 #include <mujoco/mujoco.h>
-#include "render/filament/mjrfilament_cpp.h"
+#include "render/filament/support/mjrf_ptr.h"
 #include "render/filament/support/model_decorations.h"
 #include "render/filament/support/model_lights.h"
-#include "render/filament/support/model_objects.h"
+#include "render/filament/support/model_resources.h"
 #include "render/filament/support/model_renderables.h"
 
 // bitmap font definitions for CPU text overlay with Filament backend
@@ -58,7 +58,7 @@ using std::vector;
 
 using ::mujoco::ModelDecorations;
 using ::mujoco::ModelLights;
-using ::mujoco::ModelObjects;
+using ::mujoco::ModelResources;
 using ::mujoco::ModelRenderables;
 
 
@@ -280,7 +280,6 @@ static bool ParseFlag(string_view name, string_view val, Options& opt) {
   return ParseVisOrRndFlag(name, val, opt);
 }
 
-
 // helper: parse command line arguments
 static bool ParseCommandLine(int& argc, char** argv, Options& opt) {
 
@@ -304,8 +303,7 @@ static bool ParseCommandLine(int& argc, char** argv, Options& opt) {
       }
 
       if (!ParseFlag(name, val, opt)) {
-        printf("Unknown or invalid option: --%.*s\n",
-               static_cast<int>(name.size()), name.data());
+        printf("Unknown or invalid option: --%.*s\n", static_cast<int>(name.size()), name.data());
         return false;
       }
     } else if (opt.model_path.empty()) {
@@ -448,7 +446,7 @@ class FileResource {
 static void RegisterFilamentAssetProvider() {
 
   mjpResourceProvider provider;  // NOLINT
-  mjp_defaultResourceProvider(&provider);
+  mjp_defaultProvider(&provider);
   provider.open = [](mjResource* resource) {
     FileResource* f = new FileResource(ResolveAsset(resource->name));
     if (f->Size() == 0) {
@@ -466,7 +464,7 @@ static void RegisterFilamentAssetProvider() {
     resource->data = nullptr;
   };
   provider.prefix = "filament";
-  mjp_registerResourceProvider(&provider);
+  mjp_registerProvider(&provider);
 }
 
 
@@ -495,9 +493,9 @@ static vector<unsigned char> RenderFilament(const mjModel*   m,
   mjrf_configureSceneFromModel(scene.get(), m);
 
   // create scene components
-  auto model_objects     = std::make_unique<ModelObjects>(m, ctx.get());
-  auto model_lights      = std::make_unique<ModelLights>(scene.get(), model_objects.get());
-  auto model_renderables = std::make_unique<ModelRenderables>(scene.get(), model_objects.get());
+  auto model_resources   = std::make_unique<ModelResources>(m, ctx.get());
+  auto model_lights      = std::make_unique<ModelLights>(scene.get(), model_resources.get());
+  auto model_renderables = std::make_unique<ModelRenderables>(scene.get(), model_resources.get());
   auto model_decorations = std::make_unique<ModelDecorations>(ctx.get(), scene.get(), m);
 
   // 2D text label callback
@@ -530,10 +528,15 @@ static vector<unsigned char> RenderFilament(const mjModel*   m,
   // create render request
   mjrfRenderRequest request;
   mjrf_defaultRenderRequest(&request);
-  request.scene    = scene.get();
-  request.camera   = mjv_camera2GLCamera(m, d, &cam);
-  request.viewport = viewport;
-  request.target   = render_target.get();
+  request.scene               = scene.get();
+  request.camera              = mjv_camera2GLCamera(m, d, &cam);
+  request.viewport            = viewport;
+  request.target              = render_target.get();
+  request.headlight    = m->vis.headlight.active;
+  request.headlight_color[0]  = m->vis.headlight.diffuse[0];
+  request.headlight_color[1]  = m->vis.headlight.diffuse[1];
+  request.headlight_color[2]  = m->vis.headlight.diffuse[2];
+  request.headlight_intensity = model_lights->GetHeadlightIntensity();
 
   // process render flags
   if (rnd_flags[mjRND_SEGMENT] > 0) {
@@ -546,18 +549,20 @@ static vector<unsigned char> RenderFilament(const mjModel*   m,
     request.draw_mode = mjDRAW_MODE_DEPTH;
   } else if (rnd_flags[mjRND_WIREFRAME] > 0) {
     request.draw_mode = mjDRAW_MODE_WIREFRAME;
+  } else if (opt.flags[mjVIS_ISLAND]) {
+    request.draw_mode = mjDRAW_MODE_ISLANDS;
   }
-  if (rnd_flags[mjRND_SHADOW] >= 0) { request.enable_shadows = rnd_flags[mjRND_SHADOW]; }
+  if (rnd_flags[mjRND_SHADOW] >= 0) { request.shadows = rnd_flags[mjRND_SHADOW]; }
   if (rnd_flags[mjRND_REFLECTION] >= 0) {
-    request.enable_reflections = rnd_flags[mjRND_REFLECTION];
+    request.reflections = rnd_flags[mjRND_REFLECTION];
   }
 
   // prepare output buffer
   vector<unsigned char> rgb(width * height * 3);
 
   // prepare read pixels request
-  mjrfReadPixelsRequest read_request;
-  mjrf_defaultReadPixelsRequest(&read_request);
+  mjrfReadRequest read_request;
+  mjrf_defaultReadRequest(&read_request);
   read_request.target    = render_target.get();
   read_request.output    = rgb.data();
   read_request.num_bytes = width * height * 3;
@@ -587,7 +592,6 @@ static vector<unsigned char> RenderClassic(mjModel*         m,
                                            const int        rnd_flags[mjNRNDFLAG],
                                            int              width,
                                            int              height) {
-
   // create scene
   static constexpr int kMaxGeom = 50000;
   mjvScene             scn;

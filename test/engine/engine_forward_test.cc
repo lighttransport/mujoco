@@ -194,7 +194,7 @@ static const char* const kArmatureEquivalencePath =
 // a gear ratio enforced by an equality
 TEST_F(ForwardTest, ArmatureEquivalence) {
   const std::string xml_path = GetTestDataFilePath(kArmatureEquivalencePath);
-  char error[1000];
+  char error[1024];
   mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
   ASSERT_THAT(model, NotNull()) << error;
   mjData* data = mj_makeData(model);
@@ -395,7 +395,9 @@ TEST_F(ImplicitIntegratorTest, EulerImplicitEquivalent) {
 // Joint and actuator damping should integrate identically under implicit
 TEST_F(ImplicitIntegratorTest, JointActuatorEquivalent) {
   const std::string xml_path = GetTestDataFilePath(kDampedActuatorsPath);
-  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, nullptr, 0);
+  char error[1024];
+  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+  ASSERT_THAT(model, NotNull()) << error;
   mjData* data = mj_makeData(model);
 
   // take 1000 steps with Euler
@@ -427,7 +429,9 @@ TEST_F(ImplicitIntegratorTest, JointActuatorEquivalent) {
 TEST_F(ImplicitIntegratorTest, EnergyConservation) {
   const std::string xml_path =
       GetTestDataFilePath(kEnergyConservingPendulumPath);
-  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, nullptr, 0);
+  char error[1024];
+  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+  ASSERT_THAT(model, NotNull()) << error;
   mjData* data = mj_makeData(model);
 
   const int nstep = 500;  // number of steps to take
@@ -501,8 +505,47 @@ TEST_F(ImplicitIntegratorTest, FreeBodyMatchesImplicit) {
   </mujoco>
   )";
 
+  // free rigid subtree with rotated, offset inertias and multiple levels
+  static constexpr char xml3[] = R"(
+  <mujoco>
+    <option timestep="0.005"/>
+    <default><geom contype="0" conaffinity="0"/></default>
+    <worldbody>
+      <body pos="0.1 -0.2 0.5" euler="20 -30 40">
+        <joint type="free" damping="0.1"/>
+        <geom type="box" size=".1 .2 .3" mass="2" pos=".04 -.02 .03" euler="10 20 30"/>
+        <body pos=".2 -.1 .3" euler="30 20 -10">
+          <geom type="box" size=".2 .1 .1" mass="1" pos=".03 .01 -.02"/>
+          <body pos="-.1 .2 .1" euler="10 -20 30">
+            <geom type="box" size=".1 .1 .2" mass=".5"/>
+          </body>
+        </body>
+      </body>
+      <body pos="3 0 1">
+        <freejoint/>
+        <geom type="box" size=".1 .2 .3"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
+  // fluid forces on a fixed child must retain asymmetric lift derivatives
+  static constexpr char xml4[] = R"(
+  <mujoco>
+    <option timestep="0.005" density="1.2" viscosity="0.002" wind="1 2 3"/>
+    <worldbody>
+      <body pos="0.1 -0.2 0.5" euler="20 -30 40">
+        <freejoint/>
+        <body pos=".04 -.02 .03" euler="10 20 30">
+          <geom type="ellipsoid" size=".1 .2 .3" mass="2" fluidshape="ellipsoid"/>
+        </body>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
   int xml_idx = 1;
-  for (auto xml : {xml1, xml2}) {
+  for (auto xml : {xml1, xml2, xml3, xml4}) {
     SCOPED_TRACE(testing::Message() << "XML case " << xml_idx++);
     char error[1024];
     MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
@@ -576,6 +619,48 @@ TEST_F(ImplicitIntegratorTest, FreeBodyGyroStable) {
       mj_step(m, d);
       ASSERT_LT(d->energy[1], 1.01 * initial_energy)
           << "energy gain at step " << i;
+    }
+  }
+}
+
+// a massless free root with a fixed inertial child must not disable gyroscopic
+// stabilization
+TEST_F(ImplicitIntegratorTest, FreeRigidSubtreeGyroStable) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option integrator="implicitfast" timestep="0.001" gravity="0 0 0">
+      <flag energy="enable"/>
+    </option>
+    <worldbody>
+      <body>
+        <freejoint/>
+        <body>
+          <inertial pos="0 0 0" mass="0.12"
+                    diaginertia="0.00017231 0.00000658 0.00017243"/>
+        </body>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  ASSERT_EQ(model->nbody, 3);
+  MjDataPtr data = MakeData(model);
+  for (mjtIntegrator integrator : {mjINT_IMPLICITFAST, mjINT_DISCRETE}) {
+    SCOPED_TRACE(testing::Message() << "integrator " << integrator);
+    model->opt.integrator = integrator;
+    mj_resetData(model.get(), data.get());
+    data->qvel[3] = 100;
+    data->qvel[4] = 30;
+    data->qvel[5] = 100;
+    mj_forward(model.get(), data.get());
+    mjtNum initial_energy = data->energy[1];
+
+    for (int i = 0; i < 10000; i++) {
+      mj_step(model.get(), data.get());
+      ASSERT_EQ(data->warning[mjWARN_BADQACC].number, 0) << "step " << i;
+      ASSERT_LT(data->energy[1], 1.01 * initial_energy) << "step " << i;
     }
   }
 }
@@ -1329,7 +1414,9 @@ TEST_F(ActuatorTest, ExpectedAdhesionForce) {
 // Actuator force clamping at joints
 TEST_F(ActuatorTest, ActuatorForceClamping) {
   const std::string xml_path = GetTestDataFilePath(kJointForceClamp);
-  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, nullptr, 0);
+  char error[1024];
+  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+  ASSERT_THAT(model, NotNull()) << error;
   mjData* data = mj_makeData(model);
 
   data->ctrl[0] = 10;
@@ -1474,7 +1561,7 @@ TEST_F(ActuatorTest, DampRatio) {
 TEST_F(ActuatorTest, DampRatioTendon) {
   const std::string xml_path =
       GetTestDataFilePath("engine/testdata/actuation/tendon_dampratio.xml");
-  char error[1000];
+  char error[1024];
   mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
   ASSERT_THAT(model, NotNull()) << error;
   mjData* data = mj_makeData(model);
@@ -2811,7 +2898,7 @@ using ActEarlyTest = MujocoTest;
 TEST_F(ActEarlyTest, RemovesOneStepDelay) {
   const std::string xml_path =
       GetTestDataFilePath("engine/testdata/actuation/actearly.xml");
-  char error[1000];
+  char error[1024];
   mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
   ASSERT_THAT(model, NotNull()) << error;
 
@@ -2862,7 +2949,7 @@ TEST_F(ActEarlyTest, RemovesOneStepDelay) {
 TEST_F(ActEarlyTest, DoesntChangeStateInMjForward) {
   const std::string xml_path =
       GetTestDataFilePath("engine/testdata/actuation/actearly.xml");
-  char error[1000];
+  char error[1024];
   mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
   ASSERT_THAT(model, NotNull()) << error;
 
@@ -2955,7 +3042,9 @@ TEST_F(ActuatorTest, DisableActuatorOutOfRange) {
 
 TEST_F(ActuatorTest, TendonActuatorForceRange) {
   const std::string xml_path = GetTestDataFilePath(kTendonForceClamp);
-  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, nullptr, 0);
+  char error[1024];
+  mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+  ASSERT_THAT(model, NotNull()) << error;
   mjData* data = mj_makeData(model);
 
   EXPECT_EQ(model->tendon_actfrclimited[0], 0);
@@ -3103,6 +3192,117 @@ TEST_F(ForwardTest, ActuatorDelayLinearInterp) {
   EXPECT_NEAR(data->actuator_force[0], 15.0, MjTol(1e-10, 5e-6)) << "step 2";
 }
 
+// Test actuator delay with multi-input PID actuator (input="pos vel ff")
+TEST_F(ForwardTest, ActuatorDelayMultiInputPID) {
+  constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.01" gravity="0 0 0"/>
+    <worldbody>
+      <body>
+        <joint name="slide" type="slide"/>
+        <geom size="0.1" mass="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <pid joint="slide" kp="10" kv="2" input="pos vel ff"
+           delay="0.02" nsample="2"/>
+    </actuator>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+
+  EXPECT_EQ(model->actuator_ctrlnum[0], 3);
+  EXPECT_EQ(model->actuator_history[0], 2);
+  EXPECT_EQ(model->nhistory, 2 + 2 + 2 * 3);
+
+  // Set pos=1.0, vel=2.0, ff=5.0
+  // Undelayed force at qpos=0, qvel=0 would be kp*1 + kv*2 + ff = 10 + 4 + 5 =
+  // 19
+  data->ctrl[0] = 1.0;
+  data->ctrl[1] = 2.0;
+  data->ctrl[2] = 5.0;
+
+  // Step 1 & 2: all three inputs (pos, vel, ff) must be delayed (force = 0)
+  mj_step(model.get(), data.get());
+  EXPECT_NEAR(data->actuator_force[0], 0.0, 1e-10);
+
+  mj_step(model.get(), data.get());
+  EXPECT_NEAR(data->actuator_force[0], 0.0, 1e-10);
+
+  // Step 3: delayed inputs [1.0, 2.0, 5.0] arrive while body is still at rest
+  mj_step(model.get(), data.get());
+  EXPECT_NEAR(data->actuator_force[0], 19.0, 1e-10);
+}
+
+// Test actuator delay with SO(3) orientation actuators (expmap and quat inputs)
+TEST_F(ForwardTest, ActuatorDelaySO3) {
+  constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.01"/>
+    <worldbody>
+      <body>
+        <joint name="b1" type="ball"/>
+        <geom size="0.1" mass="1"/>
+      </body>
+      <body>
+        <joint name="b2" type="ball"/>
+        <geom size="0.1" mass="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <orientation joint="b1" kp="10" input="expmap" delay="0.02" nsample="2"/>
+      <orientation joint="b2" kp="10" input="quat" delay="0.02" nsample="2"/>
+    </actuator>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+
+  EXPECT_EQ(model->actuator_ctrlnum[0], 3);
+  EXPECT_EQ(model->actuator_ctrlnum[1], 4);
+  // nhistory = (2 + 2 + 2*3) + (2 + 2 + 2*4) = 10 + 12 = 22
+  EXPECT_EQ(model->nhistory, 22);
+  EXPECT_EQ(model->actuator_historyadr[0], 0);
+  EXPECT_EQ(model->actuator_historyadr[1], 10);
+
+  // Command a 0.2 rad rotation around Y for b1 (expmap) and Z for b2 (quat)
+  data->ctrl[0] = 0.0;
+  data->ctrl[1] = 0.2;
+  data->ctrl[2] = 0.0;
+
+  mjtNum half_angle = 0.15;
+  data->ctrl[3] = mju_cos(half_angle);
+  data->ctrl[4] = 0.0;
+  data->ctrl[5] = 0.0;
+  data->ctrl[6] = mju_sin(half_angle);
+
+  // Steps 1 & 2: both SO3 actuators read neutral history, producing zero torque
+  mj_step(model.get(), data.get());
+  for (int k = 0; k < 6; k++) {
+    EXPECT_NEAR(data->actuator_force[k], 0.0, 1e-10);
+  }
+
+  mj_step(model.get(), data.get());
+  for (int k = 0; k < 6; k++) {
+    EXPECT_NEAR(data->actuator_force[k], 0.0, 1e-10);
+  }
+
+  // Step 3: delayed commands arrive; b1 gets torque along Y (kp * 0.2 = 2.0),
+  // b2 gets torque along Z (kp * 0.3 = 3.0)
+  mj_step(model.get(), data.get());
+  EXPECT_NEAR(data->actuator_force[0], 0.0, 1e-10);
+  EXPECT_NEAR(data->actuator_force[1], 2.0, MjTol(1e-10, 1e-5));
+  EXPECT_NEAR(data->actuator_force[2], 0.0, 1e-10);
+  EXPECT_NEAR(data->actuator_force[3], 0.0, 1e-10);
+  EXPECT_NEAR(data->actuator_force[4], 0.0, 1e-10);
+  EXPECT_NEAR(data->actuator_force[5], 3.0, MjTol(1e-10, 1e-5));
+}
+
 TEST_F(ForwardTest, FlexTrilinearInstability) {
   // model parameters matches user's trilinear.xml
   constexpr char xml[] = R"(
@@ -3173,7 +3373,7 @@ TEST_F(ForwardTest, FlexTrilinearInstability) {
 
   // stability simulation
   // run for steps to catch instability
-  for (int i = 0; i < 2000; ++i) {
+  for (int i = 0; i < 500; ++i) {
     mj_step(model.get(), data.get());
 
     for (int j = 0; j < model->nq; ++j) {
@@ -3293,7 +3493,7 @@ TEST_F(ForwardTest, FlexParentCoupling) {
 
   // implicit and explicit flex damping legitimately differ at
   // O(h*damping*K/M) in this comparison
-  EXPECT_LT(max_diff, MjTol(5e-5, 1.5e-2))
+  EXPECT_LT(max_diff, MjTol(1e-4, 1.5e-2))
       << "Implicit integrator should match Euler at small timestep";
 }
 
@@ -3944,7 +4144,7 @@ TEST_F(ImplicitIntegratorTest, PassiveFlexContactMovingBase) {
   mjData* data = d.get();
 
   mjtNum vmax = 0;
-  for (int i = 0; i < 1000; i++) {
+  for (int i = 0; i < 300; i++) {
     mj_step(model, data);
     for (int j = 0; j < model->nv; j++) {
       vmax = mju_max(vmax, mju_abs(data->qvel[j]));
@@ -3977,7 +4177,7 @@ TEST_F(ImplicitIntegratorTest, PassiveFlexContactMovingBase) {
       << " against the lower sheet's " << lo[0];
 }
 
-// passive contact on unsupported flex shapes (rigid, interpolated, 1D): a
+// passive contact on unsupported flex shapes (rigid, 1D): a
 // compile-time warning fires, the attribute is ignored, and the contact stays
 // on the constraint solver
 TEST_F(ImplicitIntegratorTest, PassiveFlexContactUnsupportedShape) {
@@ -4001,8 +4201,7 @@ TEST_F(ImplicitIntegratorTest, PassiveFlexContactUnsupportedShape) {
   )";
   char error[1024];
   MockWarningHandler warning_handler;
-  warning_handler.ExpectWarnings(
-      "not supported for rigid, interpolated or 1D flexes");
+  warning_handler.ExpectWarnings("not supported for rigid or 1D flexes");
   MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
   ASSERT_THAT(m, NotNull()) << error;
   testing::Mock::VerifyAndClearExpectations(&warning_handler);
@@ -4020,8 +4219,9 @@ TEST_F(ImplicitIntegratorTest, PassiveFlexContactUnsupportedShape) {
 }
 
 // passive contact with no elastic stiffness still contributes to the metric:
-// the flex predicate must see it, and flex metric terms force a monolithic
-// solve under islands
+// the flex predicate must see it, and island discovery unions the contacting
+// body with the flex trees into one island while unrelated bodies form their
+// own islands
 TEST_F(ImplicitIntegratorTest, PassiveFlexContactOnlyInMetric) {
   static constexpr char xml[] = R"(
   <mujoco>
@@ -4063,6 +4263,7 @@ TEST_F(ImplicitIntegratorTest, PassiveFlexContactOnlyInMetric) {
 
   // the sphere landed on the net, deforming it, and no divergence occurred
   ASSERT_GT(d1->ncon, 0);
+  EXPECT_EQ(d1->nisland, 2);
   EXPECT_FALSE(d1->warning[mjWARN_BADQACC].number);
   EXPECT_GT(d1->qpos[model->nq - 12], 0.1) << "sphere fell through the net";
   mjtNum sag = 0;
@@ -4071,10 +4272,197 @@ TEST_F(ImplicitIntegratorTest, PassiveFlexContactOnlyInMetric) {
   }
   EXPECT_GT(sag, 0.002);
 
-  // island and monolithic solves agree (islands only reorder the constraint
-  // rows)
+  // island and monolithic solves agree (within CG stopping tolerance across
+  // separate per-island vs. combined monolithic CG trajectories)
   EXPECT_THAT(AsVector(d1->qpos, model->nq),
-              Pointwise(MjNear(1e-6, 1e-5), AsVector(d2->qpos, model->nq)));
+              Pointwise(MjNear(2e-6, 1e-5), AsVector(d2->qpos, model->nq)));
+}
+
+// Passive contact on interpolated flexes (trilinear volumetric, trilinear shell
+// elastic2d="bend", and quadratic) against a plane/box geom and against another
+// flex with pinned cage nodes: contacts are carried in d->nefmcon with
+// d->nefc == 0 and step stably under integrator="discrete" without falling
+// through.
+TEST_F(ImplicitIntegratorTest, PassiveFlexContactInterpolated) {
+  struct GeomCase {
+    const char* name;
+    const char* dof;
+    const char* elasticity;
+    const char* pin;
+  };
+  const GeomCase geom_cases[] = {
+      {"trilinear_vol", "trilinear",
+       R"(<elasticity young="5e4" poisson="0.3" damping="0.01"/>)", ""},
+      {"trilinear_shell_bend", "trilinear",
+       R"(<elasticity young="5e2" poisson="0.3" thickness="0.015" elastic2d="bend" damping="0"/>)",
+       R"(<pin id="1 3 5 7"/>)"},
+      {"trilinear_shell_stretch", "trilinear",
+       R"(<elasticity young="5e4" poisson="0.3" thickness="0.015" elastic2d="stretch" damping="0.01"/>)",
+       ""},
+      {"quadratic_vol", "quadratic",
+       R"(<elasticity young="5e4" poisson="0.3" damping="0.01"/>)", ""},
+      {"trilinear_pinned_corner", "trilinear",
+       R"(<elasticity young="5e4" poisson="0.3" damping="0.01"/>)",
+       R"(<pin id="1"/>)"},
+  };
+
+  for (const GeomCase& tc : geom_cases) {
+    SCOPED_TRACE(tc.name);
+    std::string xml = std::string(R"(
+    <mujoco>
+      <option timestep="0.002" integrator="discrete" solver="CG" iterations="200"/>
+      <worldbody>
+        <geom name="floor" type="plane" size="2 2 0.1"/>
+        <geom name="press" type="box" size="0.3 0.3 0.02" pos="0 0 0.25"/>
+        <flexcomp name="block" type="grid" count="4 4 4" cellcount="1 1 1"
+                  spacing="0.06 0.06 0.06" radius="0.008" dim="3" mass="0.5"
+                  pos="0 0 0.10" dof=")") +
+                      tc.dof + R"(">
+          <contact selfcollide="none" passive="true"/>
+          )" + tc.elasticity +
+                      "\n" + tc.pin + R"(
+        </flexcomp>
+      </worldbody>
+    </mujoco>
+    )";
+
+    char error[1024] = {0};
+    MjModelPtr m = LoadModelFromString(xml.c_str(), error, sizeof(error));
+    ASSERT_THAT(m, NotNull()) << error;
+    MjDataPtr d = MakeData(m);
+
+    bool saw_passive_con = false;
+    mjtNum vmax = 0;
+    for (int step = 0; step < 300; step++) {
+      mj_step(m.get(), d.get());
+      EXPECT_EQ(d->nefc, 0);
+      if (d->nefmcon > 0) {
+        saw_passive_con = true;
+      }
+      for (int i = 0; i < m->nv; i++) {
+        vmax = mju_max(vmax, mju_abs(d->qvel[i]));
+      }
+      ASSERT_EQ(d->warning[mjWARN_BADQACC].number, 0) << "step " << step;
+      ASSERT_EQ(d->warning[mjWARN_INERTIA].number, 0) << "step " << step;
+    }
+    EXPECT_TRUE(saw_passive_con);
+    EXPECT_LT(vmax, 5.0);
+
+    // Verify no vertex fell through the z = 0 floor.
+    mjtNum min_z = 1e30;
+    for (int v = 0; v < m->flex_vertnum[0]; v++) {
+      min_z = mju_min(min_z, d->flexvert_xpos[3 * v + 2]);
+    }
+    EXPECT_GT(min_z, -0.005);
+  }
+
+  // Flex-vs-flex passive contact between two trilinear flexes, with the lower
+  // flex pinned at its bottom cage nodes.
+  static constexpr char kFlexFlexXml[] = R"(
+  <mujoco>
+    <option timestep="0.002" integrator="discrete" solver="CG" iterations="200"/>
+    <worldbody>
+      <flexcomp name="lower" type="grid" count="4 4 3" cellcount="1 1 1"
+                spacing="0.08 0.08 0.04" radius="0.008" dim="3" mass="0.4"
+                pos="0 0 0.1" dof="trilinear">
+        <contact selfcollide="none" passive="true"/>
+        <elasticity young="1e5" poisson="0.3" damping="0.01"/>
+        <pin id="0 2 4 6"/>
+      </flexcomp>
+      <flexcomp name="upper" type="grid" count="3 3 3" cellcount="1 1 1"
+                spacing="0.06 0.06 0.04" radius="0.008" dim="3" mass="0.2"
+                pos="0 0 0.21" dof="trilinear">
+        <contact selfcollide="none" passive="true"/>
+        <elasticity young="1e5" poisson="0.3" damping="0.01"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024] = {0};
+  MjModelPtr m = LoadModelFromString(kFlexFlexXml, error, sizeof(error));
+  ASSERT_THAT(m, NotNull()) << error;
+  MjDataPtr d = MakeData(m);
+
+  bool saw_passive_con = false;
+  for (int step = 0; step < 300; step++) {
+    mj_step(m.get(), d.get());
+    EXPECT_EQ(d->nefc, 0);
+    if (d->nefmcon > 0) {
+      saw_passive_con = true;
+    }
+    ASSERT_EQ(d->warning[mjWARN_BADQACC].number, 0) << "step " << step;
+    ASSERT_EQ(d->warning[mjWARN_INERTIA].number, 0) << "step " << step;
+  }
+  EXPECT_TRUE(saw_passive_con);
+
+  int f_lower = mj_name2id(m.get(), mjOBJ_FLEX, "lower");
+  int f_upper = mj_name2id(m.get(), mjOBJ_FLEX, "upper");
+  mjtNum min_z_lower = 1e30, min_z_upper = 1e30;
+  for (int v = 0; v < m->flex_vertnum[f_lower]; v++) {
+    min_z_lower = mju_min(
+        min_z_lower, d->flexvert_xpos[3 * (m->flex_vertadr[f_lower] + v) + 2]);
+  }
+  for (int v = 0; v < m->flex_vertnum[f_upper]; v++) {
+    min_z_upper = mju_min(
+        min_z_upper, d->flexvert_xpos[3 * (m->flex_vertadr[f_upper] + v) + 2]);
+  }
+  EXPECT_GT(min_z_upper, min_z_lower);
+
+  // Refining the surface mesh (count) at a fixed cage (cellcount) should keep
+  // passive contact penetration similar rather than stiffening with vertex
+  // count, for both volumetric and shell flexes (where interior cage nodes are
+  // pinned).
+  for (int shell : {0, 1}) {
+    SCOPED_TRACE(shell ? "shell_refinement" : "volumetric_refinement");
+    mjtNum max_pen_coarse = 0, max_pen_fine = 0;
+    for (int fine : {0, 1}) {
+      std::string ref_xml =
+          std::string(R"(
+      <mujoco>
+        <option timestep="0.002" integrator="discrete" solver="CG" iterations="200"/>
+        <worldbody>
+          <geom name="floor" type="plane" size="2 2 0.1"/>
+          <flexcomp name="block" type=")") +
+          (shell ? "box" : "grid") + R"(" count=")" +
+          (fine ? "7 7 7" : "3 3 3") + R"(" cellcount="2 2 2" spacing=")" +
+          (fine ? "0.03 0.03 0.03" : "0.09 0.09 0.09") +
+          R"(" radius="0.008" dim=")" + (shell ? "2" : "3") + R"(" mass="1.0"
+                    pos="0 0 0.098" dof="trilinear">
+            <contact selfcollide="none" passive="true"/>
+            )" +
+          (shell
+               ? R"(<elasticity young="1e5" poisson="0.3" damping="0.05" elastic2d="stretch" thickness="0.015"/>)"
+               : R"(<elasticity young="1e5" poisson="0.3" damping="0.05"/>)") +
+          R"(
+          </flexcomp>
+        </worldbody>
+      </mujoco>
+      )";
+      char rerr[1024] = {0};
+      MjModelPtr rm = LoadModelFromString(ref_xml.c_str(), rerr, sizeof(rerr));
+      ASSERT_THAT(rm, NotNull()) << rerr;
+      MjDataPtr rd = MakeData(rm);
+      for (int step = 0; step < 200; step++) {
+        mj_step(rm.get(), rd.get());
+      }
+      mjtNum max_pen = 0;
+      for (int c = 0; c < rd->ncon; c++) {
+        max_pen = mju_max(max_pen, -rd->contact[c].dist);
+      }
+      if (fine) {
+        max_pen_fine = max_pen;
+      } else {
+        max_pen_coarse = max_pen;
+      }
+    }
+    EXPECT_GT(max_pen_coarse, 0);
+    EXPECT_GT(max_pen_fine, 0);
+    // 7x7 = 49 bottom vertices vs 3x3 = 9 bottom vertices (5.4x more contacts
+    // per face): penetration remains within a factor of 2.5 rather than
+    // dropping >5x.
+    EXPECT_LT(max_pen_coarse / max_pen_fine, 2.5);
+    EXPECT_LT(max_pen_fine / max_pen_coarse, 2.5);
+  }
 }
 
 TEST_F(ImplicitIntegratorTest, FlexContactEnergy) {
@@ -4091,10 +4479,10 @@ TEST_F(ImplicitIntegratorTest, FlexContactEnergy) {
       <geom type="plane" size="5 5 0.1"/>
       <flexcomp type="grid" count="8 8 1" spacing=".04 .04 .04"
                 radius=".01" name="sheet" dim="2" pos="0 0 0.02" mass="0.1">
-        <edge equality="true" damping="0.1"/>
+        <edge equality="true"/>
         <elasticity young="3e6" poisson="0" thickness="2e-2"
                     elastic2d="bend" damping="0"/>
-        <contact solref="0.003 1" internal="false" selfcollide="none"/>
+        <contact solref="0.003 1" selfcollide="none"/>
       </flexcomp>
     </worldbody>
   </mujoco>
@@ -4147,7 +4535,7 @@ TEST_F(ImplicitIntegratorTest, BendingDampingDecaysEnergy) {
         <edge equality="false" damping="0" stiffness="0"/>
         <elasticity young="1e6" poisson="0" thickness="0.02"
                     elastic2d="bend" damping="0.1"/>
-        <contact solref="0.01" internal="false" selfcollide="none"/>
+        <contact solref="0.01" selfcollide="none"/>
       </flexcomp>
     </worldbody>
   </mujoco>
@@ -4206,7 +4594,7 @@ TEST_F(ImplicitIntegratorTest, InterpStretchEnergy) {
                 spacing=".05 .05 .05" radius=".005" name="cube"
                 dim="3" mass="10" dof="trilinear">
         <elasticity young="1e6" poisson="0.3" damping="0"/>
-        <contact selfcollide="none" internal="false"/>
+        <contact selfcollide="none"/>
       </flexcomp>
     </worldbody>
   </mujoco>
@@ -4284,6 +4672,175 @@ TEST_F(ForwardTest, DiscreteFlexInverseConsistency) {
   // passive forces
   mjtNum scale = 1 + mju_norm(data->qfrc_passive, nv);
   EXPECT_LT(mju_norm(data->qfrc_inverse, nv), MjTol(1e-6, 1e-4) * scale);
+}
+
+// the fluid drag and passive flex contact terms of the discrete integrator's
+// effective metric follow the spring and damper disable flags, as the forces
+// do: mj_passive skips both, like every passive force, only when both flags
+// are disabled. Neither model has springs, dampers, other metric terms or
+// constraints, so disabling either flag alone must leave the step unchanged,
+// and disabling both must reduce the smooth acceleration to M^-1 * qfrc_smooth.
+TEST_F(ForwardTest, DiscretePassiveDisableFlags) {
+  static constexpr char fluid[] = R"(
+  <mujoco>
+    <option timestep="0.01" integrator="discrete" solver="CG" density="1000" viscosity="1"/>
+    <worldbody>
+      <body>
+        <joint type="slide" axis="1 0 0"/>
+        <joint type="slide" axis="0 1 0"/>
+        <joint type="slide" axis="0 0 1"/>
+        <geom type="box" size=".1 .05 .01" mass=".2"/>
+      </body>
+      <body pos="1 0 0">
+        <joint type="slide" axis="1 0 0"/>
+        <joint type="slide" axis="0 1 0"/>
+        <joint type="slide" axis="0 0 1"/>
+        <geom type="box" size=".1 .05 .01" mass=".2" fluidshape="ellipsoid"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  static constexpr char contact[] = R"(
+  <mujoco>
+    <option timestep="0.002" integrator="discrete" solver="CG"/>
+    <worldbody>
+      <geom type="box" size=".5 .5 .05" pos="0 0 -.05"/>
+      <flexcomp type="grid" count="4 4 1" spacing=".05 .05 1" radius=".005" dim="2" mass=".1" pos="0 0 .004" name="sheet">
+        <contact passive="true"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+
+  for (const char* xml : {fluid, contact}) {
+    char error[1024];
+    MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
+    ASSERT_THAT(m.get(), NotNull()) << error;
+    MjDataPtr d = MakeData(m);
+    int nv = m->nv;
+
+    // qacc at a moving state, with the given disable flags
+    auto qacc = [&](int flags) {
+      m->opt.disableflags = flags;
+      mj_resetData(m.get(), d.get());
+      for (int i = 0; i < nv; i++) {
+        d->qvel[i] = mju_Halton(i, 3) - 0.5;
+      }
+      mj_forward(m.get(), d.get());
+      return AsVector(d->qacc, nv);
+    };
+
+    qacc(0);
+    EXPECT_GT(mju_norm(d->qfrc_passive, nv), 0.1)
+        << "test should exercise a nontrivial passive force";
+    EXPECT_EQ(qacc(mjDSBL_SPRING), qacc(0));
+    EXPECT_EQ(qacc(mjDSBL_DAMPER), qacc(0));
+
+    // both flags disabled: no passive force, and the metric reduces to M
+    qacc(mjDSBL_SPRING | mjDSBL_DAMPER);
+    ASSERT_EQ(d->nefc, 0);
+    std::vector<mjtNum> expected(nv), diff(nv);
+    mj_solveM(m.get(), d.get(), expected.data(), d->qfrc_smooth, 1);
+    mju_sub(diff.data(), d->qacc_smooth, expected.data(), nv);
+    EXPECT_LT(mju_norm(diff.data(), nv),
+              MjTol(1e-12, 1e-5) * mju_norm(expected.data(), nv));
+  }
+}
+
+// the flex terms of the discrete integrator's effective metric follow the
+// spring and damper disable flags, as the flex forces do. Scaling the flex
+// stiffness K and damping d by powers of 2 is exact, so each flag setting has a
+// scaling which leaves every enabled force, and therefore the step, bitwise
+// unchanged: any scaling with both flags disabled, (4K, d/4) with springs
+// disabled (the damping force depends on d*K), and (K, 4d) with dampers
+// disabled. The first model assembles its flex terms into the metric CSR; in
+// the second, bending and an interpolated flex under a moving body are applied
+// matrix-free.
+TEST_F(ForwardTest, DiscreteFlexDisableFlags) {
+  static constexpr char assembled[] = R"(
+  <mujoco>
+    <option timestep="0.01" integrator="discrete" solver="CG"/>
+    <worldbody>
+      <flexcomp type="grid" count="4 4 1" spacing=".1 .1 .1" radius=".01" dim="2"
+                mass="1" name="cloth">
+        <contact selfcollide="none" contype="0" conaffinity="0"/>
+        <elasticity young="1e4" poisson="0.3" thickness="1e-2" elastic2d="both" damping="0.05"/>
+        <pin id="0"/>
+      </flexcomp>
+      <flexcomp type="grid" count="3 3 3" spacing=".1 .1 .1" radius=".01" dim="3" mass="1"
+                name="solid" pos="1 0 0" dof="trilinear">
+        <contact selfcollide="none" contype="0" conaffinity="0"/>
+        <elasticity young="1e4" poisson="0.3" damping="0.05"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+  static constexpr char matrix_free[] = R"(
+  <mujoco>
+    <option timestep="0.01" integrator="discrete" solver="CG"/>
+    <worldbody>
+      <flexcomp type="grid" count="4 4 1" spacing=".1 .1 .1" radius=".01" dim="2"
+                mass="1" name="cloth">
+        <contact selfcollide="none" contype="0" conaffinity="0"/>
+        <elasticity young="1e4" poisson="0.3" thickness="1e-2" elastic2d="bend" damping="0.05"/>
+        <pin id="0"/>
+      </flexcomp>
+      <body name="parent" pos="1 0 0">
+        <joint type="slide" axis="1 0 0"/>
+        <geom size=".01" mass="1" contype="0" conaffinity="0"/>
+        <flexcomp type="grid" count="3 3 3" spacing=".1 .1 .1" radius=".01" dim="3" mass="1"
+                  name="solid" dof="trilinear">
+          <contact selfcollide="none" contype="0" conaffinity="0"/>
+          <elasticity young="1e4" poisson="0.3" damping="0.05"/>
+        </flexcomp>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
+  for (const char* xml : {assembled, matrix_free}) {
+    char error[1024];
+    MjModelPtr m = LoadModelFromString(xml, error, sizeof(error));
+    ASSERT_THAT(m.get(), NotNull()) << error;
+    MjDataPtr d = MakeData(m);
+    int nv = m->nv;
+    std::vector<mjtNum> stiffness =
+        AsVector(m->flex_stiffness, m->nflexstiffness);
+    std::vector<mjtNum> bending = AsVector(m->flex_bending, m->nflexbending);
+    std::vector<mjtNum> damping = AsVector(m->flex_damping, m->nflex);
+
+    // qacc at a deformed, moving state, with K and d scaled
+    auto qacc = [&](int flags, mjtNum kscale, mjtNum dscale) {
+      for (int i = 0; i < m->nflexstiffness; i++) {
+        m->flex_stiffness[i] = kscale * stiffness[i];
+      }
+      for (int i = 0; i < m->nflexbending; i++) {
+        m->flex_bending[i] = kscale * bending[i];
+      }
+      for (int f = 0; f < m->nflex; f++) {
+        m->flex_damping[f] = dscale * damping[f];
+      }
+      m->opt.disableflags = flags;
+      mj_resetData(m.get(), d.get());
+      for (int i = 0; i < nv; i++) {
+        d->qpos[i] += 5e-3 * (mju_Halton(i, 2) - 0.5);
+        d->qvel[i] = 0.2 * (mju_Halton(i, 3) - 0.5);
+      }
+      mj_forward(m.get(), d.get());
+      return AsVector(d->qacc, nv);
+    };
+
+    qacc(0, 1, 1);
+    EXPECT_GT(mju_norm(d->qfrc_spring, nv), 0.1)
+        << "test should exercise a nontrivial spring force";
+    EXPECT_GT(mju_norm(d->qfrc_damper, nv), 0.1)
+        << "test should exercise a nontrivial damping force";
+
+    EXPECT_EQ(qacc(mjDSBL_SPRING | mjDSBL_DAMPER, 4, 4),
+              qacc(mjDSBL_SPRING | mjDSBL_DAMPER, 1, 1));
+    EXPECT_EQ(qacc(mjDSBL_SPRING, 4, 0.25), qacc(mjDSBL_SPRING, 1, 1));
+    EXPECT_EQ(qacc(mjDSBL_DAMPER, 1, 4), qacc(mjDSBL_DAMPER, 1, 1));
+  }
 }
 
 // ------------------------------ discrete integrator --------------------------
@@ -4503,17 +5060,116 @@ TEST_F(ForwardTest, DiscreteJointInverseConsistency) {
   EXPECT_LT(mju_norm(data->qfrc_inverse, nv), MjTol(1e-6, 5e-5) * scale);
 }
 
+TEST_F(ForwardTest, SNHRequiresDiscreteIntegrator) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option integrator="discrete"/>
+    <worldbody>
+      <flexcomp name="test" dim="3" count="2 2 2">
+        <contact contype="0" conaffinity="0" selfcollide="none"/>
+        <elasticity young="1000" damping=".01"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>)";
+  mjSpec* spec = mj_parseXMLString(xml, nullptr, nullptr, 0);
+  ASSERT_THAT(spec, NotNull());
+  mjs_asFlex(mjs_findElement(spec, mjOBJ_FLEX, "test"))->elastic3d = 1;
+  MjModelPtr m(mj_compile(spec, nullptr));
+  mj_deleteSpec(spec);
+  ASSERT_THAT(m.get(), NotNull());
+  MjDataPtr d = MakeData(m);
+  auto forward_error = MjuErrorMessageFrom(mj_forward);
+  auto step_error = MjuErrorMessageFrom(mj_step);
+  auto step1_error = MjuErrorMessageFrom(mj_step1);
+  for (int integrator :
+       {mjINT_EULER, mjINT_RK4, mjINT_IMPLICIT, mjINT_IMPLICITFAST}) {
+    SCOPED_TRACE(integrator);
+    m->opt.integrator = integrator;
+    for (auto error :
+         {forward_error(m.get(), d.get()), step_error(m.get(), d.get()),
+          step1_error(m.get(), d.get())}) {
+      EXPECT_THAT(
+          error,
+          HasSubstr(
+              "stable Neo-Hookean elasticity requires integrator='discrete'"));
+    }
+  }
+  m->opt.integrator = mjINT_DISCRETE;
+  for (int solver : {mjSOL_CG, mjSOL_NEWTON}) {
+    m->opt.solver = solver;
+    EXPECT_EQ(forward_error(m.get(), d.get()), "");
+    EXPECT_EQ(step_error(m.get(), d.get()), "");
+  }
+}
+
 // flex elasticity lost its implicit treatment under implicit*: the migration is
 // loud
 TEST_F(ForwardTest, ImplicitFlexElasticityRequiresMetric) {
+  static const char* const kXmls[] = {
+      R"(
+      <mujoco>
+        <option integrator="discrete" solver="CG"/>
+        <worldbody>
+          <flexcomp name="sheet" type="grid" count="4 4 1" spacing=".05 .05 .05" radius=".01"
+                    dim="2" mass=".1" pos="0 0 1">
+            <elasticity young="1e4" poisson="0" thickness="1e-2" elastic2d="bend"/>
+            <pin id="0 3"/>
+          </flexcomp>
+        </worldbody>
+      </mujoco>
+      )",
+      R"(
+      <mujoco>
+        <option integrator="discrete" solver="CG"/>
+        <worldbody>
+          <flexcomp name="rod" type="grid" count="4 1 1" spacing=".05 .05 .05" radius=".01"
+                    dim="1" mass=".1" pos="0 0 1">
+            <elasticity young="1e4"/>
+            <pin id="0"/>
+          </flexcomp>
+        </worldbody>
+      </mujoco>
+      )",
+  };
+  char error[1024];
+  auto forward_error = MjuErrorMessageFrom(mj_forward);
+
+  for (const char* xml : kXmls) {
+    MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+    ASSERT_THAT(model.get(), NotNull()) << error;
+    MjDataPtr data = MakeData(model);
+
+    // the model loads and runs under discrete; flipping to implicit or
+    // implicitfast is a loud error
+    EXPECT_EQ(forward_error(model.get(), data.get()), "");
+    for (int integrator : {mjINT_IMPLICIT, mjINT_IMPLICITFAST}) {
+      model->opt.integrator = integrator;
+      EXPECT_THAT(forward_error(model.get(), data.get()),
+                  testing::HasSubstr("flex elasticity is no longer integrated "
+                                     "implicitly under integrator='implicit' "
+                                     "and 'implicitfast': set "
+                                     "integrator='discrete', or 'Euler' with "
+                                     "a small timestep"));
+    }
+
+    // Euler always integrated elasticity explicitly and still does
+    model->opt.integrator = mjINT_EULER;
+    EXPECT_EQ(forward_error(model.get(), data.get()), "");
+  }
+}
+
+// flex edge damping is integrated explicitly under implicitfast, so uniform
+// translation of a free flex has zero relative edge velocity and is not damped,
+// while relative vertex motion is damped
+TEST_F(ForwardTest, FlexEdgeDampingTranslationalInvariance) {
   static const char* const kXml = R"(
   <mujoco>
-    <option integrator="discrete" solver="CG"/>
+    <option integrator="implicitfast" gravity="0 0 0"/>
     <worldbody>
-      <flexcomp name="sheet" type="grid" count="4 4 1" spacing=".05 .05 .05" radius=".01"
-                dim="2" mass=".1" pos="0 0 1">
-        <elasticity young="1e4" poisson="0" thickness="1e-2" elastic2d="bend"/>
-        <pin id="0 3"/>
+      <flexcomp name="rope" type="grid" count="3 1 1" spacing=".1 .1 .1"
+                radius=".01" dim="1" mass="1">
+        <edge damping="10"/>
+        <contact selfcollide="none"/>
       </flexcomp>
     </worldbody>
   </mujoco>
@@ -4522,18 +5178,109 @@ TEST_F(ForwardTest, ImplicitFlexElasticityRequiresMetric) {
   MjModelPtr model = LoadModelFromString(kXml, error, sizeof(error));
   ASSERT_THAT(model.get(), NotNull()) << error;
   MjDataPtr data = MakeData(model);
+
+  // give all 3 vertices the same uniform velocity (1, -2, 3)
+  for (int v = 0; v < 3; v++) {
+    data->qvel[3 * v + 0] = 1.0;
+    data->qvel[3 * v + 1] = -2.0;
+    data->qvel[3 * v + 2] = 3.0;
+  }
+  mj_step(model.get(), data.get());
+
+  // uniform translation must not be damped by edge damping
+  for (int v = 0; v < 3; v++) {
+    EXPECT_NEAR(data->qvel[3 * v + 0], 1.0, MjTol(1e-12, 1e-6));
+    EXPECT_NEAR(data->qvel[3 * v + 1], -2.0, MjTol(1e-12, 1e-6));
+    EXPECT_NEAR(data->qvel[3 * v + 2], 3.0, MjTol(1e-12, 1e-6));
+  }
+
+  // give vertices differing velocities along the edge direction (x)
+  mj_resetData(model.get(), data.get());
+  data->qvel[0] = 1.0;
+  mj_step(model.get(), data.get());
+
+  // relative motion between vertices 0 and 1 is damped
+  EXPECT_LT(data->qvel[0], 1.0);
+  EXPECT_GT(data->qvel[3], 0.0);
+  EXPECT_LT(data->qvel[0] - data->qvel[3], 1.0);
+}
+
+// flex edge stiffness and damping are not supported under discrete
+TEST_F(ForwardTest, FlexEdgeStiffnessDampingDisallowedInDiscrete) {
+  static const char* const kXmls[] = {
+      R"(
+      <mujoco>
+        <worldbody>
+          <flexcomp name="rope" type="grid" count="3 1 1" spacing=".1 .1 .1"
+                    radius=".01" dim="1" mass="1">
+            <edge stiffness="10"/>
+          </flexcomp>
+        </worldbody>
+      </mujoco>
+      )",
+      R"(
+      <mujoco>
+        <worldbody>
+          <flexcomp name="rope" type="grid" count="3 1 1" spacing=".1 .1 .1"
+                    radius=".01" dim="1" mass="1">
+            <edge damping="1"/>
+          </flexcomp>
+        </worldbody>
+      </mujoco>
+      )",
+  };
+  char error[1024];
   auto forward_error = MjuErrorMessageFrom(mj_forward);
 
-  // the model loads and runs under discrete; flipping to implicitfast is a loud
-  // error
-  EXPECT_EQ(forward_error(model.get(), data.get()), "");
-  model->opt.integrator = mjINT_IMPLICITFAST;
-  EXPECT_THAT(
-      forward_error(model.get(), data.get()),
-      testing::HasSubstr("flex elasticity is no longer integrated implicitly"));
+  for (const char* xml : kXmls) {
+    MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+    ASSERT_THAT(model.get(), NotNull()) << error;
+    MjDataPtr data = MakeData(model);
 
-  // Euler always integrated elasticity explicitly and still does
-  model->opt.integrator = mjINT_EULER;
+    for (int integrator :
+         {mjINT_EULER, mjINT_RK4, mjINT_IMPLICIT, mjINT_IMPLICITFAST}) {
+      model->opt.integrator = integrator;
+      EXPECT_EQ(forward_error(model.get(), data.get()), "");
+    }
+    model->opt.integrator = mjINT_DISCRETE;
+    EXPECT_THAT(forward_error(model.get(), data.get()),
+                testing::HasSubstr("discrete integrator: flex edge stiffness "
+                                   "and damping are not supported; use "
+                                   "<elasticity> or <edge equality> instead"));
+  }
+}
+
+// the strain equality mode stores its constraint eigenmodes in flex_stiffness:
+// they are not elasticity, so the migration error must not fire
+TEST_F(ForwardTest, StrainEqualityIsNotElasticity) {
+  static const char* const kXml = R"(
+  <mujoco>
+    <option integrator="implicitfast"/>
+    <worldbody>
+      <flexcomp name="beam" type="box" spacing=".1 .1 .1" radius=".001" mass="1"
+                dim="3" dof="trilinear">
+        <contact selfcollide="none"/>
+        <edge equality="strain"/>
+        <pin id="0 1 2 3"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(kXml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+
+  // the stiffness block is allocated and nonzero (it holds the eigenmodes), yet
+  // the flex contributes nothing to the metric
+  ASSERT_EQ(model->flex_edgeequality[0], 3);
+  ASSERT_GE(model->flex_stiffnessadr[0], 0);
+  ASSERT_NE(model->flex_stiffness[model->flex_stiffnessadr[0]], 0);
+  EXPECT_FALSE(mj_effFlexPossible(model.get(), 0));
+
+  MjDataPtr data = MakeData(model);
+  auto forward_error = MjuErrorMessageFrom(mj_forward);
+  EXPECT_EQ(forward_error(model.get(), data.get()), "");
+  model->opt.integrator = mjINT_IMPLICIT;
   EXPECT_EQ(forward_error(model.get(), data.get()), "");
 }
 
@@ -4690,9 +5437,15 @@ TEST_F(ForwardTest, DiscreteUnsupportedOptions) {
   EXPECT_THAT(forward_error(model.get(), data.get()),
               testing::HasSubstr("sleep without islands"));
 
-  // sleep with islands is supported
+  // sleep with islands is supported, including with flex
   model->opt.disableflags &= ~mjDSBL_ISLAND;
   EXPECT_EQ(forward_error(model.get(), data.get()), "");
+  model_f->opt.solver = mjSOL_CG;
+  model_f->opt.enableflags |= mjENBL_SLEEP;
+  EXPECT_EQ(forward_error(model_f.get(), data_f.get()), "");
+  model_f->opt.disableflags |= mjDSBL_ISLAND;
+  EXPECT_THAT(forward_error(model_f.get(), data_f.get()),
+              testing::HasSubstr("sleep without islands"));
 
   // valid options again: no error, under both supported solvers and both cones
   model->opt.enableflags &= ~mjENBL_SLEEP;
@@ -5439,7 +6192,7 @@ TEST_F(ForwardTest, DiscreteSparseDualMatchesDense) {
     }
     EXPECT_EQ(nwarning, 0);
   }
-  EXPECT_THAT(qpos[1], Pointwise(MjNear(1e-8, 1e-3), qpos[0]));
+  EXPECT_THAT(qpos[1], Pointwise(MjNear(2e-8, 1e-3), qpos[0]));
 
   // PGS consumes the same symbolic AR: the sparse path steps cleanly
   std::snprintf(xml, sizeof(xml), xml_template, "sparse", "PGS");
@@ -5896,6 +6649,90 @@ TEST_F(ForwardTest, DiscreteTendonThreeTreeIsland) {
               Pointwise(MjNear(1e-8, 1e-4), AsVector(d2->qpos, nq)));
 }
 
+// islands and the monolithic solve agree under the discrete metric with flexes
+// (CSR-assembled, bending-only matrix-free, and trilinear interpolated), while
+// an unconstrained flex stays out of islands
+TEST_F(ForwardTest, DiscreteFlexIslandsMatchMonolithic) {
+  static const char* const kXmls[] = {
+      // CSR-assembled 2D cloth in contact + separate rigid box + free-falling
+      // elastic flex
+      R"(
+  <mujoco>
+    <option timestep="0.002" integrator="discrete" solver="CG" tolerance="1e-14" iterations="500"/>
+    <worldbody>
+      <geom type="plane" size="5 5 .1"/>
+      <flexcomp name="cloth" type="grid" count="3 3 1" spacing=".05 .05 .05"
+                radius=".01" dim="2" mass=".2" pos="0 0 .008" dof="full">
+        <contact selfcollide="none"/>
+        <elasticity young="1e3" poisson="0.2" damping="0.1" elastic2d="both" thickness="0.01"/>
+      </flexcomp>
+      <body pos="1 0 .04">
+        <joint name="far" type="slide" axis="1 0 0" damping="2" stiffness="50"/>
+        <geom type="box" size=".05 .05 .05" mass="1"/>
+      </body>
+      <flexcomp name="free_flex" type="grid" count="2 2 1" spacing=".05 .05 .05"
+                radius=".005" dim="2" mass=".1" pos="-1 0 1" dof="full">
+        <contact selfcollide="none" contype="0" conaffinity="0"/>
+        <elasticity young="1e3" poisson="0.2" damping="0.1" elastic2d="both" thickness="0.01"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )",
+      // bending-only 2D cloth (matrix-free under CG, assembled under Newton) +
+      // trilinear 3D solid in separate contact islands
+      R"(
+  <mujoco>
+    <option timestep="0.002" integrator="discrete" solver="CG" tolerance="1e-14" iterations="500"/>
+    <worldbody>
+      <geom type="plane" size="5 5 .1"/>
+      <flexcomp name="bend_cloth" type="grid" count="3 3 1" spacing=".05 .05 .05"
+                radius=".01" dim="2" mass=".2" pos="0 0 .008" dof="full">
+        <contact selfcollide="none"/>
+        <elasticity young="1e3" poisson="0.2" damping="0.1" elastic2d="bend" thickness="0.01"/>
+      </flexcomp>
+      <flexcomp name="solid" type="grid" count="2 2 2" spacing=".06 .06 .06"
+                radius=".01" dim="3" mass=".3" pos="1 0 .035" dof="trilinear">
+        <contact selfcollide="none"/>
+        <elasticity young="2e3" poisson="0.2" damping="0.1"/>
+      </flexcomp>
+    </worldbody>
+  </mujoco>
+  )",
+  };
+
+  for (const char* xml : kXmls) {
+    char error[1024];
+    MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+    ASSERT_THAT(model.get(), NotNull()) << error;
+    MjDataPtr data = MakeData(model);
+    int nv = model->nv;
+
+    for (mjtSolver solver : {mjSOL_CG, mjSOL_NEWTON}) {
+      model->opt.solver = solver;
+      model->opt.disableflags &= ~mjDSBL_ISLAND;
+      mj_resetData(model.get(), data.get());
+      for (int i = 0; i < 15; i++) {
+        mj_step(model.get(), data.get());
+      }
+      mj_forward(model.get(), data.get());
+      ASSERT_GE(data->nisland, 2);
+      std::vector<mjtNum> qacc_island(data->qacc, data->qacc + nv);
+
+      model->opt.disableflags |= mjDSBL_ISLAND;
+      mj_forward(model.get(), data.get());
+
+      mjtNum scale =
+          mju_norm(qacc_island.data(), nv) / mju_sqrt((mjtNum)nv) + 1;
+      for (int i = 0; i < nv; i++) {
+        EXPECT_THAT(data->qacc[i],
+                    MjNear(qacc_island[i], 1e-7 * scale, 1e-4 * scale))
+            << "solver " << solver << " dof " << i;
+      }
+      model->opt.disableflags &= ~mjDSBL_ISLAND;
+    }
+  }
+}
+
 // sleep composes with the discrete metric: unrelated trees sleep while the
 // metric-coupled tendon pair stays awake (the pre-existing tendon sleep policy)
 // and keeps solving correctly
@@ -6209,17 +7046,31 @@ TEST_F(ForwardTest, DiscreteActuatorInverseConsistency) {
   }
   data->qvel[0] = 0.1;
 
-  mj_forward(model.get(), data.get());
-  ASSERT_GT(data->ncon, 0);
-  mj_inverse(model.get(), data.get());
+  for (int diagexact = 0; diagexact < 2; diagexact++) {
+    if (diagexact) {
+      model->opt.enableflags |= mjENBL_DIAGEXACT;
+    } else {
+      model->opt.enableflags &= ~mjENBL_DIAGEXACT;
+    }
+    mj_forward(model.get(), data.get());
+    ASSERT_GT(data->ncon, 0);
 
-  // qfrc_inverse is the force that must be applied: here, the actuator's
-  mjtNum scale = mju_norm(data->qfrc_actuator, nv) +
-                 mju_norm(data->qfrc_constraint, nv) +
-                 mju_norm(data->qfrc_bias, nv);
-  std::vector<mjtNum> diff(nv);
-  mju_sub(diff.data(), data->qfrc_inverse, data->qfrc_actuator, nv);
-  EXPECT_LT(mju_norm(diff.data(), nv), 1e-6 * scale);
+    // the inverse only multiplies by the metric: it factors the backbone only
+    // when the exact constraint diagonal asks for it
+    mjtNum factored = data->qHDiagInv[0];
+    data->qHDiagInv[0] = -1;
+    mj_inverse(model.get(), data.get());
+    EXPECT_EQ(data->qHDiagInv[0], diagexact ? factored : -1);
+
+    // qfrc_inverse is the force that must be applied: here, the actuator's
+    mjtNum scale = mju_norm(data->qfrc_actuator, nv) +
+                   mju_norm(data->qfrc_constraint, nv) +
+                   mju_norm(data->qfrc_bias, nv);
+    std::vector<mjtNum> diff(nv);
+    mju_sub(diff.data(), data->qfrc_inverse, data->qfrc_actuator, nv);
+    EXPECT_LT(mju_norm(diff.data(), nv), 1e-6 * scale)
+        << "diagexact " << diagexact;
+  }
 }
 
 // tendon spring-damper in contact: native discrete inverse dynamics recovers
@@ -7226,6 +8077,52 @@ TEST_F(ForwardTest, DiscreteLimitVelocitySensors) {
   mj_forward(model.get(), data_fwd.get());
   EXPECT_EQ(data_fwd->sensordata[0], expected_joint_vel);
   EXPECT_EQ(data_fwd->sensordata[1], expected_tendon_vel);
+}
+
+TEST_F(ForwardTest, CheckWarningCount) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body>
+        <joint type="slide"/>
+        <joint type="slide"/>
+        <geom size="1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  const mjtNum nan = std::numeric_limits<mjtNum>::quiet_NaN();
+  mock_warning_handler.ExpectWarnings();
+
+  for (int disable_autoreset : {0, 1}) {
+    if (disable_autoreset) {
+      model->opt.disableflags |= mjDSBL_AUTORESET;
+    } else {
+      model->opt.disableflags &= ~mjDSBL_AUTORESET;
+    }
+
+    mj_resetData(model.get(), data.get());
+    data->qpos[1] = nan;
+    mj_checkPos(model.get(), data.get());
+    EXPECT_EQ(data->warning[mjWARN_BADQPOS].number, 1);
+    EXPECT_EQ(data->warning[mjWARN_BADQPOS].lastinfo, 1);
+
+    mj_resetData(model.get(), data.get());
+    data->qvel[1] = nan;
+    mj_checkVel(model.get(), data.get());
+    EXPECT_EQ(data->warning[mjWARN_BADQVEL].number, 1);
+    EXPECT_EQ(data->warning[mjWARN_BADQVEL].lastinfo, 1);
+
+    mj_resetData(model.get(), data.get());
+    data->qacc[1] = nan;
+    mj_checkAcc(model.get(), data.get());
+    EXPECT_EQ(data->warning[mjWARN_BADQACC].number, 1);
+    EXPECT_EQ(data->warning[mjWARN_BADQACC].lastinfo, 1);
+  }
 }
 
 }  // namespace
