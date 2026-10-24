@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include "kinematic_tree.h"
-#include "third_party/mujoco/plugin/usd_decoder/newton_tokens.h"
+#include "newton_tokens.h"
 
 #include <map>
 #include <memory>
@@ -145,7 +145,11 @@ ExtractedPrims ExtractPrims(pxr::UsdStageRefPtr stage) {
       root->physics_scene = prim_path;
     }
 
-    if (prim.IsA<pxr::UsdGeomGprim>()) {
+    // A site gprim is only a site, not also a visual geom (which would add
+    // mass to its body).
+    const bool is_site = prim.HasAPI(NewtonTokens->NewtonSiteAPI) ||
+                         prim.HasAPI<pxr::MjcPhysicsSiteAPI>();
+    if (prim.IsA<pxr::UsdGeomGprim>() && !is_site) {
       bool has_collision_api = prim.HasAPI<pxr::UsdPhysicsCollisionAPI>();
       if (has_collision_api) {
         bool collision_enabled = false;

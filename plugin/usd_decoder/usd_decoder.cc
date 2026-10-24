@@ -41,7 +41,7 @@
 #include <mujoco/mujoco.h>
 #include "kinematic_tree.h"
 #include "material_parsing.h"
-#include "third_party/mujoco/plugin/usd_decoder/newton_tokens.h"
+#include "newton_tokens.h"
 #include <pxr/base/gf/declare.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/matrix4f.h>
@@ -898,6 +898,12 @@ void ParseUsdPhysicsMassAPIForBody(mjsBody* body,
     newton_inertia_attr.Get(&inertia);
     if (inertia.size() == 6) {
       std::copy(inertia.begin(), inertia.end(), body->fullinertia);
+      // newton:inertia supersedes the decomposed physics:diagonalInertia and
+      // physics:principalAxes that converters author next to it for generic
+      // UsdPhysics consumers; fullinertia and inertia cannot both be set.
+      body->inertia[0] = body->inertia[1] = body->inertia[2] = 0;
+      body->iquat[0] = 1;
+      body->iquat[1] = body->iquat[2] = body->iquat[3] = 0;
     }
   }
 }
@@ -2044,9 +2050,12 @@ void ParseUsdPhysicsCollider(mjSpec* spec,
     ParseMjcPhysicsCollisionAPI(geom, pxr::MjcPhysicsCollisionAPI(prim));
   }
 
+  // UsdPhysics binds physics materials with the "physics" purpose; the
+  // purpose lookup falls back to an all-purpose binding.
   pxr::UsdShadeMaterial bound_material =
       pxr::UsdShadeMaterialBindingAPI(prim).ComputeBoundMaterial(
-          &caches.bindings_cache, &caches.collection_query_cache);
+          &caches.bindings_cache, &caches.collection_query_cache,
+          pxr::TfToken("physics"));
   if (bound_material) {
     pxr::UsdPrim bound_material_prim = bound_material.GetPrim();
     if (bound_material_prim.HasAPI<pxr::UsdPhysicsMaterialAPI>() ||
