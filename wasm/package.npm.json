@@ -1,6 +1,6 @@
 {
   "name": "@lighttransport/mujoco-wasm",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "description": "Physics-only MuJoCo WebAssembly bindings",
   "repository": {
     "type": "git",

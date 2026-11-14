@@ -86,6 +86,22 @@ class PhysicsModel {
   int neq() const { return model_->neq; }
   int ntendon() const { return model_->ntendon; }
   int nsensordata() const { return model_->nsensordata; }
+  // Plasticity diagnostics (v4+): whether the compiled model carries
+  // plastic state, the compiled joint/flex yield thresholds, and the
+  // tendon type (mjTENDON_FIXED=0 / mjTENDON_SPATIAL=1).
+  int nplastic() const { return model_->nplastic; }
+  val jnt_springyield() const { return val(typed_memory_view(model_->njnt, model_->jnt_springyield)); }
+  val tendon_springyield() const { return val(typed_memory_view(model_->ntendon, model_->tendon_springyield)); }
+  val flex_yield() const {
+    const int n = model_->nflex * 2;
+    if (n > 0) {
+      return val(typed_memory_view(n, model_->flex_yield));
+    }
+    // zero-length models have a null yield pointer; borrow a dummy address
+    static const mjtNum kDummy = 0;
+    return val(typed_memory_view(0, &kDummy));
+  }
+  val tendon_type() const { return val(typed_memory_view(model_->ntendon, model_->tendon_type)); }
   // Diagnostics: passive joint/dof properties + compiled joint ranges.
   // Writable collision masks. Lets the backend contact-filter an IK-held
   // chain (a kinematically pinned leg in ground contact pumps momentum into
@@ -203,6 +219,33 @@ class PhysicsData {
     return val(typed_memory_view(model_->nbody * 4, data_->xquat));
   }
 
+  // Cartesian quaternion orientations, next to xquat/geom_xmat/site_xmat:
+  // (4 per body/geom/site). v4+.
+  val xiquat() const {
+    return val(typed_memory_view(model_->nbody * 4, data_->xiquat));
+  }
+
+  val geom_xquat() const {
+    return val(typed_memory_view(model_->ngeom * 4, data_->geom_xquat));
+  }
+
+  val site_xquat() const {
+    return val(typed_memory_view(model_->nsite * 4, data_->site_xquat));
+  }
+
+  // Plastic state vector (nplastic x 1): plastic strains plus 1D rod
+  // reference frames and twists (v4+). Read/write; persisted by
+  // mjSTATE_PLASTIC. All-zero when the compiled model has no plastic
+  // elements.
+  val plastic() const {
+    const int n = model_->nplastic;
+    if (n > 0) {
+      return val(typed_memory_view(n, data_->plastic));
+    }
+    static const mjtNum kDummy = 0;
+    return val(typed_memory_view(0, &kDummy));
+  }
+
   val geom_xpos() const {
     return val(typed_memory_view(model_->ngeom * 3, data_->geom_xpos));
   }
@@ -272,6 +315,24 @@ class PhysicsData {
     return val(typed_memory_view(contact_buf_.size(), contact_buf_.data()));
   }
 
+  // Per-contact relative surface velocity (geom[1] - geom[0]) in the contact
+  // frame (v4+): 3 doubles per active contact — [tangent1, tangent2, spin].
+  // Zero unless a geom specifies surfacevel or flg_surfacevel is set.
+  // Backed by a member buffer so the returned view stays valid until the
+  // next call. Same ordering as contacts().
+  val contactsSurfaceVel() const {
+    const int n = data_->ncon;
+    surfacevel_buf_.resize(static_cast<std::size_t>(n) * 3);
+    for (int i = 0; i < n; ++i) {
+      const mjContact& c = data_->contact[i];
+      double* row = surfacevel_buf_.data() + static_cast<std::size_t>(i) * 3;
+      row[0] = c.surfacevel[0];
+      row[1] = c.surfacevel[1];
+      row[2] = c.surfacevel[2];
+    }
+    return val(typed_memory_view(surfacevel_buf_.size(), surfacevel_buf_.data()));
+  }
+
   // Diagonal of the joint-space inertia (mass) matrix, nv entries, from the
   // last forward pass. M is stored sparse; model->dof_Madr[i] addresses the
   // diagonal element of DOF i. Lets callers scale PD gains by per-joint
@@ -313,6 +374,7 @@ class PhysicsData {
   mjModel* model_;
   mjData* data_ = nullptr;
   mutable std::vector<double> contact_buf_;
+  mutable std::vector<double> surfacevel_buf_;
   mutable std::vector<double> qm_diag_buf_;
   mutable std::vector<double> jac_buf_;
 };
@@ -586,6 +648,13 @@ void tendonWrapSite(mjsTendon* t, const std::string& siteName) {
   }
 }
 
+// Tendon spring yield (v4+): plastic yield threshold for the tendon
+// spring; 0 (default) is elastic. Plasticity state lives in
+// mjData.plastic (readback via data.plastic()).
+void tendonSetSpringYield(mjsTendon* t, double v) {
+  t->springyield = v;
+}
+
 // Body helpers — thin wrappers so we can chain calls from JS.
 
 mjsBody* addBody(mjsBody* parent, const std::string& name) {
@@ -834,6 +903,13 @@ void setJointFrictionLoss(mjsJoint* j, double f) {
   j->frictionloss = f;
 }
 
+// Joint spring yield (v4+): plastic yield threshold for the joint
+// spring; 0 (default) is elastic. Plasticity state lives in
+// mjData.plastic (readback via data.plastic()).
+void setJointSpringYield(mjsJoint* j, double v) {
+  j->springyield = v;
+}
+
 // Light helpers
 
 mjsLight* addLight(mjsBody* body, const std::string& name) {
@@ -899,6 +975,11 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("njnt", &PhysicsModel::njnt)
       .function("neq", &PhysicsModel::neq)
       .function("ntendon", &PhysicsModel::ntendon)
+      .function("nplastic", &PhysicsModel::nplastic)
+      .function("jnt_springyield", &PhysicsModel::jnt_springyield)
+      .function("tendon_springyield", &PhysicsModel::tendon_springyield)
+      .function("flex_yield", &PhysicsModel::flex_yield)
+      .function("tendon_type", &PhysicsModel::tendon_type)
       .function("jnt_stiffness", &PhysicsModel::jnt_stiffness)
       .function("jnt_range", &PhysicsModel::jnt_range)
       .function("dof_damping", &PhysicsModel::dof_damping)
@@ -942,6 +1023,7 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
   emscripten::constant("mjENBL_ENERGY", static_cast<int>(mjENBL_ENERGY));
   emscripten::constant("mjENBL_FWDINV", static_cast<int>(mjENBL_FWDINV));
   emscripten::constant("mjENBL_INVDISCRETE", static_cast<int>(mjENBL_INVDISCRETE));
+  emscripten::constant("mjENBL_SPECULATIVE", static_cast<int>(mjENBL_SPECULATIVE));
 
   // Disable flags (mjDSBL_*) authored via `mjc:flag:<name> = disable`.
   emscripten::constant("mjDSBL_CONSTRAINT", static_cast<int>(mjDSBL_CONSTRAINT));
@@ -976,6 +1058,10 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("sensordata", &PhysicsData::sensordata)
       .function("xpos", &PhysicsData::xpos)
       .function("xquat", &PhysicsData::xquat)
+      .function("xiquat", &PhysicsData::xiquat)
+      .function("geom_xquat", &PhysicsData::geom_xquat)
+      .function("site_xquat", &PhysicsData::site_xquat)
+      .function("plastic", &PhysicsData::plastic)
       .function("geom_xpos", &PhysicsData::geom_xpos)
       .function("geom_xmat", &PhysicsData::geom_xmat)
       .function("mocap_pos", &PhysicsData::mocap_pos)
@@ -987,7 +1073,8 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .function("ncon", &PhysicsData::ncon)
       .function("contacts", &PhysicsData::contacts)
       .function("jacBody", &PhysicsData::jacBody)
-      .function("jacBodyCom", &PhysicsData::jacBodyCom);
+      .function("jacBodyCom", &PhysicsData::jacBodyCom)
+      .function("contactsSurfaceVel", &PhysicsData::contactsSurfaceVel);
 
   // --- Load from binary ---
   emscripten::function("loadModelFromArrayBuffer", &LoadModelFromArrayBuffer,
@@ -1031,6 +1118,8 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .class_function("wrapJoint", &tendonWrapJoint,
                       emscripten::allow_raw_pointers())
       .class_function("wrapSite", &tendonWrapSite,
+                      emscripten::allow_raw_pointers())
+      .class_function("setSpringYield", &tendonSetSpringYield,
                       emscripten::allow_raw_pointers());
 
   // --- Geom ---
@@ -1078,6 +1167,7 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
       .class_function("setRange", &setJointRange, emscripten::allow_raw_pointers())
       .class_function("setDamping", &setJointDamping, emscripten::allow_raw_pointers())
       .class_function("setStiffness", &setJointStiffness, emscripten::allow_raw_pointers())
+      .class_function("setSpringYield", &setJointSpringYield, emscripten::allow_raw_pointers())
       .class_function("setArmature", &setJointArmature, emscripten::allow_raw_pointers())
       .class_function("setFrictionLoss", &setJointFrictionLoss, emscripten::allow_raw_pointers());
 
@@ -1097,6 +1187,10 @@ EMSCRIPTEN_BINDINGS(mujoco_physics_wasm) {
   emscripten::constant("GEOM_CYLINDER", static_cast<int>(mjGEOM_CYLINDER));
   emscripten::constant("GEOM_BOX", static_cast<int>(mjGEOM_BOX));
   emscripten::constant("GEOM_MESH", static_cast<int>(mjGEOM_MESH));
+
+  // --- Tendon type constants (mjModel.tendon_type) ---
+  emscripten::constant("TENDON_FIXED", static_cast<int>(mjTENDON_FIXED));
+  emscripten::constant("TENDON_SPATIAL", static_cast<int>(mjTENDON_SPATIAL));
 
   // --- Joint type constants ---
   emscripten::constant("JNT_FREE", static_cast<int>(mjJNT_FREE));

@@ -36,12 +36,40 @@ Supported core entry points:
 - `mj.mj_stepN(model, data, nstep)`
 - `mj.mj_resetData(model, data)`
 
+Data-level orientation readback (MuJoCo v4+):
+
+- `data.xiquat()`, `data.geom_xquat()`, `data.site_xquat()`
+  (4 doubles per body/geom/site; Cartesian quaternions, next to
+  `xquat()`/`geom_xmat()`/`site_xmat()`)
+
+Contacts:
+
+- `data.ncon()`, `data.contacts()` (10 doubles each:
+  `dist, px,py,pz, nx,ny,nz, geom1, geom2, normalForce`)
+- `data.contactsSurfaceVel()` (MuJoCo v4+; 3 doubles each:
+  `tangent1, tangent2, spin` — the relative surface velocity,
+  `geom[1] - geom[0]`, in the contact frame; same contact ordering as
+  `contacts()`)
+
+Plasticity diagnostics (MuJoCo v4+):
+
+- `model.nplastic()` — size of the plastic state vector
+- `model.jnt_springyield()`, `model.tendon_springyield()` (njnt / ntendon)
+- `model.flex_yield()` (nflex x 2; empty when the model has no flexes)
+- `model.tendon_type()` (ntendon; `mj.TENDON_FIXED` = 0 / `mj.TENDON_SPATIAL` = 1)
+- `data.plastic()` — the `nplastic`-element plastic state vector
+  (read/write; persisted by `mjSTATE_PLASTIC`)
+- spec-time authoring: `mj.MjsJoint.setSpringYield(joint, v)` and
+  `mj.MjsTendon.setSpringYield(tendon, v)`
+- `mj.mjENBL_SPECULATIVE` (enable bit for v4 speculative contacts)
+
 Procedural model construction helpers:
 
 - `new mj.MjSpec()`
-- `mj.MjsBody.add/setPos/setQuat/setMass`
-- `mj.MjsGeom.add/setType/setSize/setPos/setQuat/setMass/setRGBA/setFriction/setConType/setConAffinity/setCondim`
-- `mj.MjsJoint.add/addFree/setType/setAxis/setRange/setDamping`
+- `mj.MjsBody.add/setPos/setQuat/setMass/setIPos/setIQuat/setDiagInertia/setMocap`
+- `mj.MjsGeom.add/setType/setSize/setPos/setQuat/setMass/setRGBA/setFriction/setConType/setConAffinity/setCondim/setPriority/setSolmix/setMargin/setGap/setSolref/setSolimp`
+- `mj.MjsJoint.add/addFree/setType/setAxis/setRange/setDamping/setStiffness/setArmature/setFrictionLoss/setSpringYield`
+- `mj.MjsTendon.wrapJoint/wrapSite/setSpringYield`
 - Geom constants: `GEOM_PLANE`, `GEOM_BOX`, `GEOM_SPHERE`, ...
 - Joint constants: `JNT_FREE`, `JNT_BALL`, `JNT_SLIDE`, `JNT_HINGE`
 
