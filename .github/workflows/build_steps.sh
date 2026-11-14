@@ -625,8 +625,14 @@ package_wasm() {
     VERSION="${VERSION#v}"
     npm --prefix wasm/dist version "${VERSION}" --no-git-tag-version --allow-same-version
     npm pack --dry-run ./wasm/dist
+    # npm refuses prereleases on the default 'latest' dist-tag; publish them
+    # under the prerelease identifier (e.g. '4.0.2-usd' -> --tag usd).
+    local publish_tag=()
+    if [[ "${VERSION}" == *-* ]]; then
+        publish_tag=(--tag "${VERSION##*-}")
+    fi
     if [[ "${PUBLISH_TO_NPM:-1}" == "1" ]]; then
-        npm publish ./wasm/dist --access public --provenance
+        npm publish ./wasm/dist --access public --provenance "${publish_tag[@]}"
     fi
 }
 
