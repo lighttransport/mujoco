@@ -298,6 +298,78 @@ TEST_F(CoreConstraintTest, SurfaceVelocityMeshFrame) {
   EXPECT_NEAR(speed, 0.4 * r, 5e-3);
 }
 
+// surfacevel: writing mjContact.surfacevel directly matches geom_surfacevel
+TEST_F(CoreConstraintTest, SurfaceVelocityExternalContact) {
+  constexpr char xml_geom[] = R"(
+  <mujoco>
+    <worldbody>
+      <geom type="plane" size="5 5 .1" condim="4" surfacevel=".5 -.2 0  0 0 1"/>
+      <body pos=".3 .4 .1">
+        <freejoint/>
+        <geom type="box" size=".1 .1 .1" mass="1" condim="4"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  constexpr char xml_plain[] = R"(
+  <mujoco>
+    <worldbody>
+      <geom type="plane" size="5 5 .1" condim="4"/>
+      <body pos=".3 .4 .1">
+        <freejoint/>
+        <geom type="box" size=".1 .1 .1" mass="1" condim="4"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model_a = LoadModelFromString(xml_geom, error, sizeof(error));
+  ASSERT_THAT(model_a.get(), testing::NotNull()) << error;
+  MjDataPtr data_a = MakeData(model_a);
+
+  MjModelPtr model_b = LoadModelFromString(xml_plain, error, sizeof(error));
+  ASSERT_THAT(model_b.get(), testing::NotNull()) << error;
+  MjDataPtr data_b = MakeData(model_b);
+
+  for (const mjtCone cone : {mjCONE_PYRAMIDAL, mjCONE_ELLIPTIC}) {
+    model_a->opt.cone = cone;
+    model_b->opt.cone = cone;
+    model_b->flg_surfacevel = 0;
+
+    mj_resetData(model_a.get(), data_a.get());
+    mj_forward(model_a.get(), data_a.get());
+    ASSERT_EQ(data_a->ncon, 4);
+
+    mj_resetData(model_b.get(), data_b.get());
+    mj_fwdPosition(model_b.get(), data_b.get());
+    ASSERT_EQ(data_b->ncon, data_a->ncon);
+
+    // contacts on plain model have zero-initialized surfacevel
+    for (int i = 0; i < data_b->ncon; i++) {
+      EXPECT_EQ(data_b->contact[i].surfacevel[0], 0);
+      EXPECT_EQ(data_b->contact[i].surfacevel[1], 0);
+      EXPECT_EQ(data_b->contact[i].surfacevel[2], 0);
+      mju_copy3(data_b->contact[i].surfacevel, data_a->contact[i].surfacevel);
+    }
+
+    // gated off when flg_surfacevel == 0
+    mj_forwardSkip(model_b.get(), data_b.get(), mjSTAGE_POS, 0);
+    EXPECT_NEAR(data_b->qacc[0], 0.0, MjTol(1e-12, 1e-6));
+    EXPECT_NEAR(data_b->qacc[1], 0.0, MjTol(1e-12, 1e-6));
+    EXPECT_NEAR(data_b->qacc[5], 0.0, MjTol(1e-12, 1e-6));
+
+    // enabling flg_surfacevel matches geom_surfacevel exactly
+    model_b->flg_surfacevel = 1;
+    mj_forwardSkip(model_b.get(), data_b.get(), mjSTAGE_POS, 0);
+    for (int i = 0; i < data_a->nefc; i++) {
+      EXPECT_NEAR(data_b->efc_vel[i], data_a->efc_vel[i], MjTol(1e-12, 1e-6));
+    }
+    for (int i = 0; i < model_a->nv; i++) {
+      EXPECT_NEAR(data_b->qacc[i], data_a->qacc[i], MjTol(1e-11, 1e-5));
+    }
+  }
+}
+
 static const char* const kDoflessContactPath =
     "engine/testdata/core_constraint/dofless_contact.xml";
 static const char* const kDoflessTendonFrictionalPath =
@@ -568,131 +640,6 @@ TEST_F(CoreConstraintTest, ConstraintUpdateImpl) {
   mj_deleteModel(model);
 }
 
-// check mjEQ_FLEXVERT
-TEST_F(CoreConstraintTest, FlexvertEquality) {
-  constexpr char xml[] = R"(
-  <mujoco>
-    <option jacobian="dense"/>
-    <worldbody>
-      <flexcomp name="flex" type="grid" count="3 3 1" spacing=".05 .15 .25" dim="2">
-        <edge equality="vert"/>
-      </flexcomp>
-    </worldbody>
-  </mujoco>
-  )";
-  char error[1024];
-  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
-  ASSERT_THAT(model.get(), testing::NotNull()) << error;
-  MjDataPtr data = MakeData(model);
-  ASSERT_EQ(model->neq, 1);
-  ASSERT_EQ(model->eq_type[0], mjEQ_FLEXVERT);
-  ASSERT_EQ(model->nflex, 1);
-  ASSERT_EQ(model->flex_vertnum[0], 9);
-  ASSERT_EQ(model->flex_edgenum[0], 16);
-
-  // step1 to populate flexvert_length
-  mj_step1(model.get(), data.get());
-  EXPECT_EQ(data->ne, 2 * model->flex_vertnum[0]);
-  EXPECT_EQ(data->nefc, 18);
-  for (int i = 0; i < 18; ++i) {
-    EXPECT_EQ(data->efc_type[i], mjCNSTR_EQUALITY);
-    EXPECT_NEAR(data->efc_pos[i], 0, MjTol(1e-9, 1e-5));
-  }
-
-  // check that efc_J has rigid-body motions in kernel
-  std::vector<mjtNum> qvel(model->nv);
-  std::vector<mjtNum> Jqvel(data->nefc);
-
-  // pure translations
-  for (int i = 0; i < 3; ++i) {
-    mju_zero(qvel.data(), model->nv);
-    for (int j = 0; j < model->flex_vertnum[0]; ++j) {
-      qvel[3 * j + i] = 1.0;
-    }
-    mj_mulJacVec(model.get(), data.get(), Jqvel.data(), qvel.data());
-    for (int j = 0; j < data->nefc; ++j) {
-      EXPECT_NEAR(Jqvel[j], 0, MjTol(1e-9, 1e-5));
-    }
-  }
-
-  // pure rotations
-  for (int i = 0; i < 3; ++i) {
-    mju_zero(qvel.data(), model->nv);
-    for (int j = 0; j < model->flex_vertnum[0]; ++j) {
-      mjtNum* p = data->flexvert_xpos + 3 * j;
-      mjtNum axisvel[3] = {0};
-      axisvel[i] = 1.0;
-      mjtNum linvel[3];
-      mju_cross(linvel, axisvel, p);
-      qvel[3 * j + 0] = linvel[0];
-      qvel[3 * j + 1] = linvel[1];
-      qvel[3 * j + 2] = linvel[2];
-    }
-    mj_mulJacVec(model.get(), data.get(), Jqvel.data(), qvel.data());
-    for (int j = 0; j < data->nefc; ++j) {
-      EXPECT_NEAR(Jqvel[j], 0, MjTol(1e-9, 1e-5));
-    }
-  }
-}
-
-// check mjEQ_FLEXVERT with pinned vertices (single pin and pinned neighborhood)
-TEST_F(CoreConstraintTest, FlexvertEqualityWithPin) {
-  // Single corner pin: vertex 0 is pinned, but its neighbors have DOFs, so all
-  // 9 vertices have non-empty flexvert_J rows (18 equality constraints).
-  constexpr char xml_single_pin[] = R"(
-  <mujoco>
-    <worldbody>
-      <flexcomp name="flex" type="grid" count="3 3 1" spacing=".05 .05 .05" dim="2" mass="1">
-        <edge equality="vert"/>
-        <pin id="0"/>
-      </flexcomp>
-    </worldbody>
-  </mujoco>
-  )";
-
-  // Pinned 2x2 corner patch (vertices 0, 1, 3, 4 in a 3x3 grid): vertex 0 has
-  // all its incident edge neighbors (1, 3, 4) pinned as well, so its 2 rows in
-  // flexvert_J have 0 nonzeros and are skipped (16 equality constraints).
-  constexpr char xml_patch_pin[] = R"(
-  <mujoco>
-    <worldbody>
-      <flexcomp name="flex" type="grid" count="3 3 1" spacing=".05 .05 .05" dim="2" mass="1">
-        <edge equality="vert"/>
-        <pin id="0 1 3 4"/>
-      </flexcomp>
-    </worldbody>
-  </mujoco>
-  )";
-
-  for (const char* xml : {xml_single_pin, xml_patch_pin}) {
-    for (mjtJacobian jac : {mjJAC_SPARSE, mjJAC_DENSE}) {
-      char error[1024];
-      mjSpec* spec = mj_parseXMLString(xml, nullptr, error, sizeof(error));
-      ASSERT_THAT(spec, NotNull()) << error;
-      spec->option.jacobian = jac;
-
-      mjModel* model = mj_compile(spec, nullptr);
-      ASSERT_THAT(model, NotNull()) << mjs_getError(spec);
-      mjData* data = mj_makeData(model);
-
-      int expected_ne = (xml == xml_single_pin) ? 18 : 16;
-      for (int step = 0; step < 5; ++step) {
-        mj_step(model, data);
-        EXPECT_EQ(data->ne, expected_ne);
-        EXPECT_EQ(data->nefc, expected_ne);
-        for (int r = 0; r < data->ne; ++r) {
-          EXPECT_GT(data->efc_diagA[r], 0);
-          EXPECT_TRUE(std::isfinite(data->efc_force[r]));
-        }
-      }
-
-      mj_deleteData(data);
-      mj_deleteModel(model);
-      mj_deleteSpec(spec);
-    }
-  }
-}
-
 // Test flex strain constraint with pinned nodes attached to freejoint parent
 TEST_F(CoreConstraintTest, BoxShellPinnedParentWithFreejoint) {
 #ifdef mjUSESINGLE
@@ -866,8 +813,6 @@ TEST_F(CoreConstraintTest, StrainConstraintNoPinning) {
   <option integrator="discrete" jacobian="dense"/>
   <worldbody>
     <body name="parent">
-      <joint type="free"/>
-      <geom type="box" size=".01 .01 .01" mass=".1"/>
       <flexcomp name="test" type="box"
                 spacing=".1 .1 .1" radius="0.001"
                 pos="0 0 .5" dof="trilinear" mass="1" dim="3">
@@ -913,15 +858,19 @@ TEST_F(CoreConstraintTest, StrainConstraintNoPinning) {
   }
   EXPECT_FALSE(has_bad_jacobian) << "Jacobian has NaN";
 
-  // Test rigid rotation: rotate flex and check strain still ~0
+  // Test rigid rotation: rotate flex nodes by 45 degrees around Z axis and
+  // check strain still ~0
   std::vector<mjtNum> qpos0(m->nq);
   mju_copy(qpos0.data(), d->qpos, m->nq);
-  // Rotate by 45 degrees around Z axis via quaternion
-  mjtNum angle = 0.785398;          // 45 degrees
-  d->qpos[3] = mju_cos(angle / 2);  // w
-  d->qpos[4] = 0;                   // x
-  d->qpos[5] = 0;                   // y
-  d->qpos[6] = mju_sin(angle / 2);  // z
+  mjtNum angle = 0.785398;  // 45 degrees
+  mjtNum c = mju_cos(angle), s = mju_sin(angle);
+  for (int n = 0; n < m->nflexnode; n++) {
+    int b = m->flex_nodebodyid[n];
+    mjtNum x0 = m->body_pos[3 * b + 0];
+    mjtNum y0 = m->body_pos[3 * b + 1];
+    d->qpos[3 * n + 0] = (c * x0 - s * y0) - x0;
+    d->qpos[3 * n + 1] = (s * x0 + c * y0) - y0;
+  }
   mj_forward(m.get(), d.get());
 
   mjtNum max_strain_rotated = 0;
@@ -950,8 +899,6 @@ TEST_F(CoreConstraintTest, StrainConstraintQuadratic) {
   <option integrator="discrete" jacobian="dense"/>
   <worldbody>
     <body name="parent">
-      <joint type="free"/>
-      <geom type="box" size=".01 .01 .01" mass=".1"/>
       <flexcomp name="test" type="box"
                 spacing=".1 .1 .1" radius="0.001"
                 pos="0 0 .5" dof="quadratic" mass="1" dim="3">
@@ -1081,8 +1028,6 @@ TEST_F(CoreConstraintTest, QuadraticAnisotropicStrain) {
   <worldbody>
     <geom type="plane" size="10 10 1"/>
     <body name="parent">
-      <joint type="free"/>
-      <geom type="box" size=".01 .01 .01" mass=".1"/>
       <flexcomp name="test" type="grid" count="3 3 3"
                 spacing=".1 .05 .08" radius="0.001"
                 pos="0 0 .5" dof="quadratic" mass="1" dim="3">
@@ -1147,6 +1092,72 @@ TEST_F(CoreConstraintTest, ContactSharedDofJacobian) {
   ASSERT_GE(data->nefc, 1);
 
   EXPECT_EQ(data->efc_J_rownnz[0], 2);
+}
+
+// Tendon friction and limit constraints skip sleeping trees.
+TEST_F(CoreConstraintTest, SleepingTendonFrictionAndLimit) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option>
+      <flag sleep="enable"/>
+    </option>
+    <worldbody>
+      <site name="s0" pos="0 0 0"/>
+      <site name="s0_b" pos="2 0 0"/>
+      <body name="body1" pos="0 0 0.2" sleep="init">
+        <joint name="jnt1" type="slide" axis="0 0 1"/>
+        <geom size=".1" contype="0" conaffinity="0"/>
+        <site name="s1" pos="0 0 0"/>
+      </body>
+      <body name="body2" pos="2 0 0.2">
+        <joint name="jnt2" type="slide" axis="0 0 1"/>
+        <geom size=".1" contype="0" conaffinity="0"/>
+        <site name="s2" pos="0 0 0"/>
+      </body>
+    </worldbody>
+    <tendon>
+      <spatial name="ten_friction" frictionloss="1">
+        <site site="s0"/>
+        <site site="s1"/>
+      </spatial>
+      <spatial name="ten_limit" range="0.5 1.0">
+        <site site="s0"/>
+        <site site="s1"/>
+      </spatial>
+      <spatial name="ten_awake_friction" frictionloss="1">
+        <site site="s0_b"/>
+        <site site="s2"/>
+      </spatial>
+      <spatial name="ten_awake_limit" range="0.5 1.0">
+        <site site="s0_b"/>
+        <site site="s2"/>
+      </spatial>
+    </tendon>
+  </mujoco>
+  )";
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+
+  for (mjtJacobian jac : {mjJAC_DENSE, mjJAC_SPARSE}) {
+    model->opt.jacobian = jac;
+    MjDataPtr data = MakeData(model);
+
+    ASSERT_EQ(model->ntree, 2);
+    ASSERT_EQ(data->ntree_awake, 1);
+    ASSERT_EQ(data->tree_awake[0], 0);
+    ASSERT_EQ(data->tree_awake[1], 1);
+
+    mj_forward(model.get(), data.get());
+
+    // Sleeping tendons skip friction and limit; awake tendons instantiate both.
+    EXPECT_EQ(data->nf, 1);
+    EXPECT_EQ(data->nl, 1);
+    EXPECT_EQ(data->tendon_efcadr[0], -1);
+    EXPECT_EQ(data->tendon_efcadr[1], -1);
+    EXPECT_GE(data->tendon_efcadr[2], 0);
+    EXPECT_GE(data->tendon_efcadr[3], 0);
+  }
 }
 
 static const char* const kJdotvConnect2dPath =
@@ -1285,8 +1296,6 @@ TEST_P(StrainConstraintRotatedTest, ResidualIsZero) {
     xml += "quat=\"" + param.body_quat + "\" ";
   }
   xml += R"(>
-      <joint type="free"/>
-      <geom type="box" size=".01 .01 .01" mass=".1"/>
       <flexcomp name="test" type="box" )";
 
   if (!param.flex_spacing.empty()) {
@@ -1776,6 +1785,7 @@ TEST_F(CoreConstraintTest, SparseRotationalJacobianMatchesDense) {
         <flexcomp name="flex" type="grid" count="3 3 3" spacing=".1 .1 .1" dim="3" dof="trilinear">
           <elasticity elastic2d="stretch" thickness="0.01"/>
           <contact selfcollide="none"/>
+          <pin id="0"/>
         </flexcomp>
       </body>
       <geom name="plane" type="plane" size="1 1 1" pos="0 0 -1"/>
@@ -1997,6 +2007,142 @@ TEST_F(CoreConstraintTest, ArenaOverflowClearsRowCounts) {
     if (integrator == mjINT_EULER) {
       EXPECT_EQ(d->parena, d->ncon * sizeof(mjContact));
     }
+  }
+}
+
+// tiny tangential residual T where T^3 underflows must not poison contact.H
+TEST_F(CoreConstraintTest, EllipticConeHessianSmallTangent) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option cone="elliptic"/>
+    <worldbody>
+      <geom type="plane" size="1 1 .1"/>
+      <body pos="0 0 .099">
+        <freejoint/>
+        <geom size=".1" condim="6" friction="1 .01 .001"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  std::array<char, 1024> error;
+  MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
+  ASSERT_THAT(m.get(), NotNull()) << error.data();
+  MjDataPtr d = MakeData(m);
+  mj_forward(m.get(), d.get());
+  ASSERT_EQ(d->ncon, 1);
+  ASSERT_EQ(d->nefc, 6);
+
+  const mjContact& con = d->contact[0];
+  const mjtNum mu = con.mu;
+  const mjtNum Dm = d->efc_D[0] / (mu * mu * (1 + mu * mu));
+
+  // T > 0 where T^2 is normal but T^3 underflows to 0 (even with subnormals),
+  // while orthogonal tangent components are 0 so Inf * 0 would produce NaN
+  const mjtNum T = MjEps(1e-110, 1e-17);
+  const mjtNum N = -0.5 * T / mu;
+  mjtNum jar[6] = {N / mu, T / con.friction[0], 0, 0, 0, 0};
+
+  mjtNum cost = 0;
+  mj_constraintUpdate(m.get(), d.get(), jar, &cost, /*flg_coneHessian=*/1);
+
+  EXPECT_EQ(d->efc_state[0], mjCNSTRSTATE_CONE);
+  EXPECT_FALSE(mju_isBad(cost));
+  for (int j = 0; j < 6; j++) {
+    EXPECT_FALSE(mju_isBad(d->efc_force[j])) << "row " << j;
+  }
+  for (int j = 0; j < 36; j++) {
+    EXPECT_FALSE(mju_isBad(d->contact[0].H[j])) << "entry " << j;
+  }
+
+  // check exact analytical cone Hessian entries along and orthogonal to Uhat_1
+  const mjtNum f0 = con.friction[0];
+  const mjtNum f1 = con.friction[1];
+  EXPECT_THAT(d->contact[0].H[0], MjNear(Dm * mu * mu, 1e-12, 1e-5));
+  EXPECT_THAT(d->contact[0].H[1], MjNear(-Dm * mu * mu * f0, 1e-12, 1e-5));
+  EXPECT_EQ(d->contact[0].H[2], 0);
+  EXPECT_THAT(d->contact[0].H[7], MjNear(Dm * mu * mu * f0 * f0, 1e-12, 1e-5));
+  EXPECT_THAT(d->contact[0].H[14],
+              MjNear(Dm * (mu * mu + 0.5) * f1 * f1, 1e-12, 1e-5));
+}
+
+TEST_F(CoreConstraintTest, TendonEqualitySetsEfcadr) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body name="b1" pos="0 0 1">
+        <joint name="j1" type="slide" axis="1 0 0"/>
+        <geom size=".1"/>
+      </body>
+      <body name="b2" pos="1 0 1">
+        <joint name="j2" type="slide" axis="1 0 0"/>
+        <geom size=".1"/>
+      </body>
+    </worldbody>
+    <tendon>
+      <fixed name="t1"><joint joint="j1" coef="1"/></fixed>
+      <fixed name="t2"><joint joint="j2" coef="1"/></fixed>
+    </tendon>
+    <equality>
+      <connect body1="b1" anchor="0 0 0"/>
+      <tendon tendon1="t1" tendon2="t2"/>
+    </equality>
+  </mujoco>
+  )";
+  std::array<char, 1024> error;
+  MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
+  ASSERT_THAT(m.get(), NotNull()) << error.data();
+  MjDataPtr d = MakeData(m);
+  mj_forward(m.get(), d.get());
+
+  // connect adds 3 efc rows (0..2); tendon equality (eq index 1) starts at
+  // efcadr 3
+  EXPECT_EQ(d->tendon_efcadr[0], 3);
+  EXPECT_EQ(d->tendon_efcadr[1], 3);
+}
+
+TEST_F(CoreConstraintTest, ZeroJacobianTendonDoesNotSetEfcadr) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <site name="s1" pos="0 0 0"/>
+      <site name="s2" pos="1 0 0"/>
+      <body pos="0 0 1">
+        <joint type="slide" axis="0 0 1"/>
+        <geom size=".1"/>
+      </body>
+    </worldbody>
+    <tendon>
+      <spatial name="t_eq">
+        <site site="s1"/>
+        <site site="s2"/>
+      </spatial>
+      <spatial name="t_fric" frictionloss="1">
+        <site site="s1"/>
+        <site site="s2"/>
+      </spatial>
+      <spatial name="t_lim" limited="true" range="0 0.5">
+        <site site="s1"/>
+        <site site="s2"/>
+      </spatial>
+    </tendon>
+    <equality>
+      <tendon tendon1="t_eq"/>
+    </equality>
+  </mujoco>
+  )";
+  std::array<char, 1024> error;
+  MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
+  ASSERT_THAT(m.get(), NotNull()) << error.data();
+
+  for (int jacobian : {mjJAC_DENSE, mjJAC_SPARSE}) {
+    m->opt.jacobian = jacobian;
+    MjDataPtr d = MakeData(m);
+    mj_forward(m.get(), d.get());
+
+    EXPECT_EQ(d->nefc, 0);
+    EXPECT_EQ(d->tendon_efcadr[0], -1);
+    EXPECT_EQ(d->tendon_efcadr[1], -1);
+    EXPECT_EQ(d->tendon_efcadr[2], -1);
   }
 }
 

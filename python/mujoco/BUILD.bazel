@@ -21,8 +21,12 @@ licenses(["notice"])
 exports_files([
     "LICENSE",
     "setup.py",
+    "mujoco_full/setup.py",
+    "studio_wasm/mujoco_studio_wasm/__init__.py",
+    "studio_wasm/setup.py",
     "build_requirements.txt",
     "CMakeLists.txt",
+    "render_filament.cc",
 ])
 
 # The bundled plugins as separate shared libraries in plugin/, linked against
@@ -33,12 +37,6 @@ mujoco_plugin(
     name = "plugin_actuator",
     library_name = "plugin/libactuator",
     deps = ["//plugin/actuator:register"],
-)
-
-mujoco_plugin(
-    name = "plugin_elasticity",
-    library_name = "plugin/libelasticity",
-    deps = ["//plugin/elasticity:register"],
 )
 
 mujoco_plugin(
@@ -57,6 +55,7 @@ py_library(
     name = "mujoco",
     srcs = [
         "__init__.py",
+        "_version.py",
         "batch.py",
         "gl_context.py",
         "minimize.py",
@@ -75,27 +74,23 @@ py_library(
         ":_specs",
         ":_structs",
         ":plugin_actuator",
-        ":plugin_elasticity",
         ":plugin_sdf",
         ":plugin_sensor",
     ],
     imports = [".."],
     visibility = [":visibility"],
     deps = [
-        "//python/mujoco/pypi:absl_py",
-        "//python/mujoco/pypi:epath",
         "//python/mujoco/pypi:glfw",
         "//python/mujoco/pypi:numpy",  # buildcleaner: keep
         "//python/mujoco/pypi:pyopengl",
-        "//python/mujoco/pypi:typing_extensions",
-        "//python/mujoco/pypi:websockets",
+        "//python/mujoco/rendering",
     ],
 )
 
 genrule(
     name = "_genrule_enum_traits.h",
     outs = ["enum_traits.h"],
-    cmd = "$(location //python/mujoco/codegen:generate_enum_traits) > $@",
+    cmd = "$(execpath //python/mujoco/codegen:generate_enum_traits) > $@",
     tools = ["//python/mujoco/codegen:generate_enum_traits"],
 )
 
@@ -184,7 +179,7 @@ mujoco_pybind_extension(
 genrule(
     name = "_genrule_function_traits.h",
     outs = ["function_traits.h"],
-    cmd = "$(location //python/mujoco/codegen:generate_function_traits) > $@",
+    cmd = "$(execpath //python/mujoco/codegen:generate_function_traits) > $@",
     tools = ["//python/mujoco/codegen:generate_function_traits"],
 )
 
@@ -401,6 +396,36 @@ cc_library(
     deps = ["//:libmujoco_hdrs"],
 )
 
+py_test(
+    name = "renderer_test",
+    srcs = ["renderer_test.py"],
+    env = select({
+        "@platforms//os:linux": {"MUJOCO_GL": "egl"},
+        "//conditions:default": {},
+    }),
+    deps = [
+        ":mujoco",
+        "//python/mujoco/pypi:absltest",
+        "//python/mujoco/pypi:numpy",
+        "//python/mujoco/pypi:parameterized",
+    ],
+)
+
+py_test(
+    name = "render_test",
+    srcs = ["render_test.py"],
+    env = select({
+        "@platforms//os:linux": {"MUJOCO_GL": "egl"},
+        "//conditions:default": {},
+    }),
+    deps = [
+        ":mujoco",
+        "//python/mujoco/pypi:absl_flags",
+        "//python/mujoco/pypi:absltest",
+        "//python/mujoco/pypi:numpy",
+    ],
+)
+
 mujoco_pybind_extension(
     name = "_batch",
     srcs = ["batch.cc"],
@@ -453,7 +478,7 @@ py_test(
 genrule(
     name = "_genrule_specs.cc.inc",
     outs = ["specs.cc.inc"],
-    cmd = "$(location //python/mujoco/codegen:generate_spec_bindings) > $@",
+    cmd = "$(execpath //python/mujoco/codegen:generate_spec_bindings) > $@",
     tools = ["//python/mujoco/codegen:generate_spec_bindings"],
 )
 
@@ -593,4 +618,11 @@ py_test(
         ":mujoco",
         "//python/mujoco/pypi:absltest",
     ],
+)
+
+py_test(
+    name = "egl_test",
+    srcs = ["egl_test.py"],
+    data = ["//python/mujoco/egl:__init__.py"],
+    deps = ["//python/mujoco/pypi:absltest"],
 )

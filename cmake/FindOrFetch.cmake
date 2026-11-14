@@ -60,6 +60,43 @@
 # https://cmake.org/cmake/help/latest/module/FetchContent.html#variables to
 # override this macro behaviour.
 
+if(NOT COMMAND _mujoco_ensure_git_retry_script)
+  macro(_mujoco_ensure_git_retry_script)
+    set(_MUJOCO_GIT_RETRY_SCRIPT "${CMAKE_BINARY_DIR}/CMakeFiles/mujoco_git_retry.cmake")
+    if(NOT EXISTS "${_MUJOCO_GIT_RETRY_SCRIPT}")
+      file(WRITE "${_MUJOCO_GIT_RETRY_SCRIPT}" [=[
+set(_cmd)
+set(_in_cmd FALSE)
+foreach(_i RANGE 3 ${CMAKE_ARGC})
+  if(_i EQUAL ${CMAKE_ARGC})
+    break()
+  endif()
+  set(_arg "${CMAKE_ARGV${_i}}")
+  if(_in_cmd)
+    list(APPEND _cmd "${_arg}")
+  elseif("${_arg}" STREQUAL "--")
+    set(_in_cmd TRUE)
+  endif()
+endforeach()
+set(_max_attempts 3)
+set(_delay 5)
+foreach(_attempt RANGE 1 ${_max_attempts})
+  execute_process(COMMAND ${_cmd} RESULT_VARIABLE _res)
+  if(_res EQUAL 0)
+    return()
+  endif()
+  if(_attempt LESS ${_max_attempts})
+    message(WARNING "Command failed (attempt ${_attempt}/${_max_attempts}, exit ${_res}); retrying in ${_delay}s: ${_cmd}")
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep ${_delay})
+    math(EXPR _delay "${_delay} * 2")
+  endif()
+endforeach()
+message(FATAL_ERROR "Command failed after ${_max_attempts} attempts: ${_cmd}")
+]=])
+    endif()
+  endmacro()
+endif()
+
 if(NOT COMMAND FindOrFetch)
   macro(FindOrFetch)
     if(NOT DEFINED MUJOCO_ENABLE_FETCHCONTENT)
@@ -168,63 +205,64 @@ if(NOT COMMAND FindOrFetch)
           find_package(${_ARGS_PACKAGE_NAME} REQUIRED)
           message(CHECK_PASS "found")
         else()
-          set(USE_LOCAL_TARBALL FALSE)
-          if(MUJOCO_CMAKE_DEP_CACHE)
-            # Try to find versioned library tarball.
-            set(TARBALL_PATH "${MUJOCO_CMAKE_DEP_CACHE}/${_ARGS_LIBRARY_NAME}-${_ARGS_GIT_TAG}.tar.gz")
-            if(EXISTS "${TARBALL_PATH}")
-              set(USE_LOCAL_TARBALL TRUE)
-            endif()
+        set(USE_LOCAL_TARBALL FALSE)
+        if(MUJOCO_CMAKE_DEP_CACHE)
+          # Try to find versioned library tarball.
+          set(TARBALL_PATH "${MUJOCO_CMAKE_DEP_CACHE}/${_ARGS_LIBRARY_NAME}-${_ARGS_GIT_TAG}.tar.gz")
+          if(EXISTS "${TARBALL_PATH}")
+            set(USE_LOCAL_TARBALL TRUE)
           endif()
-          if(_ARGS_PATCH_COMMAND)
-            set(_WRAPPED_PATCH_COMMAND ${CMAKE_COMMAND} -E env GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR} ${_ARGS_PATCH_COMMAND})
-          else()
-            set(_WRAPPED_PATCH_COMMAND)
-          endif()
+        endif()
+        if(_ARGS_PATCH_COMMAND)
+          set(_WRAPPED_PATCH_COMMAND ${CMAKE_COMMAND} -E env GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR} ${_ARGS_PATCH_COMMAND})
+        else()
+          set(_WRAPPED_PATCH_COMMAND)
+        endif()
 
-          set(FETCHCONTENT_QUIET OFF)
-          if(USE_LOCAL_TARBALL)
-            message(STATUS "mujoco::FindOrFetch: Using package cache for ${_ARGS_LIBRARY_NAME}: ${TARBALL_PATH}")
-            FetchContent_Declare(
-              ${_ARGS_LIBRARY_NAME}
-              URL ${TARBALL_PATH}
-              PATCH_COMMAND ${_WRAPPED_PATCH_COMMAND}
-            )
-          else()
-            find_package(Git REQUIRED)
-            message(STATUS "mujoco::FindOrFetch: Using FetchContent for ${_ARGS_LIBRARY_NAME}: ${_ARGS_GIT_REPO}")
-            FetchContent_Declare(
-              ${_ARGS_LIBRARY_NAME}
-              DOWNLOAD_COMMAND
-                ${CMAKE_COMMAND} -E rm -rf <SOURCE_DIR>
-                COMMAND ${GIT_EXECUTABLE} init <SOURCE_DIR>
-                COMMAND ${GIT_EXECUTABLE} -C <SOURCE_DIR> remote add origin ${_ARGS_GIT_REPO}
-                COMMAND ${GIT_EXECUTABLE} -C <SOURCE_DIR> fetch --depth 1 origin ${_ARGS_GIT_TAG}
-                COMMAND ${GIT_EXECUTABLE} -C <SOURCE_DIR> -c advice.detachedHead=false checkout FETCH_HEAD
-                COMMAND ${GIT_EXECUTABLE} -C <SOURCE_DIR> submodule update --init --recursive --depth 1
-              PATCH_COMMAND ${_WRAPPED_PATCH_COMMAND}
-              UPDATE_DISCONNECTED TRUE
-            )
-          endif()
-          if(${_ARGS_EXCLUDE_FROM_ALL})
-            FetchContent_GetProperties(${_ARGS_LIBRARY_NAME})
-            if(NOT ${${_ARGS_LIBRARY_NAME}_POPULATED})
-              FetchContent_Populate(${_ARGS_LIBRARY_NAME})
-              if(NOT "${_ARGS_CUSTOM_CMAKE}" STREQUAL "")
-                file(COPY
-                  "${_ARGS_CUSTOM_CMAKE}"
-                  DESTINATION "${${_ARGS_LIBRARY_NAME}_SOURCE_DIR}"
-                )
-              endif()
-              add_subdirectory(
-                ${${_ARGS_LIBRARY_NAME}_SOURCE_DIR} ${${_ARGS_LIBRARY_NAME}_BINARY_DIR}
-                EXCLUDE_FROM_ALL
+        set(FETCHCONTENT_QUIET OFF)
+        if(USE_LOCAL_TARBALL)
+          message(STATUS "mujoco::FindOrFetch: Using package cache for ${_ARGS_LIBRARY_NAME}: ${TARBALL_PATH}")
+          FetchContent_Declare(
+            ${_ARGS_LIBRARY_NAME}
+            URL ${TARBALL_PATH}
+            PATCH_COMMAND ${_WRAPPED_PATCH_COMMAND}
+          )
+        else()
+          find_package(Git REQUIRED)
+          message(STATUS "mujoco::FindOrFetch: Using FetchContent for ${_ARGS_LIBRARY_NAME}: ${_ARGS_GIT_REPO}")
+          _mujoco_ensure_git_retry_script()
+          FetchContent_Declare(
+            ${_ARGS_LIBRARY_NAME}
+            DOWNLOAD_COMMAND
+              ${CMAKE_COMMAND} -E rm -rf <SOURCE_DIR>
+              COMMAND ${GIT_EXECUTABLE} init <SOURCE_DIR>
+              COMMAND ${GIT_EXECUTABLE} -C <SOURCE_DIR> remote add origin ${_ARGS_GIT_REPO}
+              COMMAND ${CMAKE_COMMAND} -P "${_MUJOCO_GIT_RETRY_SCRIPT}" -- ${GIT_EXECUTABLE} -C <SOURCE_DIR> fetch --depth 1 origin ${_ARGS_GIT_TAG}
+              COMMAND ${GIT_EXECUTABLE} -C <SOURCE_DIR> -c advice.detachedHead=false checkout FETCH_HEAD
+              COMMAND ${CMAKE_COMMAND} -P "${_MUJOCO_GIT_RETRY_SCRIPT}" -- ${GIT_EXECUTABLE} -C <SOURCE_DIR> submodule update --init --recursive --depth 1
+            PATCH_COMMAND ${_WRAPPED_PATCH_COMMAND}
+            UPDATE_DISCONNECTED TRUE
+          )
+        endif()
+        if(${_ARGS_EXCLUDE_FROM_ALL})
+          FetchContent_GetProperties(${_ARGS_LIBRARY_NAME})
+          if(NOT ${${_ARGS_LIBRARY_NAME}_POPULATED})
+            FetchContent_Populate(${_ARGS_LIBRARY_NAME})
+            if(NOT "${_ARGS_CUSTOM_CMAKE}" STREQUAL "")
+              file(COPY
+                "${_ARGS_CUSTOM_CMAKE}"
+                DESTINATION "${${_ARGS_LIBRARY_NAME}_SOURCE_DIR}"
               )
             endif()
-          else()
-            FetchContent_MakeAvailable(${_ARGS_LIBRARY_NAME})
+            add_subdirectory(
+              ${${_ARGS_LIBRARY_NAME}_SOURCE_DIR} ${${_ARGS_LIBRARY_NAME}_BINARY_DIR}
+              EXCLUDE_FROM_ALL
+            )
           endif()
-          message(CHECK_PASS "Done")
+        else()
+          FetchContent_MakeAvailable(${_ARGS_LIBRARY_NAME})
+        endif()
+        message(CHECK_PASS "Done")
         endif()
       endif()
     else()

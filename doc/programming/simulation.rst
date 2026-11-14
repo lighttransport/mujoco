@@ -264,7 +264,7 @@ individual components and combinations of components. These are:
 Physics state
 """""""""""""
 The *physics state* (:ref:`mjSTATE_PHYSICS<mjtState>`) contains the main quantities which are time-integrated during
-stepping. These are ``mjData.{qpos, qvel, act, history}``:
+stepping. These are ``mjData.{qpos, qvel, act, history, plastic}``:
 
 Position: ``qpos``
   The configuration in generalized coordinates, denoted in the :ref:`Numerical Integration<geIntegration>` section as
@@ -285,6 +285,14 @@ History buffer: ``history``
   When actuators or sensors have a positive :at:`nsample` attribute (:ref:`actuators<actuator-general-nsample>`,
   :ref:`sensors<sensor-nsample>`), this buffer stores timestamped samples of previous
   control or sensor values. See :ref:`Delays<CDelay>` for details.
+
+Plastic state: ``plastic``
+  When joints or tendons have a positive :at:`springyield` attribute (:ref:`joints<body-joint-springyield>`,
+  :ref:`tendons<tendon-spatial-springyield>`) or flexes have a positive :at:`yield` attribute
+  (:ref:`flexes<flex-elasticity-yield>`), this buffer stores the mutable plastic spring reference configurations,
+  resting lengths, and element plastic strains, updated via return mapping at each step. For 1D elastic rods with
+  twist joints (:ref:`elasticity<flex-elasticity>`), it also stores the per-edge time-parallel reference frames and the
+  unwrapped reference twists of the interior vertices.
 
 .. _siFullPhysics:
 
@@ -784,7 +792,7 @@ Exceptions to the general rule that **integer** types are **not safe to change**
      - Unsafe
      - This is a possible to do safely if ``body_contype`` and ``body_conaffinity`` of the parent body are updated to be
        the bitwise OR over all child geoms.
-   * - ``geom_condim`` |br| ``geom_priority``
+   * - ``geom_condim`` |br| ``geom_priority`` |br| ``geom_castshadow``
      - Safe
      -
    * - ``cam_resolution``
@@ -808,6 +816,11 @@ derives once from the conventions of the specification: the damping of actuators
 :ref:`springdamper<body-joint-springdamper>`, the spring length of tendons which have none, and the model statistics.
 These keep the values computed for the model as compiled; to change them, recompile the spec or set the derived values
 directly.
+
+:ref:`mj_setConst` uses the passed :ref:`mjData` as workspace and wakes all :ref:`sleeping<siSleep>` trees, so call
+:ref:`mj_resetData` or restore the state before continuing the simulation. When sleeping is enabled, the poses of static
+bodies and the elements attached to them are computed only by :ref:`mj_makeData` and :ref:`mj_resetData`; call
+:ref:`mj_resetData` after modifying them.
 
 Exceptions to the general rule that **real-valued** types **are safe to change**:
 
@@ -855,9 +868,13 @@ Exceptions to the general rule that **real-valued** types **are safe to change**
      - If passing from a state where all geoms have zero surface velocity to a state where some geoms have
        non-zero surface velocity (or vice-versa), the ``flg_surfacevel`` flag in :ref:`mjModel` must be updated.
        This can be done directly or by calling :ref:`mj_setConst`.
-   * - ``{site,cam,light}_`` |br| ``{pos,quat}``
+   * - ``site_pos`` |br| ``site_quat``
+     - Safe with :ref:`mj_setConst`.
+     - Updates ``site_sameframe`` and tendon resting lengths; without :ref:`mj_setConst`, changes to sites compiled
+       with body- or inertia-aligned frames can be ignored.
+   * - ``cam_pos`` |br| ``cam_quat`` |br| ``light_pos`` |br| ``light_dir``
      - Mostly safe.
-     - For cameras and lights with tracking or targeting, :ref:`mj_setConst` is required.
+     - For cameras and lights with tracking, :ref:`mj_setConst` is required.
    * - ``tendon_stiffness`` |br| ``tendon_damping``
      - Mostly safe.
      - Affects whether kinematic trees are allowed to sleep. If changing from/to zero, :ref:`mj_setConst` is required.

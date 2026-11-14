@@ -29,7 +29,7 @@ set(MSVC_INCREMENTAL_DEFAULT ON)
 
 project(
   mujoco
-  VERSION 3.17.1
+  VERSION 4.0.2
   DESCRIPTION "MuJoCo Physics Simulator"
   HOMEPAGE_URL "https://mujoco.org"
 )
@@ -39,7 +39,7 @@ enable_language(CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
-if(NOT EMSCRIPTEN AND BUILD_SHARED_LIBS)
+if(NOT EMSCRIPTEN)
   option(MUJOCO_BUILD_EXAMPLES "Build samples for MuJoCo" ON)
   option(MUJOCO_BUILD_SIMULATE "Build simulate library for MuJoCo" ON)
   option(MUJOCO_BUILD_STUDIO "Build studio library for MuJoCo" OFF)
@@ -245,7 +245,6 @@ foreach(_target IN LISTS MUJOCO_CORE_TARGETS)
 endforeach()
 
 if(NOT EMSCRIPTEN)
-  add_subdirectory(plugin/elasticity)
   add_subdirectory(plugin/actuator)
   add_subdirectory(plugin/sensor)
   add_subdirectory(plugin/sdf)
@@ -305,6 +304,25 @@ endif()
 
 if(NOT EMSCRIPTEN)
   target_link_libraries(mujoco PRIVATE Threads::Threads)
+  if(APPLE)
+    target_link_options(
+      mujoco PRIVATE "-Wl,-unexported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/mujoco.unexported_symbols"
+    )
+    set_property(
+      TARGET mujoco
+      APPEND
+      PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/mujoco.unexported_symbols"
+    )
+  elseif(UNIX)
+    target_link_options(
+      mujoco PRIVATE "-Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/mujoco.lds"
+    )
+    set_property(
+      TARGET mujoco
+      APPEND
+      PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/mujoco.lds"
+    )
+  endif()
 endif()
 
 set_target_properties(
@@ -370,7 +388,7 @@ if(MUJOCO_BUILD_SIMULATE)
 endif()
 
 if(MUJOCO_BUILD_STUDIO)
-  add_subdirectory(src/experimental/studio)
+  add_subdirectory(studio)
 endif()
 
 if(MUJOCO_BUILD_EXAMPLES)
@@ -385,16 +403,6 @@ if(MUJOCO_WITH_USD)
     DIRECTORY ${USD_INSTALL_ROOT}/
     DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )
-
-  if(APPLE)
-    set_target_properties(mujoco PROPERTIES
-      BUILD_RPATH "${USD_INSTALL_ROOT}"
-      INSTALL_RPATH "@loader_path")
-  elseif(UNIX)
-    set_target_properties(mujoco PROPERTIES
-      BUILD_RPATH "${USD_INSTALL_ROOT}"
-      INSTALL_RPATH "$ORIGIN")
-  endif()
 
   add_subdirectory(src/experimental/usd)
   add_subdirectory(plugin/usd_decoder)

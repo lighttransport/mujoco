@@ -31,28 +31,18 @@ wp.set_module_options({"default_grid_stride": False})
 # TODO: Update kernel_analyzer to support Model fields as outputs so it can be enabled here.
 # kernel_analyzer: off
 @wp.kernel
-def _init_subtreemass(
+def _subtreemass(
+  body_subtreenum: wp.array[int],
   body_mass_in: wp.array2d[float],
   body_subtreemass_out: wp.array2d[float],
 ):
+  """Sums body_mass over the subtree, the contiguous body range [b, b + body_subtreenum[b])."""
   worldid, bodyid = wp.tid()
   body_mass_id = worldid % body_mass_in.shape[0]
-  body_subtreemass_id = worldid % body_subtreemass_out.shape[0]
-  body_subtreemass_out[body_subtreemass_id, bodyid] = body_mass_in[body_mass_id, bodyid]
-
-
-@wp.kernel
-def _accumulate_subtreemass(
-  body_parentid: wp.array[int],
-  body_subtreemass_io: wp.array2d[float],
-  body_tree_: wp.array[int],
-):
-  worldid, nodeid = wp.tid()
-  body_subtreemass_id = worldid % body_subtreemass_io.shape[0]
-  bodyid = body_tree_[nodeid]
-  parentid = body_parentid[bodyid]
-  if bodyid != 0:
-    wp.atomic_add(body_subtreemass_io, body_subtreemass_id, parentid, body_subtreemass_io[body_subtreemass_id, bodyid])
+  mass = float(0.0)
+  for j in range(bodyid, bodyid + body_subtreenum[bodyid]):
+    mass += body_mass_in[body_mass_id, j]
+  body_subtreemass_out[worldid % body_subtreemass_out.shape[0], bodyid] = mass
 
 
 @wp.kernel
@@ -588,14 +578,12 @@ def _set_bound(m: types.Model):
 def _set_fixed(m: types.Model):
   """Compute fixed quantities (do not depend on qpos0)."""
   nworld_subtreemass = m.body_subtreemass.shape[0]
-  wp.launch(_init_subtreemass, dim=(nworld_subtreemass, m.nbody), inputs=[m.body_mass], outputs=[m.body_subtreemass])
-  for i in reversed(range(len(m.body_tree))):
-    body_tree = m.body_tree[i]
-    wp.launch(
-      _accumulate_subtreemass,
-      dim=(nworld_subtreemass, body_tree.size),
-      inputs=[m.body_parentid, m.body_subtreemass, body_tree],
-    )
+  wp.launch(
+    _subtreemass,
+    dim=(nworld_subtreemass, m.nbody),
+    inputs=[m.body_subtreenum, m.body_mass],
+    outputs=[m.body_subtreemass],
+  )
 
 
 def _kinematics0(m: types.Model, d: types.Data):
@@ -805,18 +793,18 @@ def set_const(
 
   For selective updates, pass SetConstGroup flags to groups:
 
-  ===================  ==============================================
-  Modified Field       Groups
-  ===================  ==============================================
-  body_mass            SetConstGroup.ALL
-  geom_size            SetConstGroup.FIXED (or ALL if tendon wraps geom)
-  cam_pos, cam_quat    SetConstGroup.KIN0
-  light_pos, light_dir SetConstGroup.KIN0
-  eq_data              SetConstGroup.KIN0
-  body_inertia         SetConstGroup.INERT0
-  dof_armature         SetConstGroup.INERT0
-  qpos0                SetConstGroup.KIN0 | SetConstGroup.INERT0
-  ===================  ==============================================
+  ====================  =================================================
+  Modified Field        Groups
+  ====================  =================================================
+  body_mass             SetConstGroup.ALL
+  geom_size             SetConstGroup.FIXED (or ALL if tendon wraps geom)
+  cam_pos, cam_quat     SetConstGroup.KIN0
+  light_pos, light_dir  SetConstGroup.KIN0
+  eq_data               SetConstGroup.KIN0
+  body_inertia          SetConstGroup.INERT0
+  dof_armature          SetConstGroup.INERT0
+  qpos0                 SetConstGroup.KIN0 | SetConstGroup.INERT0
+  ====================  =================================================
 
   Computes:
     - Fixed quantities (SetConstGroup.FIXED):

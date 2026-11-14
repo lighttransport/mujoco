@@ -14,4 +14,28 @@
 # ==============================================================================
 """Convenience wrapper around the MuJoCo Filament C++/python bindings."""
 
-from mujoco._render_filament import *  # pylint: disable=wildcard-import
+import importlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from mujoco._render_filament import *  # pylint: disable=wildcard-import,g-import-not-at-top
+else:
+  try:
+    _rf = importlib.import_module('mujoco._render_filament')
+  except ImportError:
+    try:
+      # pylint: disable-next=protected-access
+      _rf = importlib.import_module('mujoco.studio._studio')._render_filament
+    except (ImportError, AttributeError) as _err:
+      raise ImportError(
+          "Filament rendering requires 'mujoco-studio' to be installed. "
+          'Install it with:\n'
+          '  pip install mujoco-studio\n'
+          'or install the full MuJoCo bundle with:\n'
+          '  pip install mujoco'
+      ) from _err
+  globals().update(
+      {k: v for k, v in vars(_rf).items() if not k.startswith('_')}
+  )
+  del _rf
+del importlib, TYPE_CHECKING

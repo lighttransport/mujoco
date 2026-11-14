@@ -147,9 +147,12 @@ ExtractedPrims ExtractPrims(pxr::UsdStageRefPtr stage) {
 
     // A site gprim is only a site, not also a visual geom (which would add
     // mass to its body).
-    const bool is_site = prim.HasAPI(NewtonTokens->NewtonSiteAPI) ||
-                         prim.HasAPI<pxr::MjcPhysicsSiteAPI>();
-    if (prim.IsA<pxr::UsdGeomGprim>() && !is_site) {
+    if (prim.HasAPI(NewtonTokens->NewtonSiteAPI) ||
+        prim.HasAPI<pxr::MjcPhysicsSiteAPI>()) {
+      current_node->sites.push_back(prim_path);
+      // Sites should not have children.
+      it.PruneChildren();
+    } else if (prim.IsA<pxr::UsdGeomGprim>()) {
       bool has_collision_api = prim.HasAPI<pxr::UsdPhysicsCollisionAPI>();
       if (has_collision_api) {
         bool collision_enabled = false;
@@ -163,13 +166,6 @@ ExtractedPrims ExtractPrims(pxr::UsdStageRefPtr stage) {
       } else {
         current_node->visual_gprims.push_back(prim_path);
       }
-    }
-
-    if (prim.HasAPI(NewtonTokens->NewtonSiteAPI) ||
-        prim.HasAPI<pxr::MjcPhysicsSiteAPI>()) {
-      current_node->sites.push_back(prim_path);
-      // Sites should not have children.
-      it.PruneChildren();
     }
 
     if (prim.IsA<pxr::UsdPhysicsJoint>()) {
@@ -283,10 +279,10 @@ std::unique_ptr<Node> BuildKinematicTree(const pxr::UsdStageRefPtr stage) {
   }
 
   std::vector<bool> visited(extraction.nodes.size());
+  visited[0] = true;
   while (!stack.empty()) {
     auto [current_body, parent] = stack.back();
     stack.pop_back();
-    visited[current_body] = true;
 
     Node* current_node = nullptr;
     if (current_body > 0) {
@@ -306,6 +302,7 @@ std::unique_ptr<Node> BuildKinematicTree(const pxr::UsdStageRefPtr stage) {
                   current_node->body_path.GetString().c_str());
         return nullptr;
       }
+      visited[i] = true;
       stack.emplace_back(
           i, current_body > 0 ? parent->children.back().get() : parent);
     }
